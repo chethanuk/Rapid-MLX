@@ -5,9 +5,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Audio workflows backed by the local OpenAI-compatible routes. The page
-/// deliberately starts no model on appearance: with today's single-model
-/// runtime, a model is swapped only when the user transcribes, loads voices,
-/// or synthesizes speech.
+/// deliberately starts no model on appearance. A voice engine loads only when
+/// the user transcribes, loads voices, or synthesizes speech; when an existing
+/// server exposes the shared audio lane, that engine co-loads in its process.
 struct AudioView: View {
     @Bindable var viewModel: AudioViewModel
     @Bindable var server: ServerManager
