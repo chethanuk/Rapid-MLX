@@ -80,4 +80,25 @@ struct VoiceCoLoadTests {
         #expect(result == false)
     }
 
+    @Test("crashed / stopped server is never co-loaded (no live serving alias)")
+    func notCoLoadedWhenCrashedOrStopped() {
+        let crashed = ServerManager(
+            testingState: .crashed(alias: "qwen3.6-27b-4bit", message: "boom"),
+            activeBearer: "test-bearer"
+        )
+        #expect(crashed.voiceCoLoadsOnPrimary == false)
+        let stopped = ServerManager(testingState: .stopped, activeBearer: "test-bearer")
+        #expect(stopped.voiceCoLoadsOnPrimary == false)
+    }
+
+    @Test("voice co-load requires BOTH a live model AND a bearer")
+    @MainActor
+    func coLoadRequiresBothReadyAndAuthed() {
+        // Bearer but no model.
+        let bearerOnly = ServerManager(testingState: .idle, activeBearer: "b")
+        #expect(bearerOnly.voiceCoLoadsOnPrimary == false)
+        // Model but no bearer.
+        let readyNoAuth = ServerManager(testingState: .ready(alias: "qwen3.6-27b-4bit"))
+        #expect(readyNoAuth.voiceCoLoadsOnPrimary == false)
+    }
 }
