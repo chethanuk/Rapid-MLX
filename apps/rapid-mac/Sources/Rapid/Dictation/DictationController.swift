@@ -417,10 +417,12 @@ final class DictationController {
 
     /// Brings the transcription model up.
     ///
-    /// Audio models must pass `residencyEligible: false`: the residency path
-    /// loads in-process, which the audio sidecar does not support, so the
-    /// server has to swap the whole process instead. Getting this wrong fails
-    /// at request time with nothing to distinguish it from a missing model.
+    /// Voice co-loading: when the app is already serving a chat LLM/VLM, the
+    /// voice lane mounts in that same process (``--enable-audio``), so dictation
+    /// reuses the primary server instead of swapping it away — LLM/VLM + speech
+    /// run side by side. Only when no primary model is up do we serve the
+    /// transcription model as its own audio process. See
+    /// ``ServerManager.ensureVoiceLane``.
     @discardableResult
     private func ensureModelServing(alias requestedAlias: String? = nil) async -> Bool {
         let alias = requestedAlias ?? modelAlias
@@ -432,11 +434,7 @@ final class DictationController {
         guard let facts = await catalogFacts(for: alias), facts.cached else {
             return false
         }
-        return await server.ensureServing(
-            alias: alias,
-            hfPath: facts.repo,
-            residencyEligible: false
-        )
+        return await server.ensureVoiceLane(alias: alias, hfPath: facts.repo)
     }
 
     private func catalogFacts(for alias: String) async -> CatalogFacts? {
