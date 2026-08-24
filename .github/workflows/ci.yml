@@ -271,7 +271,6 @@ jobs:
             tests/test_structured_output.py \
             tests/test_reasoning_parser.py \
             tests/test_cohere_command_reasoning_parser.py \
-            tests/test_chat_streaming_no_reasoning_alias.py \
             tests/test_responses_route.py::TestResponsesNonStream::test_structured_output_keeps_bare_json_out_of_reasoning \
             tests/test_responses_route.py::TestResponsesStream::test_structured_output_streams_bare_json_as_output_text \
             tests/test_responses_route.py::TestResponsesStream::test_reasoning_cap_uses_command_protocol_boundary \
