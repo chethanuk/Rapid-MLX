@@ -64,6 +64,15 @@ def test_parser_does_not_promote_undeclared_malformed_function():
     )
 
 
+def test_stream_does_not_wedge_on_undeclared_malformed_function():
+    raw = MALFORMED.replace("function=browse", "function=delete_everything")
+    parser = HermesToolParser(None)
+
+    result = parser.extract_tool_calls_streaming("", raw, raw, request=REQUEST)
+
+    assert result == {"content": raw}
+
+
 def test_parser_surfaces_declared_malformed_json_call_for_executor_feedback():
     result = HermesToolParser(None).extract_tool_calls(MALFORMED_JSON, request=REQUEST)
 
@@ -165,6 +174,27 @@ def test_stream_valid_call_after_malformed_call_restores_prose_suppression():
     events.extend(processor.finalize())
 
     assert len([event for event in events if event.type == "tool_call"]) == 2
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert "Suppressed." not in content
+
+
+def test_stream_valid_call_does_not_preserve_same_chunk_trailing_prose():
+    cfg = _make_cfg(
+        enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
+    )
+    processor = StreamingPostProcessor(cfg, tools_requested=True, request=REQUEST)
+    processor.reset()
+    valid_with_prose = (
+        '<tool_call>{"name":"browse","arguments":'
+        '{"url":"https://example.com"}}</tool_call>\nSuppressed.'
+    )
+
+    events = processor.process_chunk(_make_output(valid_with_prose))
+    events.extend(processor.finalize())
+
+    assert len([event for event in events if event.type == "tool_call"]) == 1
     content = "".join(
         event.content or "" for event in events if event.type in {"content", "finish"}
     )

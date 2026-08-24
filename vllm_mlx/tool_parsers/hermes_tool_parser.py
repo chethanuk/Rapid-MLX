@@ -164,6 +164,7 @@ class HermesToolParser(ToolParser):
     MALFORMED_JSON_INTENT_PATTERN = re.compile(
         r'^\{\s*"name"\s*:\s*"([A-Za-z0-9_.:-]+)"\s*,\s*"arguments"\s*:'
     )
+    CLOSED_TOOL_WRAPPER_PATTERN = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
     PARAM_PATTERN = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
     REASONING_PATTERN = re.compile(
         r"<tool_call_reasoning>(.*?)</tool_call_reasoning>", re.DOTALL
@@ -659,6 +660,12 @@ class HermesToolParser(ToolParser):
         # XML is malformed: its missing ``</function>`` must not keep the
         # streaming parser wedged after the call has been safely promoted.
         _, text = cls._scan_tool_call_shapes(text, request)
+        # A closed outer wrapper cannot still be an in-flight block. Unknown
+        # malformed function names intentionally remain ordinary content, so
+        # the request-aware scanner does not consume them; remove only their
+        # closed protocol boundary here to avoid wedging streaming forever on
+        # the unmatched inner ``<function=...>`` marker.
+        text = cls.CLOSED_TOOL_WRAPPER_PATTERN.sub("", text)
 
         # Shape #1 + #2 (<tool_call> wrapper)
         if text.count("<tool_call>") > text.count("</tool_call>"):
@@ -784,12 +791,7 @@ class HermesToolParser(ToolParser):
                         formatted = self._format_streaming_tool_calls(
                             new_calls, start_index=prev_completed
                         )
-                        residual = self._new_residual_content(
-                            len(previous_text), current_text, current_matches
-                        )
-                        if residual:
-                            formatted["content"] = residual
-                        if any(
+                        recovered_malformed = any(
                             call["arguments"].startswith(
                                 (
                                     "<malformed_function_body>",
@@ -797,7 +799,13 @@ class HermesToolParser(ToolParser):
                                 )
                             )
                             for call in new_calls
-                        ):
+                        )
+                        if recovered_malformed:
+                            residual = self._new_residual_content(
+                                len(previous_text), current_text, current_matches
+                            )
+                            if residual:
+                                formatted["content"] = residual
                             formatted["preserve_post_tool_content"] = True
                         return formatted
 
