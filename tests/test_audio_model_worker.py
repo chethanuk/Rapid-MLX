@@ -4,12 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib.util
+import sys
 import threading
+import types
+from types import SimpleNamespace
 
 import pytest
 
 from vllm_mlx.engine.batched import BatchedEngine
 from vllm_mlx.runtime.audio_worker import AudioWorkerDispatcher
+
+
+@pytest.fixture(autouse=True)
+def _stub_mlx_thread_init_on_non_mlx_hosts(monkeypatch):
+    """Keep the worker contract testable in the Linux unit-test lane."""
+    if importlib.util.find_spec("mlx") is not None:
+        return
+
+    engine_core = types.ModuleType("vllm_mlx.engine_core")
+    engine_core._init_mlx_step_thread = lambda: None
+    monkeypatch.setitem(sys.modules, "vllm_mlx.engine_core", engine_core)
+    if importlib.util.find_spec("uvicorn") is None:
+        monkeypatch.setitem(sys.modules, "uvicorn", types.ModuleType("uvicorn"))
 
 
 class _RecordingWorker:
@@ -205,6 +222,37 @@ async def test_cancellation_drains_worker_before_releasing_lane_lease():
 
 
 @pytest.mark.asyncio
+async def test_repeated_cancellation_drains_a_failing_worker():
+    dispatcher = AudioWorkerDispatcher()
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_transcription() -> None:
+        started.set()
+        assert release.wait(timeout=5)
+        raise RuntimeError("worker failed after cancellation")
+
+    task = asyncio.create_task(
+        dispatcher.execute("stt", "whisper", "infer", failing_transcription)
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    lane = dispatcher.snapshot()[0]
+    assert lane["active_requests"] == 0
+    assert lane["state"] == "failed"
+    assert lane["last_error"] == "RuntimeError"
+    dispatcher.bind(None)
+
+
+@pytest.mark.asyncio
 async def test_server_shutdown_unloads_cached_audio_engines(monkeypatch):
     from vllm_mlx.routes import audio as audio_route
 
@@ -270,6 +318,20 @@ async def test_server_shutdown_continues_after_audio_unload_failure(
 
 
 @pytest.mark.asyncio
+async def test_server_shutdown_ignores_cached_objects_without_unload(monkeypatch):
+    from vllm_mlx.routes import audio as audio_route
+
+    monkeypatch.setattr(audio_route, "_stt_engine", object())
+    monkeypatch.setattr(audio_route, "_aligner_engine", None)
+    monkeypatch.setattr(audio_route, "_tts_engine", None)
+    monkeypatch.setattr(audio_route, "_music_engine", None)
+
+    await audio_route.shutdown_audio_lanes()
+
+    assert audio_route._stt_engine is None
+
+
+@pytest.mark.asyncio
 async def test_async_stt_eviction_uses_async_model_worker(monkeypatch):
     from vllm_mlx.routes import audio as audio_route
     from vllm_mlx.runtime.audio_worker import bind_audio_worker
@@ -301,3 +363,276 @@ async def test_async_stt_eviction_uses_async_model_worker(monkeypatch):
 
     assert aligner.unloaded
     assert audio_route._aligner_engine is None
+
+
+@pytest.mark.asyncio
+async def test_empty_stt_lanes_do_not_dispatch_eviction(monkeypatch):
+    from vllm_mlx.routes import audio as audio_route
+
+    monkeypatch.setattr(audio_route, "_stt_engine", None)
+    monkeypatch.setattr(audio_route, "_aligner_engine", None)
+
+    await audio_route._evict_other_lane("asr")
+    audio_route._evict_other_lane_sync("aligner")
+
+
+@pytest.mark.asyncio
+async def test_stt_load_and_inference_use_audio_worker(monkeypatch):
+    from vllm_mlx.audio import stt as stt_module
+    from vllm_mlx.routes import audio as audio_route
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker
+
+    operations: list[str] = []
+
+    class _Upload:
+        filename = "speech.wav"
+        size = 4
+
+        def __init__(self) -> None:
+            self._read = False
+
+        async def read(self, _size: int = -1) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
+            return b"RIFF"
+
+    class _OldAligner:
+        model_name = "old-aligner"
+
+        def unload(self) -> None:
+            operations.append("unload-aligner")
+
+    class _STT:
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+
+        def load(self) -> None:
+            operations.append("load-stt")
+
+        def transcribe(self, path: str, **kwargs):
+            operations.append("infer-stt")
+            assert path.endswith(".wav")
+            assert kwargs["context"] == "prompt"
+            return SimpleNamespace(text="hello", language="en", duration=1.0)
+
+    worker = _RecordingWorker()
+    monkeypatch.setattr(stt_module, "STTEngine", _STT)
+    monkeypatch.setattr(audio_route, "_stt_engine", None)
+    monkeypatch.setattr(audio_route, "_aligner_engine", _OldAligner())
+    bind_audio_worker(worker)
+    try:
+        response = await audio_route._run_stt_request(
+            _Upload(),
+            "whisper-small",
+            "en",
+            "json",
+            "transcribe",
+            context=" prompt ",
+        )
+    finally:
+        bind_audio_worker(None)
+
+    assert response == {"text": "hello", "language": "en", "duration": 1.0}
+    assert operations == ["unload-aligner", "load-stt", "infer-stt"]
+    assert len(worker.async_calls) == 3
+
+
+def test_alignment_load_and_inference_use_audio_worker(monkeypatch):
+    from vllm_mlx.audio import stt as stt_module
+    from vllm_mlx.routes import audio as audio_route
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker
+
+    operations: list[str] = []
+
+    class _Aligner:
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+
+        def load(self) -> None:
+            operations.append("load-aligner")
+
+        def align(self, path: str, text: str, **kwargs):
+            operations.append("infer-aligner")
+            assert (path, text, kwargs) == (
+                "speech.wav",
+                "known text",
+                {"language": "en"},
+            )
+            return "aligned"
+
+    worker = _RecordingWorker()
+    monkeypatch.setattr(stt_module, "STTEngine", _Aligner)
+    monkeypatch.setattr(audio_route, "_aligner_engine", None)
+    monkeypatch.setattr(audio_route, "_stt_engine", None)
+    bind_audio_worker(worker)
+    try:
+        result = audio_route._align_blocking(
+            "aligner-model", "speech.wav", "known text", "en"
+        )
+    finally:
+        bind_audio_worker(None)
+
+    assert result == "aligned"
+    assert operations == ["load-aligner", "infer-aligner"]
+    assert len(worker.sync_calls) == 2
+
+
+def test_sync_stt_eviction_uses_sync_model_worker(monkeypatch):
+    from vllm_mlx.routes import audio as audio_route
+
+    class _CachedSTT:
+        model_name = "whisper"
+
+        def __init__(self) -> None:
+            self.unloaded = False
+
+        def unload(self) -> None:
+            self.unloaded = True
+
+    stt = _CachedSTT()
+    monkeypatch.setattr(audio_route, "_stt_engine", stt)
+
+    audio_route._evict_other_lane_sync("aligner")
+
+    assert stt.unloaded
+    assert audio_route._stt_engine is None
+
+
+def test_tts_replacement_and_reference_inference_use_audio_worker(monkeypatch):
+    from vllm_mlx.audio import output_format
+    from vllm_mlx.audio import tts as tts_module
+    from vllm_mlx.routes import audio as audio_route
+
+    operations: list[str] = []
+
+    class _OldTTS:
+        model_name = "old-tts"
+
+        def unload(self) -> None:
+            operations.append("unload")
+
+    class _NewTTS:
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+
+        def load(self) -> None:
+            operations.append("load")
+
+        def generate(self, text: str, **kwargs):
+            operations.append("infer")
+            assert text == "hello"
+            if "ref_text" in kwargs:
+                assert kwargs["ref_text"] == "reference"
+            return SimpleNamespace(audio=b"pcm", sample_rate=24_000)
+
+        def to_bytes(self, audio, format: str) -> bytes:
+            assert format == "wav"
+            return b"encoded"
+
+    monkeypatch.setattr(tts_module, "TTSEngine", _NewTTS)
+    monkeypatch.setattr(audio_route, "_tts_engine", _OldTTS())
+    monkeypatch.setattr(
+        output_format,
+        "convert_audio_output",
+        lambda audio, source_rate, **kwargs: (b"encoded", 24_000, 1),
+    )
+
+    payload, rate, channels = audio_route._generate_speech_blocking(
+        model_name="new-tts",
+        input_text="hello",
+        response_format="wav",
+        gen_kwargs={},
+        ref_bytes=b"reference-audio",
+        ref_text="reference",
+        sample_rate=None,
+        channels=None,
+    )
+
+    assert (payload, rate, channels) == (b"encoded", 24_000, 1)
+    assert operations == ["unload", "load", "infer"]
+
+    payload, rate, channels = audio_route._generate_speech_blocking(
+        model_name="new-tts",
+        input_text="hello",
+        response_format="wav",
+        gen_kwargs={},
+        ref_bytes=None,
+        ref_text=None,
+        sample_rate=None,
+        channels=None,
+    )
+
+    assert (payload, rate, channels) == (b"encoded", 24_000, 1)
+    assert operations == ["unload", "load", "infer", "infer"]
+
+
+@pytest.mark.asyncio
+async def test_residency_snapshot_includes_audio_lane_truth(monkeypatch):
+    from vllm_mlx.routes import residency
+    from vllm_mlx.runtime.audio_worker import audio_worker
+
+    class _Manager:
+        def snapshot(self):
+            return {"models": [{"id": "chat-model"}]}
+
+    monkeypatch.setattr(residency, "_manager", lambda: _Manager())
+    monkeypatch.setattr(
+        audio_worker,
+        "snapshot",
+        lambda: [{"lane": "stt", "model": "whisper-small"}],
+    )
+
+    assert await residency.model_residency() == {
+        "models": [{"id": "chat-model"}],
+        "audio_lanes": [{"lane": "stt", "model": "whisper-small"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_lifespan_binds_audio_worker_when_lane_is_enabled(monkeypatch):
+    import vllm_mlx._signal_observability as signal_observability
+    import vllm_mlx.server as server
+
+    class _Engine:
+        _loaded = True
+
+        def generate_warmup(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+    class _Residency:
+        async def start(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            pass
+
+        def contains(self, model_name: str) -> bool:
+            return True
+
+    engine = _Engine()
+    bound: list[object] = []
+    monkeypatch.setattr(
+        signal_observability, "install_signal_observability", lambda: False
+    )
+    monkeypatch.setattr(server, "_engine", engine)
+    monkeypatch.setattr(server, "_residency_manager", _Residency())
+    monkeypatch.setattr(server, "_mcp_manager", None)
+    monkeypatch.setattr(server, "_enable_audio_lane", True)
+    monkeypatch.setattr(server, "_model_name", "chat-model")
+    monkeypatch.setattr(server, "_model_alias", "chat-model")
+    monkeypatch.setattr(
+        server,
+        "_bind_audio_worker_for_engine",
+        lambda candidate: bound.append(candidate) or True,
+    )
+
+    lifespan = server.lifespan(server.app)
+    await lifespan.__anext__()
+    with pytest.raises(StopAsyncIteration):
+        await lifespan.__anext__()
+
+    assert bound == [engine]
