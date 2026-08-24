@@ -95,6 +95,9 @@ class CohereCommand4ReasoningParser(ReasoningParser):
         self._reasoning_started = False
         self._forced_end_pending = False
         self._json_protocol_undecided = self._json_mode
+        self._json_depth = 0
+        self._json_in_string = False
+        self._json_escape = False
 
     def prepare_forced_reasoning_end(self) -> None:
         self._forced_end_pending = True
@@ -189,6 +192,15 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                     )
                     if has_protocol_marker:
                         self._json_protocol_undecided = False
+                    elif self._buffer.lstrip().startswith(("{", "[")):
+                        # A container opener is unambiguous JSON-document
+                        # evidence. Stream the document incrementally while a
+                        # tiny lexer tracks nesting and quoted strings; once
+                        # the top-level value closes, discard any trailing
+                        # prose or protocol markers instead of leaking them.
+                        self._json_protocol_undecided = False
+                        self._phase = "json_document"
+                        continue
                     elif flush:
                         self._phase = "bare"
                         continue
@@ -294,6 +306,37 @@ class CohereCommand4ReasoningParser(ReasoningParser):
             if self._phase == "bare":
                 content_parts.append(self._buffer)
                 self._buffer = ""
+                break
+
+            if self._phase == "json_document":
+                end = None
+                for index, char in enumerate(self._buffer):
+                    if self._json_in_string:
+                        if self._json_escape:
+                            self._json_escape = False
+                        elif char == "\\":
+                            self._json_escape = True
+                        elif char == '"':
+                            self._json_in_string = False
+                        continue
+                    if char == '"':
+                        self._json_in_string = True
+                    elif char in "[{":
+                        self._json_depth += 1
+                    elif char in "]}":
+                        self._json_depth -= 1
+                        if self._json_depth == 0:
+                            end = index + 1
+                            break
+
+                if end is None:
+                    content_parts.append(self._buffer)
+                    self._buffer = ""
+                    break
+
+                content_parts.append(self._buffer[:end])
+                self._buffer = ""
+                self._phase = "done"
                 break
 
             if self._phase == "forced_content":

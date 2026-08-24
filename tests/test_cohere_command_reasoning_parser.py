@@ -122,6 +122,33 @@ def test_json_mode_routes_bare_json_to_content(document):
         assert _stream(document, chunks, json_mode=True) == (None, document)
 
 
+def test_json_container_streams_before_eof_and_stops_at_document_boundary():
+    parser = CohereCommand4ReasoningParser()
+    parser.configure_request(json_mode=True)
+
+    first = parser.extract_reasoning_streaming("", '{"items":[1,', '{"items":[1,')
+    second = parser.extract_reasoning_streaming(
+        '{"items":[1,',
+        '{"items":[1,2]}trailing scratch<|END_THINKING|>',
+        "2]}trailing scratch<|END_THINKING|>",
+    )
+    final = parser.finish_stream()
+
+    assert first is not None and first.content == '{"items":[1,'
+    assert second is not None and second.content == "2]}"
+    assert first.reasoning is None and second.reasoning is None
+    assert final is None
+
+
+def test_json_container_lexer_ignores_brackets_and_escapes_inside_strings():
+    wire = '{"value":"escaped \\" } ] text","nested":{"ok":true}}ignored'
+
+    reasoning, content = _stream(wire, list(wire), json_mode=True)
+
+    assert reasoning is None
+    assert content == wire.removesuffix("ignored")
+
+
 def test_json_looking_thought_stays_private_without_json_request():
     document = '{"draft":1} — reconsider'
     assert CohereCommand4ReasoningParser().extract_reasoning(document) == (
@@ -180,11 +207,10 @@ def test_configure_request_resets_incremental_state():
     parser.extract_reasoning_streaming("", THINK_END, THINK_END)
     parser.configure_request(json_mode=True)
     message = parser.extract_reasoning_streaming("", '{"ok":', '{"ok":')
-    assert message is None
-    final = parser.finish_stream()
-    assert final is not None
-    assert final.reasoning is None
-    assert final.content == '{"ok":'
+    assert message is not None
+    assert message.reasoning is None
+    assert message.content == '{"ok":'
+    assert parser.finish_stream() is None
 
 
 def test_forced_reasoning_end_keeps_later_model_close_structural():
