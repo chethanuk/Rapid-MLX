@@ -39,6 +39,16 @@ final class BuiltinToolRegistry: ToolRegistry {
     /// Injected at the service boundary so the state transition can be tested
     /// without a live provider. Production always uses ``WebSearchTool/run``.
     private let webSearchRunner: WebSearchRunner
+    private struct RejectedKeyRecoveryTransition {
+        let rejectedRevision: UInt64
+        let keylessRevision: UInt64
+    }
+    /// Records only transitions performed by this registry so an overlapping
+    /// stale response can distinguish automatic recovery from a user's manual
+    /// clear. Revisions also make same-value credential replacement observable.
+    private var rejectedKeyRecoveryTransitions: [
+        WebSearchProvider: RejectedKeyRecoveryTransition
+    ] = [:]
 
     init(
         browseApproval: BrowseApprovalStore = BrowseApprovalStore(),
@@ -117,7 +127,8 @@ final class BuiltinToolRegistry: ToolRegistry {
         _ call: ToolCall
     ) async -> ToolCallResult {
         let provider = webSearch.provider
-        let key = webSearch.apiKey(for: provider)
+        let credential = webSearch.credentialSnapshot(for: provider)
+        let key = credential.key
         let first = await webSearchRunner(call.function.arguments, provider, key)
 
         guard provider.recoversRejectedKeyKeylessly,
@@ -128,18 +139,28 @@ final class BuiltinToolRegistry: ToolRegistry {
             return first
         }
 
-        switch webSearch.apiKey(for: provider) {
-        case key:
+        let current = webSearch.credentialSnapshot(for: provider)
+        if current == credential {
             // This request still owns the rejected value. Establish keyless
             // mode persistently before replaying so it cannot be resent.
             guard webSearch.setAPIKey(nil, for: provider) else { return first }
-        case nil:
-            // An overlapping rejection (or the user) already established
-            // keyless mode. This call can share that recovery transition.
-            break
-        default:
-            // Settings saved a replacement while this request was suspended.
-            // The stale response has no authority to clear or test that key.
+            let keyless = webSearch.credentialSnapshot(for: provider)
+            guard keyless.key == nil else { return first }
+            rejectedKeyRecoveryTransitions[provider] = RejectedKeyRecoveryTransition(
+                rejectedRevision: credential.revision,
+                keylessRevision: keyless.revision
+            )
+        } else if current.key == nil,
+                  let transition = rejectedKeyRecoveryTransitions[provider],
+                  transition.rejectedRevision == credential.revision,
+                  transition.keylessRevision == current.revision
+        {
+            // An overlapping rejection already established keyless mode. This
+            // call can share that exact registry-owned transition.
+        } else {
+            // Settings saved, re-saved, or cleared a credential while this
+            // request was suspended. The stale response has no authority to
+            // clear, test, or narrate that user-owned mutation.
             return first
         }
 

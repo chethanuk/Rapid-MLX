@@ -155,6 +155,44 @@ final class WebSearchRejectedKeyRecoveryTests {
         #expect(config.apiKey(for: .keenable) == "keen_new_valid")
     }
 
+    @Test("A same-value replacement is a new credential revision and is preserved")
+    func sameValueReplacementWinsOverStaleRejection() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        #expect(config.setAPIKey("keen_aba", for: .keenable))
+        var attempts = 0
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, _ in
+            attempts += 1
+            #expect(config.setAPIKey("keen_intermediate", for: .keenable))
+            #expect(config.setAPIKey("keen_aba", for: .keenable))
+            return Self.rejectedResult()
+        }
+
+        let result = await registry.run(makeCall())
+
+        #expect(result.failureKind == .webSearchKeyRejected)
+        #expect(attempts == 1)
+        #expect(config.apiKey(for: .keenable) == "keen_aba")
+    }
+
+    @Test("A manual clear during the request is not narrated as automatic recovery")
+    func manualClearDoesNotShareAutomaticRecovery() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        #expect(config.setAPIKey("keen_user_clears", for: .keenable))
+        var attempts = 0
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, _ in
+            attempts += 1
+            #expect(config.setAPIKey(nil, for: .keenable))
+            return Self.rejectedResult()
+        }
+
+        let result = await registry.run(makeCall())
+
+        #expect(result.failureKind == .webSearchKeyRejected)
+        #expect(attempts == 1)
+        #expect(config.apiKey(for: .keenable) == nil)
+        #expect(!result.content.contains("Rapid removed"))
+    }
+
     @Test("Overlapping rejections both share the transition to keyless mode")
     func overlappingRejectionsBothRecover() async {
         let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
