@@ -16,6 +16,7 @@ from vllm_mlx.reasoning.cohere_command_parser import (
     THINK_END,
     THINK_START,
     CohereCommand4ReasoningParser,
+    _first_marker_outside_json_strings,
     _json_container_end,
     _partial_marker_suffix_length,
 )
@@ -98,6 +99,13 @@ def test_protocol_helpers_cover_empty_incomplete_and_escaped_inputs():
     escaped = '{"value":"a\\\\b"}'
     assert _json_container_end(escaped) == len(escaped)
     assert _json_container_end('{"incomplete":') is None
+    quoted = '{"value":"<|START_THINKING|>"}'
+    assert _first_marker_outside_json_strings(quoted, (THINK_START,)) is None
+    malformed = f'{{"draft":1{THINK_END}'
+    assert _first_marker_outside_json_strings(malformed, (THINK_END,)) == (
+        malformed.index(THINK_END),
+        THINK_END,
+    )
 
 
 @pytest.mark.parametrize(
@@ -200,6 +208,16 @@ def test_json_shaped_reasoning_defers_to_typed_channel_at_every_boundary():
         assert _stream(wire, chunks, json_mode=True) == expected, chunks
 
 
+def test_incomplete_json_shaped_reasoning_yields_to_unquoted_protocol_markers():
+    wire = f'{{"draft":1{THINK_END}{TEXT_START}{{"answer":4}}{TEXT_END}'
+    expected = ('{"draft":1', '{"answer":4}')
+
+    parser = CohereCommand4ReasoningParser()
+    assert parser.extract_reasoning(wire, json_mode=True) == expected
+    for chunks in _all_two_part_splits(wire):
+        assert _stream(wire, chunks, json_mode=True) == expected, chunks
+
+
 def test_json_container_lexer_ignores_brackets_and_escapes_inside_strings():
     wire = '{"value":"escaped \\" } ] text","nested":{"ok":true}}ignored'
 
@@ -212,6 +230,7 @@ def test_json_container_lexer_ignores_brackets_and_escapes_inside_strings():
 @pytest.mark.parametrize(
     "wire",
     [
+        '{"value":"<|START_THINKING|>"}',
         '{"value":"<|START_TEXT|>"}',
         '\n["<|END_THINKING|>", {"action":"<|START_ACTION|>"}]',
     ],

@@ -51,6 +51,30 @@ def _first_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None
     return min(matches) if matches else None
 
 
+def _first_marker_outside_json_strings(
+    text: str, markers: tuple[str, ...]
+) -> tuple[int, str] | None:
+    """Return the first marker that is not quoted as JSON string data."""
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        for marker in markers:
+            if text.startswith(marker, index):
+                return index, marker
+    return None
+
+
 def _json_container_end(text: str) -> int | None:
     """Return the end offset of a leading JSON object/array, if complete."""
     start = len(text) - len(text.lstrip())
@@ -90,14 +114,11 @@ def _first_reasoning_transition(
     transition after that top-level container is protocol evidence.
     """
     if protect_leading_json and text.lstrip().startswith(("{", "[")):
-        end = _json_container_end(text)
-        if end is None:
-            return None
-        trailing = _first_marker(text[end:], _REASONING_TRANSITIONS)
-        if trailing is None:
-            return None
-        index, marker = trailing
-        return end + index, marker
+        # Scratch JSON may itself be malformed or truncated. Container
+        # completeness therefore cannot gate protocol recovery; quote state is
+        # the only distinction required to keep marker-looking string values
+        # private while honoring real channel transitions.
+        return _first_marker_outside_json_strings(text, _REASONING_TRANSITIONS)
     return _first_marker(text, _REASONING_TRANSITIONS)
 
 
@@ -257,7 +278,10 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                     transition = _first_reasoning_transition(
                         self._buffer, protect_leading_json=True
                     )
-                    if transition is not None or THINK_START in self._buffer:
+                    think_start = _first_marker_outside_json_strings(
+                        self._buffer, (THINK_START,)
+                    )
+                    if transition is not None or think_start is not None:
                         self._json_protocol_undecided = False
                     elif flush:
                         self._phase = (
