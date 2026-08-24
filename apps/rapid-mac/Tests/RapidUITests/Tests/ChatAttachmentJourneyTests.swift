@@ -123,8 +123,8 @@ final class ChatAttachmentJourneyTests: XCTestCase {
             "ChatView.Attachment.Remove.\(document.lastPathComponent)"
         )
         let sentImage = harness.element(label: image.lastPathComponent)
-        let sentDocument = harness.element(
-            accessibilityTextPrefix: "TXT file, \(document.lastPathComponent.prefix(8))"
+        let sentDocument = harness.staticText(
+            valuePrefix: "TXT file, \(document.lastPathComponent.prefix(8))"
         )
         let expectedImageHash = try dataURLHash(image)
 

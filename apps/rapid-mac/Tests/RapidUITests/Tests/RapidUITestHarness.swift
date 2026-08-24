@@ -153,13 +153,13 @@ final class RapidUITestHarness {
         ).firstMatch
     }
 
-    func element(accessibilityTextPrefix prefix: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(
-            NSPredicate(
-                format: "label BEGINSWITH %@ OR value BEGINSWITH %@",
-                prefix,
-                prefix
-            )
+    func staticText(valuePrefix prefix: String) -> XCUIElement {
+        // SwiftUI exposes a combined, line-limited accessibility label as the
+        // AX value of a StaticText on hosted macOS. Constraining the query to
+        // that element type also avoids an expensive value predicate across
+        // the entire application hierarchy.
+        app.staticTexts.matching(
+            NSPredicate(format: "value BEGINSWITH %@", prefix)
         ).firstMatch
     }
 
