@@ -175,6 +175,12 @@ class CohereCommand4ReasoningParser(ReasoningParser):
             return None, None
 
         request_json_mode = self._json_mode if json_mode is None else bool(json_mode)
+        # Non-streaming orchestration performs extraction and then asks the
+        # same parser whether a length-truncated buffer is still inside the
+        # reasoning channel. Keep the explicit request mode available to that
+        # lifecycle probe; otherwise a bare structured document is mistaken
+        # for implicit reasoning after it was already parsed as content.
+        self._json_mode = request_json_mode
         if request_json_mode and model_output.lstrip().startswith(("{", "[")):
             end = _json_container_end(model_output)
             return None, model_output if end is None else model_output[:end]

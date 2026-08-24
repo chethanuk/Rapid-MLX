@@ -305,6 +305,7 @@ class TestResponsesNonStream:
                 raw_text=document,
                 prompt_tokens=3,
                 completion_tokens=4,
+                finish_reason="length",
             )
 
         engine.chat = chat

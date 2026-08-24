@@ -167,6 +167,7 @@ def test_streaming_is_invariant_at_every_boundary(wire):
 def test_json_mode_routes_bare_json_to_content(document):
     parser = CohereCommand4ReasoningParser()
     assert parser.extract_reasoning(document, json_mode=True) == (None, document)
+    assert parser.is_open_in_think(document) is False
     for chunks in _all_two_part_splits(document):
         assert _stream(document, chunks, json_mode=True) == (None, document)
 
