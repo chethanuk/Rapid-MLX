@@ -186,12 +186,14 @@ class CohereCommand4ReasoningParser(ReasoningParser):
 
         transition = _first_marker(model_output, _REASONING_TRANSITIONS)
         if transition is None:
-            reasoning = self._strip_leading_think_start(model_output)
-            return reasoning or None, None
+            implicit_reasoning = self._strip_leading_think_start(model_output)
+            return implicit_reasoning or None, None
 
         index, marker = transition
-        reasoning = self._strip_leading_think_start(model_output[:index]).lstrip()
-        reasoning = reasoning or None
+        parsed_reasoning = self._strip_leading_think_start(
+            model_output[:index]
+        ).lstrip()
+        reasoning: str | None = parsed_reasoning or None
         if marker == THINK_END:
             output = model_output[index + len(marker) :]
         else:
@@ -341,7 +343,7 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                 break
 
             if self._phase == "json_document":
-                end = None
+                json_end: int | None = None
                 for index, char in enumerate(self._buffer):
                     if self._json_in_string:
                         if self._json_escape:
@@ -358,15 +360,15 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                     elif char in "]}":
                         self._json_depth -= 1
                         if self._json_depth == 0:
-                            end = index + 1
+                            json_end = index + 1
                             break
 
-                if end is None:
+                if json_end is None:
                     content_parts.append(self._buffer)
                     self._buffer = ""
                     break
 
-                content_parts.append(self._buffer[:end])
+                content_parts.append(self._buffer[:json_end])
                 self._buffer = ""
                 self._phase = "done"
                 break

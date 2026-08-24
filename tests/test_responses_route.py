@@ -173,6 +173,7 @@ def responses_client(monkeypatch):
     app.include_router(router)
     yield SimpleNamespace(
         client=TestClient(app),
+        cfg=cfg,
         engine=cfg.engine,
         rate_limiter=rate_limiter,
         reset_config=reset_config,
@@ -288,6 +289,50 @@ class TestResponsesNonStream:
         assert body["usage"]["input_tokens"] == 3
         assert body["usage"]["output_tokens"] == 2
         assert body["usage"]["total_tokens"] == 5
+
+    def test_structured_output_keeps_bare_json_out_of_reasoning(self, responses_client):
+        from vllm_mlx.reasoning.cohere_command_parser import (
+            CohereCommand4ReasoningParser,
+        )
+
+        document = '{"answer":4}'
+        engine = responses_client.engine
+
+        async def chat(messages, **kwargs):
+            engine.calls.append(SimpleNamespace(messages=messages, kwargs=kwargs))
+            return _GenerationOutput(
+                text=document,
+                raw_text=document,
+                prompt_tokens=3,
+                completion_tokens=4,
+            )
+
+        engine.chat = chat
+        responses_client.cfg.reasoning_parser = CohereCommand4ReasoningParser()
+
+        response = responses_client.client.post(
+            "/v1/responses",
+            json=_payload(
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "integer"}},
+                            "required": ["answer"],
+                            "additionalProperties": False,
+                        },
+                    }
+                }
+            ),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["output"][0]["content"][0]["text"] == document
+        assert all(item["type"] != "reasoning" for item in body["output"])
 
     def test_response_carries_loaded_model_not_request_alias(self, responses_client):
         """The response.model field must be the loaded engine's model

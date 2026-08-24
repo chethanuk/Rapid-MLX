@@ -270,6 +270,13 @@ jobs:
             tests/test_mcp_security.py \
             tests/test_structured_output.py \
             tests/test_reasoning_parser.py \
+            tests/test_cohere_command_reasoning_parser.py \
+            tests/test_responses_route.py \
+            tests/test_postprocessor.py \
+            tests/test_reasoning_parser_truncation_finalize.py \
+            tests/test_reasoning_finalize_stop_in_think.py \
+            tests/test_per_request_thinking_budget.py \
+            tests/test_chat_streaming_no_reasoning_alias.py \
             tests/test_tool_parsers.py \
             tests/test_native_tool_format.py \
             tests/test_prefix_cache.py \

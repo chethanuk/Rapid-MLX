@@ -91,6 +91,7 @@ from ..service.helpers import (
     _effective_enable_thinking,
     _extract_thinking_from_request,
     _finalize_content_and_reasoning,
+    _is_structured_output_requested,
     _parse_tool_calls_with_parser,
     _release_admission_unless_committed,
     _resolve_enable_thinking,
@@ -2153,6 +2154,9 @@ async def _non_stream(
         # the rationale. Forwarded so the /v1/responses path picks up
         # the same gemma4 / glm4 / minimax fixes.
         finish_reason=getattr(output, "finish_reason", None),
+        json_mode=_is_structured_output_requested(
+            getattr(openai_request, "response_format", None)
+        ),
     )
 
     final_content = None

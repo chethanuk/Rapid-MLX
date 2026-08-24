@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from vllm_mlx.reasoning import get_parser
+from vllm_mlx.reasoning import DeltaMessage, ReasoningParser, get_parser
 from vllm_mlx.reasoning.cohere_command_parser import (
     ACTION_START,
     TEXT_END,
@@ -16,6 +16,8 @@ from vllm_mlx.reasoning.cohere_command_parser import (
     THINK_END,
     THINK_START,
     CohereCommand4ReasoningParser,
+    _json_container_end,
+    _partial_marker_suffix_length,
 )
 
 
@@ -71,6 +73,33 @@ class TestRegistration:
         assert config.tool_call_parser is None
 
 
+def test_shared_parser_lifecycle_defaults_and_think_boundaries():
+    class StatelessParser(ReasoningParser):
+        def extract_reasoning(self, model_output, **kwargs):
+            return None, model_output
+
+        def extract_reasoning_streaming(self, previous_text, current_text, delta_text):
+            return DeltaMessage(content=delta_text)
+
+    parser = StatelessParser()
+    assert parser.reasoning_start_str is None
+    assert parser.reasoning_end_str is None
+    assert parser.finish_stream() is None
+    assert parser.prepare_forced_reasoning_end() is None
+
+    think_parser = get_parser("qwen3")()
+    assert think_parser.reasoning_start_str == think_parser.start_token
+    assert think_parser.reasoning_end_str == think_parser.end_token
+
+
+def test_protocol_helpers_cover_empty_incomplete_and_escaped_inputs():
+    assert _partial_marker_suffix_length("", (THINK_END,)) == 0
+    assert _json_container_end("   ") is None
+    escaped = '{"value":"a\\\\b"}'
+    assert _json_container_end(escaped) == len(escaped)
+    assert _json_container_end('{"incomplete":') is None
+
+
 @pytest.mark.parametrize(
     ("wire", "expected"),
     [
@@ -93,6 +122,26 @@ class TestRegistration:
 )
 def test_full_parse_protocol_shapes(wire, expected):
     assert CohereCommand4ReasoningParser().extract_reasoning(wire) == expected
+
+
+def test_full_parse_empty_missing_text_block_and_close_without_output():
+    parser = CohereCommand4ReasoningParser()
+    assert parser.extract_reasoning("") == (None, None)
+    assert parser._extract_text_block("plain") is None
+    assert parser.extract_reasoning(f"plan{THINK_END}") == ("plan", None)
+
+
+def test_boundary_properties_and_open_think_state():
+    parser = CohereCommand4ReasoningParser()
+    assert parser.reasoning_start_str == THINK_START
+    assert parser.reasoning_end_str == THINK_END
+    assert parser.start_token == THINK_START
+    assert parser.end_token == THINK_END
+    assert parser.is_open_in_think("") is False
+    assert parser.is_open_in_think("draft") is True
+    assert parser.is_open_in_think(f"draft{THINK_END}") is False
+    parser.configure_request(json_mode=True)
+    assert parser.is_open_in_think("draft") is False
 
 
 @pytest.mark.parametrize(
@@ -171,6 +220,14 @@ def test_json_looking_thought_stays_private_without_json_request():
     )
 
 
+def test_json_mode_waits_for_protocol_evidence_before_classifying_prose():
+    wire = f'draft reasoning{THINK_END}{TEXT_START}{{"answer":4}}{TEXT_END}'
+    assert _stream(wire, [wire], json_mode=True) == (
+        "draft reasoning",
+        '{"answer":4}',
+    )
+
+
 def test_nonstream_orchestrator_passes_json_request_contract():
     from vllm_mlx.service.helpers import _finalize_content_and_reasoning
 
@@ -194,6 +251,24 @@ def test_action_marker_is_preserved_for_downstream_tool_parser():
     reasoning, content = _stream(wire, list(wire))
     assert reasoning == "check forecast"
     assert content == action
+
+
+def test_direct_action_transition_is_preserved():
+    action = f'{ACTION_START}[{{"tool_name":"f"}}]<|END_ACTION|>'
+    assert _stream(action, [action]) == (None, action)
+
+
+def test_whitespace_only_reasoning_emits_nothing():
+    assert _stream("   ", ["   "]) == (None, None)
+
+
+def test_close_without_output_drains_cleanly_at_eof():
+    assert _stream(f"plan{THINK_END}", ["plan", THINK_END]) == ("plan", None)
+
+
+def test_partial_output_marker_after_close_is_discarded_at_eof():
+    wire = f"plan{THINK_END}<|START_TE"
+    assert _stream(wire, ["plan", THINK_END, "<|START_TE"]) == ("plan", None)
 
 
 def test_finish_releases_partial_marker_in_reasoning_phase():
@@ -241,6 +316,30 @@ def test_forced_reasoning_end_keeps_later_model_close_structural():
     assert message.content == "ijkldone"
 
 
+def test_forced_content_preserves_action_and_partial_marker_at_eof():
+    parser = CohereCommand4ReasoningParser()
+    parser.extract_reasoning_streaming("", "plan", "plan")
+    parser.prepare_forced_reasoning_end()
+    parser.extract_reasoning_streaming("plan", f"plan{THINK_END}", THINK_END)
+
+    action = f'{ACTION_START}[{{"tool_name":"f"}}]<|END_ACTION|>'
+    message = parser.extract_reasoning_streaming(
+        "", f"visible{action}", f"visible{action}"
+    )
+    assert message is not None
+    assert message.content == f"visible{action}"
+
+    parser = CohereCommand4ReasoningParser()
+    parser.extract_reasoning_streaming("", "plan", "plan")
+    parser.prepare_forced_reasoning_end()
+    parser.extract_reasoning_streaming("plan", f"plan{THINK_END}", THINK_END)
+    held = "tail<|END_THI"
+    first = parser.extract_reasoning_streaming("", held, held)
+    final = parser.finish_stream()
+    assert first is not None and first.content == "tail"
+    assert final is not None and final.content == "<|END_THI"
+
+
 def test_prompt_priming_detects_command_markers_and_mixed_templates():
     from vllm_mlx.service.helpers import _should_start_in_thinking
 
@@ -280,32 +379,43 @@ class TestChatRouteStreaming:
         return "".join(reasoning_parts), "".join(content_parts)
 
     @pytest.mark.parametrize(
-        ("deltas", "finish_reason", "expected_reasoning", "expected_content"),
+        (
+            "deltas",
+            "finish_reason",
+            "emit_terminal",
+            "expected_reasoning",
+            "expected_content",
+        ),
         [
             (
                 ["Provide answer: 4.", THINK_END, TEXT_START, "4", TEXT_END],
                 "stop",
+                True,
                 "Provide answer: 4.",
                 "4",
             ),
             (
                 ["deliberating", " about it<|END_THI"],
                 "length",
+                True,
                 "deliberating about it<|END_THI",
                 None,
             ),
             (
                 ["plan", THINK_END, TEXT_START, "answer<|END_TE"],
                 "length",
+                True,
                 "plan",
                 "answer<|END_TE",
             ),
+            (["<|END_THI"], None, False, "<|END_THI", None),
         ],
     )
     def test_server_sse_protocol_and_eof_drain(
         self,
         deltas,
         finish_reason,
+        emit_terminal,
         expected_reasoning,
         expected_content,
     ):
@@ -329,7 +439,7 @@ class TestChatRouteStreaming:
                 accumulated = ""
                 for index, delta in enumerate(deltas):
                     accumulated += delta
-                    final = index == len(deltas) - 1
+                    final = emit_terminal and index == len(deltas) - 1
                     yield GenerationOutput(
                         text=accumulated,
                         new_text=delta,
