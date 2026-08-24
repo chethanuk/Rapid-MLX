@@ -1,8 +1,12 @@
 """Malformed Hermes calls stay in the tool loop without being executed."""
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from tests.test_postprocessor import _make_cfg, _make_output
+from vllm_mlx.reasoning.deepseek_r1_parser import DeepSeekR1DistillReasoningParser
 from vllm_mlx.service.postprocessor import StreamingPostProcessor
 from vllm_mlx.tool_parsers.hermes_tool_parser import HermesToolParser
 
@@ -50,6 +54,17 @@ def test_parser_surfaces_declared_malformed_call_with_unparseable_arguments():
         pass
     else:
         raise AssertionError("malformed arguments unexpectedly became executable JSON")
+
+
+def test_parser_accepts_typed_request_tool_models():
+    request = SimpleNamespace(
+        tools=[SimpleNamespace(function=SimpleNamespace(name="browse"))]
+    )
+
+    result = HermesToolParser(None).extract_tool_calls(MALFORMED, request=request)
+
+    assert result.tools_called is True
+    assert result.tool_calls[0]["name"] == "browse"
 
 
 def test_parser_does_not_promote_undeclared_malformed_function():
@@ -232,3 +247,34 @@ def test_stream_malformed_then_valid_in_one_chunk_suppresses_only_final_prose():
         event.content or "" for event in events if event.type in {"content", "finish"}
     )
     assert content == "\nBetween.\n"
+
+
+@pytest.mark.parametrize("mode", ["standard", "channel", "reasoning"])
+@pytest.mark.parametrize("finished", [False, True])
+def test_stream_preserves_later_prose_across_processing_modes(mode, finished):
+    cfg_args = {
+        "enable_auto_tool_choice": True,
+        "tool_parser_instance": HermesToolParser(None),
+    }
+    channel = None
+    if mode == "channel":
+        channel = "content"
+    elif mode == "reasoning":
+        cfg_args["reasoning_parser"] = DeepSeekR1DistillReasoningParser(None)
+    processor = StreamingPostProcessor(
+        _make_cfg(**cfg_args), tools_requested=True, request=REQUEST
+    )
+    processor.reset()
+
+    events = processor.process_chunk(_make_output(MALFORMED, channel=channel))
+    events.extend(
+        processor.process_chunk(
+            _make_output("\nAfterward.", finished=finished, channel=channel)
+        )
+    )
+    events.extend(processor.finalize())
+
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert content == "\nAfterward."

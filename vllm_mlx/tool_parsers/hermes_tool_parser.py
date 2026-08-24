@@ -686,9 +686,7 @@ class HermesToolParser(ToolParser):
         return False
 
     @classmethod
-    def _completed_structured_tool_calls(
-        cls, text: str, request: dict[str, Any] | None = None
-    ) -> int:
+    def _completed_structured_tool_calls(cls, text: str) -> int:
         """Count completed structured tool calls in ``text``.
 
         Returns the count of *fully-closed* structured blocks across
@@ -705,7 +703,7 @@ class HermesToolParser(ToolParser):
         tag counting would briefly count a Nemotron inner close as a
         standalone bare-function close.
         """
-        matches, _ = cls._scan_tool_call_shapes(text, request)
+        matches, _ = cls._scan_tool_call_shapes(text)
         return len(matches)
 
     @staticmethod
