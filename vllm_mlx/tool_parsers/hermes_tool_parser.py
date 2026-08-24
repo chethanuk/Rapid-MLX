@@ -650,11 +650,19 @@ class HermesToolParser(ToolParser):
         return full_text[len(self._safe_content_prefix(full_text)) :]
 
     @classmethod
-    def _has_incomplete_structured_block(cls, text: str) -> bool:
+    def _has_incomplete_structured_block(
+        cls, text: str, request: dict[str, Any] | None = None
+    ) -> bool:
         """Heuristic: is the text currently inside an unclosed structured
         block of any of the three wire shapes? Used by the streaming
         branch to decide whether to suppress emit while a block is
         being assembled."""
+        # Remove every block the request-aware scanner can already account
+        # for. This matters for a closed outer wrapper whose inner function
+        # XML is malformed: its missing ``</function>`` must not keep the
+        # streaming parser wedged after the call has been safely promoted.
+        _, text = cls._scan_tool_call_shapes(text, request)
+
         # Shape #1 + #2 (<tool_call> wrapper)
         if text.count("<tool_call>") > text.count("</tool_call>"):
             return True
@@ -674,7 +682,9 @@ class HermesToolParser(ToolParser):
         return False
 
     @classmethod
-    def _completed_structured_tool_calls(cls, text: str) -> int:
+    def _completed_structured_tool_calls(
+        cls, text: str, request: dict[str, Any] | None = None
+    ) -> int:
         """Count completed structured tool calls in ``text``.
 
         Returns the count of *fully-closed* structured blocks across
@@ -691,8 +701,27 @@ class HermesToolParser(ToolParser):
         tag counting would briefly count a Nemotron inner close as a
         standalone bare-function close.
         """
-        matches, _ = cls._scan_tool_call_shapes(text)
+        matches, _ = cls._scan_tool_call_shapes(text, request)
         return len(matches)
+
+    @staticmethod
+    def _new_residual_content(
+        previous_length: int,
+        current_text: str,
+        spans: list[tuple[int, int, str, str]],
+    ) -> str:
+        """Return newly arrived bytes outside newly completed call spans."""
+        cursor = previous_length
+        residual: list[str] = []
+        for start, end, _name, _arguments in spans:
+            if end <= previous_length:
+                continue
+            if start > cursor:
+                residual.append(current_text[cursor:start])
+            cursor = max(cursor, end)
+        if cursor < len(current_text):
+            residual.append(current_text[cursor:])
+        return "".join(residual)
 
     def extract_tool_calls_streaming(
         self,
@@ -728,7 +757,7 @@ class HermesToolParser(ToolParser):
         )
 
         if has_any_opener:
-            if self._has_incomplete_structured_block(current_text):
+            if self._has_incomplete_structured_block(current_text, request):
                 # Inside an incomplete structured block — suppress output.
                 return None
 
@@ -742,8 +771,10 @@ class HermesToolParser(ToolParser):
             # up bare shapes nested inside (e.g. mid-stream Nemotron
             # XML reaches ``</function>\n`` before its outer
             # ``</tool_call>``).
-            prev_completed = self._completed_structured_tool_calls(previous_text)
-            cur_completed = self._completed_structured_tool_calls(current_text)
+            previous_matches, _ = self._scan_tool_call_shapes(previous_text, request)
+            current_matches, _ = self._scan_tool_call_shapes(current_text, request)
+            prev_completed = len(previous_matches)
+            cur_completed = len(current_matches)
             if cur_completed > prev_completed:
                 # Re-run the source-of-truth scan on current_text to
                 # get the WIRE-ORDERED list of completed tool calls in
@@ -753,9 +784,22 @@ class HermesToolParser(ToolParser):
                 if result.tools_called and len(result.tool_calls) > prev_completed:
                     new_calls = result.tool_calls[prev_completed:]
                     if new_calls:
-                        return self._format_streaming_tool_calls(
+                        formatted = self._format_streaming_tool_calls(
                             new_calls, start_index=prev_completed
                         )
+                        residual = self._new_residual_content(
+                            len(previous_text), current_text, current_matches
+                        )
+                        if residual:
+                            formatted["content"] = residual
+                        if any(
+                            call["arguments"].startswith(
+                                ("<malformed_function_body>", "<malformed_json_arguments>")
+                            )
+                            for call in new_calls
+                        ):
+                            formatted["preserve_post_tool_content"] = True
+                        return formatted
 
             # All current tool calls already emitted; emit post-call
             # content with prefix-hold applied so any partial sentinel

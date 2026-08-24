@@ -96,3 +96,40 @@ def test_stream_finalize_emits_standard_tool_call_not_raw_xml():
     assert MALFORMED not in "".join(
         event.content or "" for event in events if event.type in {"content", "finish"}
     )
+
+
+def test_stream_preserves_trailing_prose_once_when_it_shares_the_close_chunk():
+    cfg = _make_cfg(
+        enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
+    )
+    processor = StreamingPostProcessor(cfg, tools_requested=True, request=REQUEST)
+    processor.reset()
+
+    events = processor.process_chunk(_make_output(MALFORMED + "\nAfterward."))
+    events.extend(processor.finalize())
+
+    assert len([event for event in events if event.type == "tool_call"]) == 1
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert content == "\nAfterward."
+    assert MALFORMED not in content
+
+
+def test_stream_preserves_trailing_prose_once_when_it_arrives_later():
+    cfg = _make_cfg(
+        enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
+    )
+    processor = StreamingPostProcessor(cfg, tools_requested=True, request=REQUEST)
+    processor.reset()
+
+    events = processor.process_chunk(_make_output(MALFORMED))
+    events.extend(processor.process_chunk(_make_output("\nAfterward.")))
+    events.extend(processor.finalize())
+
+    assert len([event for event in events if event.type == "tool_call"]) == 1
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert content == "\nAfterward."
+    assert MALFORMED not in content
