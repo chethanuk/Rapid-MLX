@@ -78,6 +78,19 @@ def test_parser_surfaces_declared_malformed_json_call_for_executor_feedback():
         raise AssertionError("malformed JSON unexpectedly became executable")
 
 
+def test_parser_does_not_promote_name_nested_inside_malformed_arguments():
+    nested_name = (
+        '<tool_call>{"arguments":{"payload":{"name":"browse"}},'
+        '"other":"truncated"</tool_call>'
+    )
+
+    result = HermesToolParser(None).extract_tool_calls(nested_name, request=REQUEST)
+
+    assert result.tools_called is False
+    assert result.tool_calls == []
+    assert result.content == nested_name
+
+
 def test_stream_finalize_emits_standard_tool_call_not_raw_xml():
     cfg = _make_cfg(
         enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
@@ -133,3 +146,26 @@ def test_stream_preserves_trailing_prose_once_when_it_arrives_later():
     )
     assert content == "\nAfterward."
     assert MALFORMED not in content
+
+
+def test_stream_valid_call_after_malformed_call_restores_prose_suppression():
+    cfg = _make_cfg(
+        enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
+    )
+    processor = StreamingPostProcessor(cfg, tools_requested=True, request=REQUEST)
+    processor.reset()
+    valid = (
+        '\n<tool_call>{"name":"browse","arguments":'
+        '{"url":"https://example.com"}}</tool_call>'
+    )
+
+    events = processor.process_chunk(_make_output(MALFORMED))
+    events.extend(processor.process_chunk(_make_output(valid)))
+    events.extend(processor.process_chunk(_make_output("\nSuppressed.")))
+    events.extend(processor.finalize())
+
+    assert len([event for event in events if event.type == "tool_call"]) == 2
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert "Suppressed." not in content

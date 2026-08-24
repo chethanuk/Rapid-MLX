@@ -161,7 +161,9 @@ class HermesToolParser(ToolParser):
     MALFORMED_NEMOTRON_PATTERN = re.compile(
         r"<tool_call>\s*<function=([^>]+)>(.*?)</tool_call>", re.DOTALL
     )
-    MALFORMED_JSON_NAME_PATTERN = re.compile(r'"name"\s*:\s*"([A-Za-z0-9_.:-]+)"')
+    MALFORMED_JSON_INTENT_PATTERN = re.compile(
+        r'^\{\s*"name"\s*:\s*"([A-Za-z0-9_.:-]+)"\s*,\s*"arguments"\s*:'
+    )
     PARAM_PATTERN = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
     REASONING_PATTERN = re.compile(
         r"<tool_call_reasoning>(.*?)</tool_call_reasoning>", re.DOTALL
@@ -348,16 +350,11 @@ class HermesToolParser(ToolParser):
             if wrapper_end >= 0:
                 end = wrapper_end + len("</tool_call>")
                 body = text[pos + len("<tool_call>") : wrapper_end].strip()
-                name_match = cls.MALFORMED_JSON_NAME_PATTERN.search(body)
-                if (
-                    body.startswith("{")
-                    and '"arguments"' in body
-                    and name_match is not None
-                    and name_match.group(1) in declared_names
-                ):
+                intent_match = cls.MALFORMED_JSON_INTENT_PATTERN.match(body)
+                if intent_match is not None and intent_match.group(1) in declared_names:
                     return (
                         end,
-                        name_match.group(1),
+                        intent_match.group(1),
                         f"<malformed_json_arguments>{body}",
                     )
             return None
@@ -794,7 +791,10 @@ class HermesToolParser(ToolParser):
                             formatted["content"] = residual
                         if any(
                             call["arguments"].startswith(
-                                ("<malformed_function_body>", "<malformed_json_arguments>")
+                                (
+                                    "<malformed_function_body>",
+                                    "<malformed_json_arguments>",
+                                )
                             )
                             for call in new_calls
                         ):

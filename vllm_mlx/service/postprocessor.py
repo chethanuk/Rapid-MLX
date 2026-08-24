@@ -2875,8 +2875,9 @@ class StreamingPostProcessor:
                     ]
                 return []
             if result.get("tool_calls"):
-                if result.get("preserve_post_tool_content"):
-                    self._preserve_post_tool_content = True
+                self._preserve_post_tool_content = bool(
+                    result.get("preserve_post_tool_content")
+                )
                 # When the streaming parser carries BOTH a content
                 # delta AND a tool-call delta in one return (one
                 # delta carried ``preface + tool_close`` — codex r4
@@ -3288,8 +3289,9 @@ class StreamingPostProcessor:
                     ]
                 return []
             if result.get("tool_calls"):
-                if result.get("preserve_post_tool_content"):
-                    self._preserve_post_tool_content = True
+                self._preserve_post_tool_content = bool(
+                    result.get("preserve_post_tool_content")
+                )
                 # Combined content+tool delta — emit content half
                 # regardless of how the parallel-cap rules out the
                 # tool half (codex r6 MAJOR: enabling
@@ -3504,8 +3506,9 @@ class StreamingPostProcessor:
                     ]
                 return []
             if result.get("tool_calls"):
-                if result.get("preserve_post_tool_content"):
-                    self._preserve_post_tool_content = True
+                self._preserve_post_tool_content = bool(
+                    result.get("preserve_post_tool_content")
+                )
                 # Combined content+tool delta — emit content half
                 # regardless of how the parallel-cap rules out the
                 # tool half (codex r6 MAJOR). Match the plain-content
