@@ -4525,25 +4525,29 @@ flow_audio_readiness() {
 
     # A media resident is process-wide state, not the Chat model selection.
     # Launch commands must neither advertise the TTS alias to coding agents
-    # nor remain copyable while their selected chat model is not serving.
+    # nor be copyable while their selected chat model is not serving. Since
+    # #2297 the stopped Launch page renders the integration rows as
+    # documentation with Copy deliberately disabled, so the guard is the
+    # rows being present-but-not-copyable (enabled_count == 0), not their
+    # absence — the launch-integrations journey asserts the same contract.
     press "$OUT/speech-resident.json" Sidebar.Launch "$OUT/launch-from-audio.json" \
         || die "Sidebar.Launch is not pressable from an Audio residency"
-    local launch_copy_count=0 launch_ready=0
+    local launch_ready=0
     for ((i=0; i<40; i++)); do
         see_main "$OUT/launch-from-audio.json"
-        launch_copy_count="$(jq '[.data.ui_elements[]?
-                                  | (.identifier // "")
-                                  | select(startswith("Launch.Integration.Copy."))]
-                                 | unique | length' "$OUT/launch-from-audio.json")"
-        if [[ "$launch_copy_count" == 0 ]] &&
-           jq -e '.data.ui_elements[]? | select(.identifier == "Readiness.Action")' \
-              "$OUT/launch-from-audio.json" >/dev/null; then
+        if jq -e '.data.ui_elements[]? | select(.identifier == "Readiness.Action")' \
+              "$OUT/launch-from-audio.json" >/dev/null \
+           && [[ "$(jq '[.data.ui_elements[]?
+                          | select(((.identifier // "")
+                                    | startswith("Launch.Integration.Copy."))
+                                   and .enabled == true)] | length' \
+                       "$OUT/launch-from-audio.json")" == 0 ]]; then
             launch_ready=1; break
         fi
         sleep 0.25
     done
     [[ "$launch_ready" == 1 ]] \
-        || die "Launch exposed dead commands or no chat-model start action from Audio"
+        || die "Launch exposed copyable commands or no chat-model start action from Audio"
     if jq -e '[.data.ui_elements[]? | .value? | strings]
               | any(contains("fake-qwen3-tts")
                     and (contains("--model")
