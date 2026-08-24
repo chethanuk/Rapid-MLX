@@ -159,6 +159,14 @@ def responses_client(monkeypatch):
         responses_route, "_check_admission_or_503", lambda _engine: None
     )
 
+    async def _await_without_scheduler(coro, _request, timeout):
+        del timeout
+        return await coro
+
+    monkeypatch.setattr(
+        responses_route, "_wait_with_disconnect", _await_without_scheduler
+    )
+
     cfg = reset_config()
     cfg.api_key = "test-secret"
     cfg.engine = _Engine()
