@@ -4190,7 +4190,12 @@ flow_launch_integrations() {
     [[ "$enabled_count" == 0 ]] || die "Cold Launch offered $enabled_count copyable commands before the endpoint/key existed"
     jq -e '.data.ui_elements[]? | select(.identifier == "Readiness.Action")' "$OUT/launch.json" >/dev/null \
         || die "Cold Launch offered no primary model-start action"
-    jq -e '.data.ui_elements[]? | select(.identifier == "ConnectTools.ModelPicker")' "$OUT/launch.json" >/dev/null \
+    # The inline picker is addressable by its own menu popup
+    # (``ModelPickerBar.ModelMenu``) — NOT by a composite id stamped on the
+    # whole bar, which `ModelPickerBar` deliberately avoids (it propagates one
+    # id onto both the popup and the (i) info button and makes them
+    # indistinguishable). Assert the popup itself is present.
+    jq -e '.data.ui_elements[]? | select(.identifier == "ModelPickerBar.ModelMenu")' "$OUT/launch.json" >/dev/null \
         || die "Cold Launch offered no inline model picker"
     baseline launch-integrations.complete "$OUT/launch.json"
 

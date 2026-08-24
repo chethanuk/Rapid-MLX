@@ -293,13 +293,20 @@ struct ConnectToolsView: View {
             // downloaded model before starting, without leaving the page.
             // Composer style renders only the compact chip (no duplicate
             // Start/Stop — the readiness banner below owns the action).
+            //
+            // Deliberately no identifier stamped on the composite. The picker
+            // already names its own controls — the menu popup is
+            // ``ModelPickerBar.ModelMenu`` and the (i) info button is
+            // ``ModelPickerBar.ModelInfo`` — so the golden flow addresses the
+            // picker by ``ModelPickerBar.ModelMenu`` directly. Stamping the
+            // whole bar would propagate one identifier onto both descendants
+            // and make them indistinguishable to AX (and to the harness).
             ModelPickerBar(
                 server: server,
                 downloads: downloads,
                 alias: $alias,
                 composerStyle: true
             )
-            .accessibilityIdentifier("ConnectTools.ModelPicker")
             ReadinessBanner(readiness: readiness, onAction: onReadinessAction)
             Text("When the model is running, the key and model rows below fill in and the Copy buttons wake up.")
                 .font(RapidFont.caption)
