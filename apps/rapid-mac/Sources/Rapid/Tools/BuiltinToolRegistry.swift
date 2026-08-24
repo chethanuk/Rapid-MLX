@@ -122,6 +122,7 @@ final class BuiltinToolRegistry: ToolRegistry {
               key != nil,
               first.failureKind == .webSearchKeyRejected,
               !Task.isCancelled,
+              webSearch.apiKey(for: provider) == key,
               webSearch.setAPIKey(nil, for: provider),
               !Task.isCancelled
         else {

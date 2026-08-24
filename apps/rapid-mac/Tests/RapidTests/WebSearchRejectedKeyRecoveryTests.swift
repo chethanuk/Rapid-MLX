@@ -131,6 +131,30 @@ final class WebSearchRejectedKeyRecoveryTests {
         #expect(observedKeys[2] == nil)
     }
 
+    @Test("A replacement key saved while the request is in flight is preserved")
+    func concurrentReplacementWinsOverStaleRejection() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        #expect(config.setAPIKey("keen_old_rejected", for: .keenable))
+
+        var attempts = 0
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, key in
+            attempts += 1
+            #expect(key == "keen_old_rejected")
+            // Simulate Settings saving a replacement while the first network
+            // request is suspended. Its eventual rejection belongs only to
+            // the credential captured when that request began.
+            #expect(config.setAPIKey("keen_new_valid", for: .keenable))
+            await Task.yield()
+            return Self.rejectedResult()
+        }
+
+        let result = await registry.run(makeCall())
+
+        #expect(result.failureKind == .webSearchKeyRejected)
+        #expect(attempts == 1)
+        #expect(config.apiKey(for: .keenable) == "keen_new_valid")
+    }
+
     @Test("Cancellation after rejection does not clear the key or start recovery")
     func cancellationStopsRecovery() async {
         let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
