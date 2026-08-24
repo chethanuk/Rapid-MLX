@@ -25,7 +25,7 @@ final class BuiltinToolRegistry: ToolRegistry {
     /// Model-visible audit note for the one credential-recovery transition.
     /// It deliberately names the mode change without echoing any credential.
     static func rejectedKeyRecoveryNote(for provider: WebSearchProvider) -> String {
-        "Note: Rapid removed a rejected saved \(provider.displayName) key and retried this search using \(provider.displayName)'s keyless mode. Future searches will stay keyless until a new key is saved."
+        "Note: Rapid removed a rejected saved \(provider.displayName) key and retried this search using \(provider.displayName)'s keyless mode."
     }
 
     /// Per-invocation approval gate for ``browse``. Held on the shared registry
@@ -143,11 +143,11 @@ final class BuiltinToolRegistry: ToolRegistry {
             return first
         }
 
-        // Once the persistent transition begins, finish its one bounded replay
+        // Once the persistent transition begins, invoke its one bounded replay
         // even if cancellation races with the synchronous Keychain mutation.
         // Otherwise the call could return the old credential failure after
         // having already removed the key. The real transport still observes
-        // task cancellation and can terminate the replay promptly.
+        // task cancellation and can terminate the replay attempt promptly.
         let recovered = await webSearchRunner(call.function.arguments, provider, nil)
         return ToolCallResult(
             toolCallID: recovered.toolCallID,

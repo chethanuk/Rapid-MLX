@@ -199,8 +199,8 @@ final class WebSearchRejectedKeyRecoveryTests {
         #expect(config.apiKey(for: .keenable) == "keen_keep_on_cancel")
     }
 
-    @Test("Cancellation racing with key removal completes the bounded replay")
-    func cancellationDuringPersistentTransitionCompletesReplay() async {
+    @Test("Cancellation racing with key removal makes one bounded replay attempt")
+    func cancellationDuringPersistentTransitionAttemptsReplay() async {
         let keychain = CancellationOnDeleteKeychain()
         let config = WebSearchConfig(defaults: freshDefaults(), keychain: keychain)
         #expect(config.setAPIKey("keen_rejected_during_delete", for: .keenable))
@@ -209,16 +209,43 @@ final class WebSearchRejectedKeyRecoveryTests {
         let registry = BuiltinToolRegistry(webSearch: config) { _, _, key in
             observedKeys.append(key)
             if key != nil { return Self.rejectedResult() }
-            return ToolCallResult(toolCallID: "", content: "keyless result")
+            #expect(Task.isCancelled)
+            return ToolCallResult(
+                toolCallID: "",
+                content: "keyless replay cancelled",
+                isError: true,
+                failureKind: .toolFailed
+            )
         }
 
         let result = await Task { await registry.run(makeCall()) }.value
 
-        #expect(!result.isError)
+        #expect(result.isError)
+        #expect(result.failureKind == .toolFailed)
+        #expect(result.failureKind != .webSearchKeyRejected)
         #expect(observedKeys.count == 2)
         #expect(observedKeys[0] == "keen_rejected_during_delete")
         #expect(observedKeys[1] == nil)
         #expect(config.apiKey(for: .keenable) == nil)
+    }
+
+    @Test("A replacement saved during replay makes no false future-state claim")
+    func replacementDuringReplayKeepsAuditNoteTruthful() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        #expect(config.setAPIKey("keen_rejected_before_replay", for: .keenable))
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, key in
+            if key != nil { return Self.rejectedResult() }
+            await Task.yield()
+            #expect(config.setAPIKey("keen_replacement_during_replay", for: .keenable))
+            return ToolCallResult(toolCallID: "", content: "keyless result")
+        }
+
+        let result = await registry.run(makeCall())
+
+        #expect(!result.isError)
+        #expect(result.content.contains("retried this search"))
+        #expect(!result.content.contains("Future searches"))
+        #expect(config.apiKey(for: .keenable) == "keen_replacement_during_replay")
     }
 
     @Test("A failed Keychain delete keeps the original failure and does not replay")
