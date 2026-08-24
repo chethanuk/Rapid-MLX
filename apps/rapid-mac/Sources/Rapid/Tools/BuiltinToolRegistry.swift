@@ -16,6 +16,16 @@ import Foundation
 /// disk must not ship without one.
 @MainActor
 final class BuiltinToolRegistry: ToolRegistry {
+    typealias WebSearchRunner = (
+        _ arguments: String,
+        _ provider: WebSearchProvider,
+        _ apiKey: String?
+    ) async -> ToolCallResult
+
+    /// Model-visible audit note for the one credential-recovery transition.
+    /// It deliberately names the mode change without echoing any credential.
+    static let rejectedKeyRecoveryNote = "Note: Rapid removed a rejected saved Keenable key and retried this search using Keenable's keyless mode. Future searches will stay keyless until a new key is saved."
+
     /// Per-invocation approval gate for ``browse``. Held on the shared registry
     /// so the SwiftUI approval dialog + the Settings auto-approve switch bind to
     /// the same object the tool runner consults.
@@ -24,13 +34,24 @@ final class BuiltinToolRegistry: ToolRegistry {
     /// the registry so the chat loop doesn't need to thread a separate
     /// environment value through every tool call.
     let webSearch: WebSearchConfig
+    /// Injected at the service boundary so the state transition can be tested
+    /// without a live provider. Production always uses ``WebSearchTool/run``.
+    private let webSearchRunner: WebSearchRunner
 
     init(
         browseApproval: BrowseApprovalStore = BrowseApprovalStore(),
-        webSearch: WebSearchConfig = WebSearchConfig()
+        webSearch: WebSearchConfig = WebSearchConfig(),
+        webSearchRunner: @escaping WebSearchRunner = { arguments, provider, apiKey in
+            await WebSearchTool.run(
+                arguments: arguments,
+                provider: provider,
+                apiKey: apiKey
+            )
+        }
     ) {
         self.browseApproval = browseApproval
         self.webSearch = webSearch
+        self.webSearchRunner = webSearchRunner
     }
 
     var definitions: [ToolDefinition] {
@@ -45,13 +66,7 @@ final class BuiltinToolRegistry: ToolRegistry {
         let result: ToolCallResult
         switch call.function.name {
         case "web_search":
-            let provider = webSearch.provider
-            let key = webSearch.apiKey(for: provider)
-            result = await WebSearchTool.run(
-                arguments: call.function.arguments,
-                provider: provider,
-                apiKey: key
-            )
+            result = await runWebSearchWithCredentialRecovery(call)
         case "browse":
             result = await BrowseTool.run(
                 arguments: call.function.arguments,
@@ -83,6 +98,42 @@ final class BuiltinToolRegistry: ToolRegistry {
             content: result.content,
             isError: result.isError || failureKind != nil,
             failureKind: failureKind
+        )
+    }
+
+    /// Execute one web-search call, with one narrowly-scoped configuration
+    /// recovery: a rejected optional Keenable credential can transition to the
+    /// provider's supported keyless mode and replay the SAME call once.
+    ///
+    /// This is not a generic retry loop. Producer-owned failure metadata is the
+    /// gate, so network failures, quota/rate limits, malformed queries, and
+    /// prose that happens to mention a key never enter this path. The rejected
+    /// key is removed before replay, which makes resending it impossible and
+    /// persists the selected recovery for later searches. If Keychain cannot
+    /// establish that post-condition, the original failure remains visible.
+    private func runWebSearchWithCredentialRecovery(
+        _ call: ToolCall
+    ) async -> ToolCallResult {
+        let provider = webSearch.provider
+        let key = webSearch.apiKey(for: provider)
+        let first = await webSearchRunner(call.function.arguments, provider, key)
+
+        guard provider == .keenable,
+              key != nil,
+              first.failureKind == .webSearchKeyRejected,
+              !Task.isCancelled,
+              webSearch.setAPIKey(nil, for: provider),
+              !Task.isCancelled
+        else {
+            return first
+        }
+
+        let recovered = await webSearchRunner(call.function.arguments, provider, nil)
+        return ToolCallResult(
+            toolCallID: recovered.toolCallID,
+            content: recovered.content + "\n\n" + Self.rejectedKeyRecoveryNote,
+            isError: recovered.isError,
+            failureKind: recovered.failureKind
         )
     }
 }
