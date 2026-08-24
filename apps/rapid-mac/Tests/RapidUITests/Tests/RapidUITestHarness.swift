@@ -97,6 +97,23 @@ final class RapidUITestHarness {
         dismissFirstRunIfNeeded()
     }
 
+    func relaunch() {
+        app.terminate()
+        terminateFakeSidecars()
+        app.launch()
+        XCTAssertTrue(app.windows["Rapid-MLX"].waitForExistence(timeout: 20))
+        dismissFirstRunIfNeeded()
+
+        // The selected model is persisted with the conversation persona, so
+        // a real relaunch must restore both the transcript and an actionable
+        // composer without the test clicking Load a second time.
+        let send = element("ChatView.SendOrStopButton")
+        XCTAssertTrue(send.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil(timeout: 60) {
+            send.label == "Send message" && send.isEnabled
+        })
+    }
+
     func shutDown() {
         app.terminate()
         releasePortReservation()
@@ -128,6 +145,21 @@ final class RapidUITestHarness {
 
     func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    func element(label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", label)
+        ).firstMatch
+    }
+
+    func messageAction(_ action: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier MATCHES %@",
+                "^ChatView\\.Message\\.\(action)\\.[0-9A-Fa-f-]{36}$"
+            )
+        ).firstMatch
     }
 
     func conversationRows() -> XCUIElementQuery {
@@ -233,6 +265,17 @@ final class RapidUITestHarness {
         let send = element("ChatView.SendOrStopButton")
         XCTAssertTrue(waitUntil(timeout: 10) { send.isEnabled })
         send.click()
+        XCTAssertTrue(waitUntil(timeout: 30) { self.chatRequests().count == expectedRequestCount })
+        XCTAssertTrue(waitUntil(timeout: 30) {
+            self.element("ChatView.SendOrStopButton").label == "Send message"
+        })
+    }
+
+    func retryResponse(expectedRequestCount: Int) {
+        let retry = messageAction("Retry")
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil(timeout: 60) { retry.isEnabled })
+        retry.click()
         XCTAssertTrue(waitUntil(timeout: 30) { self.chatRequests().count == expectedRequestCount })
         XCTAssertTrue(waitUntil(timeout: 30) {
             self.element("ChatView.SendOrStopButton").label == "Send message"

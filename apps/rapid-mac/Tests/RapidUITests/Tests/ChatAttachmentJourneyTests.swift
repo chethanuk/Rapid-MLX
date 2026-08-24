@@ -104,6 +104,82 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         XCTAssertEqual(imageHashes(in: requests[3]), [try pastedImageHash(image)])
     }
 
+    func testRetryAndRelaunchPreserveSentAttachmentIdentity() throws {
+        continueAfterFailure = false
+        let harness = try RapidUITestHarness(
+            testName: name,
+            fakeSettings: ["FAKE_VISION_CHAT": "1"]
+        )
+        defer { harness.shutDown() }
+        harness.launch()
+        harness.startModel()
+
+        let image = harness.rapidMacRoot
+            .appendingPathComponent("Tests/RapidTests/__Snapshots__/cheetah-logo-96.png")
+        let document = harness.rapidMacRoot
+            .appendingPathComponent("Tests/GUIGoldenFlows/Fixtures/chat-document.txt")
+        let imageChip = harness.element("ChatView.Attachment.Remove.\(image.lastPathComponent)")
+        let documentChip = harness.element(
+            "ChatView.Attachment.Remove.\(document.lastPathComponent)"
+        )
+        let sentImage = harness.element(label: image.lastPathComponent)
+        let sentDocument = harness.element(
+            label: "TXT file, \(document.lastPathComponent), TXT"
+        )
+        let expectedImageHash = try dataURLHash(image)
+
+        harness.chooseFile(image, actionIdentifier: "ChatView.Attachments.UploadPhoto")
+        XCTAssertTrue(imageChip.waitForExistence(timeout: 10))
+        harness.chooseFile(document, actionIdentifier: "ChatView.Attachments.UploadFile")
+        XCTAssertTrue(documentChip.waitForExistence(timeout: 10))
+        harness.send("Persist both attachments", expectedRequestCount: 1)
+
+        XCTAssertTrue(sentImage.waitForExistence(timeout: 10))
+        XCTAssertTrue(sentDocument.waitForExistence(timeout: 10))
+        assertCombinedIdentity(
+            in: harness.chatRequests()[0],
+            expectedImageHash: expectedImageHash
+        )
+
+        harness.retryResponse(expectedRequestCount: 2)
+        assertCombinedIdentity(
+            in: harness.chatRequests()[1],
+            expectedImageHash: expectedImageHash
+        )
+
+        harness.relaunch()
+        XCTAssertTrue(sentImage.waitForExistence(timeout: 20))
+        XCTAssertTrue(sentDocument.waitForExistence(timeout: 20))
+        XCTAssertFalse(imageChip.exists)
+        XCTAssertFalse(documentChip.exists)
+
+        harness.retryResponse(expectedRequestCount: 3)
+        assertCombinedIdentity(
+            in: harness.chatRequests()[2],
+            expectedImageHash: expectedImageHash
+        )
+
+        harness.element("Sidebar.NewChat").click()
+        XCTAssertTrue(harness.waitUntil(timeout: 10) { !sentImage.exists && !sentDocument.exists })
+        XCTAssertFalse(imageChip.exists)
+        XCTAssertFalse(documentChip.exists)
+        harness.send("Fresh turn after relaunch", expectedRequestCount: 4)
+        XCTAssertTrue(imageHashes(in: harness.chatRequests()[3]).isEmpty)
+        XCTAssertFalse(text(in: harness.chatRequests()[3]).contains("Revenue: 42"))
+        XCTAssertFalse(text(in: harness.chatRequests()[3]).contains("Region: APAC"))
+    }
+
+    private func assertCombinedIdentity(
+        in request: [String: Any],
+        expectedImageHash: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(imageHashes(in: request), [expectedImageHash], file: file, line: line)
+        XCTAssertTrue(text(in: request).contains("Revenue: 42"), file: file, line: line)
+        XCTAssertTrue(text(in: request).contains("Region: APAC"), file: file, line: line)
+    }
+
     private func imageHashes(in request: [String: Any]) -> [String] {
         guard let payloads = request["user_payloads"] as? [[String: Any]],
               let latest = payloads.last else { return [] }
