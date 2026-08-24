@@ -93,6 +93,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert 'config["FAKE_PID_FILE"] = sidecarPIDFile.path' in harness
     assert "String(contentsOf: sidecarPIDFile" in harness
     assert 'element("MemoryWarning.Confirm")' in harness
+    assert "let priorServerStartCount = serverStartCount()" in harness
+    assert "self.serverStartCount() > priorServerStartCount" in harness
     assert 'app.dialogs["open-panel"].buttons["OKButton"]' in harness
     assert (
         'XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")' in harness

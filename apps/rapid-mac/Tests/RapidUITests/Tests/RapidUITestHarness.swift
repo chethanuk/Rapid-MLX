@@ -117,6 +117,7 @@ final class RapidUITestHarness {
         let readiness = element("Readiness.Action")
         XCTAssertTrue(readiness.waitForExistence(timeout: 20))
         XCTAssertTrue(waitUntil(timeout: 20) { readiness.isEnabled })
+        let priorServerStartCount = serverStartCount()
         // Hold the OS-selected port until the app is ready to spawn its fake
         // sidecar, reducing the bind race to the click-to-process-launch edge.
         releasePortReservation()
@@ -130,7 +131,7 @@ final class RapidUITestHarness {
                 memoryConfirmation.click()
                 confirmedMemoryWarning = true
             }
-            return self.events().contains { $0["event"] as? String == "server_started" }
+            return self.serverStartCount() > priorServerStartCount
         })
     }
 
@@ -310,6 +311,10 @@ final class RapidUITestHarness {
             guard let data = line.data(using: .utf8) else { return nil }
             return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
+    }
+
+    private func serverStartCount() -> Int {
+        events().count { $0["event"] as? String == "server_started" }
     }
 
     private func terminateFakeSidecars() {
