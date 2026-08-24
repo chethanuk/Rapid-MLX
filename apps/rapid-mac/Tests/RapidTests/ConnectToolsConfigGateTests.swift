@@ -87,8 +87,9 @@ struct ConnectToolsConfigGateTests {
         ))
     }
 
-    /// Exhaustive check across all 16 input combinations: the gate reduces
-    /// exactly to `hasPort && hasBearer && modelResolved && (modelServing ?? true)`.
+    /// Exhaustive check across all 24 input combinations (three booleans ×
+    /// the three-state `modelServing` = 2·2·2·3): the gate reduces exactly to
+    /// `hasPort && hasBearer && modelResolved && (modelServing ?? true)`.
     /// Locks the boolean shape so a future change to the formula (e.g. OR-ing
     /// a clause, making serving optional) cannot silently widen Copy without
     /// a review noticing which combinations flipped.
