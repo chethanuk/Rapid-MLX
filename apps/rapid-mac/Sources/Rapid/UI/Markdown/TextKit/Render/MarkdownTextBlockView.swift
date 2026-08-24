@@ -28,6 +28,15 @@ final class MarkdownTextBlockView: NSView {
     /// ``updateTypingDotLayer``.
     private var typingDotLayer: CAShapeLayer?
 
+    /// SwiftUI may update the representable for every transport delta even
+    /// when the coalesced Markdown result is unchanged. Keep the rendered
+    /// identity and measurement cache so those updates stay no-ops.
+    private var hasConfiguredContent = false
+    private var renderedRevision: Int?
+    private var renderedStreaming = false
+    private var measuredWidth: CGFloat?
+    private var measuredHeight: CGFloat?
+
     public override var isFlipped: Bool { true }
 
     public init(options: MarkdownOptions) {
@@ -44,7 +53,10 @@ final class MarkdownTextBlockView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     public func configure(blocks: [MarkdownItem.TextBlock], options: MarkdownOptions) {
-        configure(blocks: blocks, options: options, streaming: false, fadeState: nil)
+        configure(
+            blocks: blocks, options: options, revision: nil,
+            streaming: false, fadeState: nil
+        )
     }
 
     /// Configure, optionally animating text that is arriving now.
@@ -55,11 +67,11 @@ final class MarkdownTextBlockView: NSView {
     public func configure(
         blocks: [MarkdownItem.TextBlock],
         options: MarkdownOptions,
+        revision: Int? = nil,
         streaming: Bool,
         fadeState: TextFadeAnimationState?,
         fadeConfiguration: TextFadeConfiguration = TextFadeConfiguration()
     ) {
-        let contentGrew = streaming && blocks != self.blocks
         // The dot answers "is anything happening?" — a question only worth
         // answering while there is nothing to read. Once the first words
         // arrive, the fade-in of each new word says the same thing better,
@@ -68,17 +80,39 @@ final class MarkdownTextBlockView: NSView {
         // and `showsTypingDotWhenStreaming` are separate fields, so a stream
         // can run without one.
         let wantsDot = Self.showsTypingDot(streaming: streaming, blocks: blocks)
+        let optionsChanged = !hasConfiguredContent
+            || !Self.sameRenderingOptions(self.options, options)
+        let contentChanged = !hasConfiguredContent
+            || blocks != self.blocks
+            || revision != renderedRevision
+            || optionsChanged
         let dotChanged = wantsDot != showsTypingDot
+        let streamingChanged = streaming != renderedStreaming
+
+        // The parent row can still receive raw message updates while the
+        // compiled result is unchanged. Do not replace TextKit storage or
+        // invalidate transcript layout for those passes.
+        guard contentChanged || dotChanged || streamingChanged else { return }
+
+        let contentGrew = streaming && contentChanged
         self.blocks = blocks
         self.options = options
+        self.renderedRevision = revision
         self.showsTypingDot = wantsDot
+        self.renderedStreaming = streaming
+        self.hasConfiguredContent = true
 
         renderer.update(options: options)
-        renderer.setBlocks(blocks, showsTypingDot: wantsDot)
+        var storageUpdate: MarkdownTextRenderer.TextStorageUpdate?
+        if contentChanged || dotChanged {
+            storageUpdate = renderer.setBlocks(blocks, showsTypingDot: wantsDot)
+        }
         // A custom-drawn NSView has no automatic text semantics. Mirror the
         // backing text into AX so VoiceOver and GUI automation can read the
         // answer just as they could through MarkdownUI's native Text views.
-        setAccessibilityValue(renderer.accessibleText)
+        if contentChanged || dotChanged {
+            setAccessibilityValue(renderer.accessibleText)
+        }
 
         if streaming, fadeConfiguration.isEnabled, let fadeState {
             let animator: TextFadeAnimator
@@ -99,11 +133,12 @@ final class MarkdownTextBlockView: NSView {
             }
             animator.configuration = fadeConfiguration
             animator.textColor = options.textColor
+            if case .replaced = storageUpdate {
+                animator.storageDidReset()
+            }
             if contentGrew || dotChanged {
                 animator.contentDidGrow()
-            } else {
-                // `setBlocks` above wiped the rendering attributes even though
-                // nothing changed. Without this the fade never comes back.
+            } else if storageUpdate != nil {
                 animator.storageDidReset()
             }
         } else if let animator = fadeAnimator {
@@ -116,7 +151,9 @@ final class MarkdownTextBlockView: NSView {
 
         updateTypingDotAnimation()
         needsDisplay = true
-        invalidateIntrinsicContentSize()
+        if contentChanged || dotChanged, intrinsicHeightChangedAfterUpdate() {
+            invalidateIntrinsicContentSize()
+        }
     }
 
     /// Whether the typing dot should be shown.
@@ -162,7 +199,10 @@ final class MarkdownTextBlockView: NSView {
 
     /// Measure without rendering. Cheap enough to call for every offscreen row.
     public func height(forWidth width: CGFloat) -> CGFloat {
-        renderer.measureHeight(width: width)
+        let height = renderer.measureHeight(width: width)
+        measuredWidth = width
+        measuredHeight = height
+        return height
     }
 
     /// The width the text actually occupies when laid out at `maxWidth`.
@@ -176,13 +216,96 @@ final class MarkdownTextBlockView: NSView {
     public override var intrinsicContentSize: NSSize {
         let width = bounds.width
         guard width > 0 else { return NSSize(width: NSView.noIntrinsicMetric, height: 0) }
-        return NSSize(width: NSView.noIntrinsicMetric, height: renderer.measureHeight(width: width))
+        let height = renderer.measureHeight(width: width)
+        measuredWidth = width
+        measuredHeight = height
+        return NSSize(width: NSView.noIntrinsicMetric, height: height)
+    }
+
+    /// A visual text append does not always change the row's height. Avoid
+    /// asking SwiftUI to reposition the transcript in that case.
+    private func intrinsicHeightChangedAfterUpdate() -> Bool {
+        let width = bounds.width
+        guard width > 0 else {
+            measuredWidth = nil
+            measuredHeight = nil
+            return true
+        }
+
+        let newHeight = renderer.measureHeight(width: width)
+        defer {
+            measuredWidth = width
+            measuredHeight = newHeight
+        }
+        guard let oldWidth = measuredWidth,
+              let oldHeight = measuredHeight,
+              abs(oldWidth - width) <= 0.5 else {
+            return true
+        }
+        return abs(oldHeight - newHeight) > 0.5
+    }
+
+    /// `MarkdownOptions` intentionally has no global `Equatable` conformance.
+    /// Compare the fields this prose view consumes so Dynamic Type and theme
+    /// changes cannot be mistaken for an unchanged transport update.
+    private static func sameRenderingOptions(
+        _ lhs: MarkdownOptions,
+        _ rhs: MarkdownOptions
+    ) -> Bool {
+        lhs.textPointSize == rhs.textPointSize
+            && lhs.lineHeightMultiple == rhs.lineHeightMultiple
+            && lhs.paragraphSpacing == rhs.paragraphSpacing
+            && lhs.kern == rhs.kern
+            && sameColor(lhs.textColor, rhs.textColor)
+            && sameColor(lhs.strongTextColor, rhs.strongTextColor)
+            && sameColor(lhs.linkColor, rhs.linkColor)
+            && lhs.linkUnderlineStyle == rhs.linkUnderlineStyle
+            && sameColor(lhs.linkUnderlineColor, rhs.linkUnderlineColor)
+            && lhs.inlineCodeBackgroundEnabled == rhs.inlineCodeBackgroundEnabled
+            && sameColor(lhs.inlineCodeBackgroundColor, rhs.inlineCodeBackgroundColor)
+            && sameColor(lhs.inlineCodeTextColor, rhs.inlineCodeTextColor)
+            && lhs.listInterItemSpacing == rhs.listInterItemSpacing
+            && lhs.listDepthIndent == rhs.listDepthIndent
+            && lhs.unorderedListBaseLeftMargin == rhs.unorderedListBaseLeftMargin
+            && lhs.orderedListBaseLeftMargin == rhs.orderedListBaseLeftMargin
+            && lhs.unorderedListSpacingFromMarker == rhs.unorderedListSpacingFromMarker
+            && lhs.listSpacingFromIndex == rhs.listSpacingFromIndex
+            && lhs.blockQuoteLeadingInset == rhs.blockQuoteLeadingInset
+            && lhs.blockQuoteIndentation == rhs.blockQuoteIndentation
+            && lhs.blockQuoteBarWidth == rhs.blockQuoteBarWidth
+            && sameColor(lhs.blockQuoteBarColor, rhs.blockQuoteBarColor)
+            && lhs.horizontalRuleHeight == rhs.horizontalRuleHeight
+            && sameInsets(lhs.horizontalRuleInsets, rhs.horizontalRuleInsets)
+            && sameColor(lhs.horizontalRuleColor, rhs.horizontalRuleColor)
+    }
+
+    private static func sameColor(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            return lhs.isEqual(rhs)
+        default:
+            return false
+        }
+    }
+
+    private static func sameInsets(
+        _ lhs: NSDirectionalEdgeInsets,
+        _ rhs: NSDirectionalEdgeInsets
+    ) -> Bool {
+        lhs.top == rhs.top
+            && lhs.leading == rhs.leading
+            && lhs.bottom == rhs.bottom
+            && lhs.trailing == rhs.trailing
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
         if widthChanged {
+            measuredWidth = nil
+            measuredHeight = nil
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }

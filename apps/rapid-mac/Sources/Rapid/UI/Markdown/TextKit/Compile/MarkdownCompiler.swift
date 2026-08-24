@@ -14,6 +14,14 @@ import Markdown
 /// streaming.
 struct MarkdownCompiler: Sendable {
 
+    /// A conservative streaming split: every top-level node before the last
+    /// one is structurally closed, while the last node remains mutable until a
+    /// following sibling proves its boundary.
+    struct TopLevelStreamingSplit: Equatable, Sendable {
+        let stablePrefix: String
+        let mutableTail: String
+    }
+
     /// Passes run over the compiled blocks, in order.
     ///
     /// Auto-linking by default because a bare URL rendering as dead text is a
@@ -23,6 +31,92 @@ struct MarkdownCompiler: Sendable {
 
     public init(postProcessors: [MarkdownPostProcessor] = [AutoLinkPostProcessor()]) {
         self.postProcessors = postProcessors
+    }
+
+    /// Split a growing Markdown fragment into a stable prefix and mutable tail.
+    ///
+    /// `swift-markdown` owns the block grammar and source ranges. Keeping the
+    /// final top-level node mutable is deliberately conservative: an unfinished
+    /// paragraph may still become emphasis, a link, or inline code; a list or
+    /// fence may still grow. Once another top-level sibling appears, nodes
+    /// before it can no longer be reinterpreted by later input.
+    func topLevelStreamingSplit(_ source: String) -> TopLevelStreamingSplit? {
+        guard !source.isEmpty else { return nil }
+        let document = Document(parsing: source, options: [.parseBlockDirectives])
+        let children = Array(document.children)
+        guard children.count > 1,
+              let tailLocation = children.last?.range?.lowerBound,
+              let tailStart = Self.index(at: tailLocation, in: source),
+              tailStart > source.startIndex else {
+            return nil
+        }
+        let stablePrefix = source[..<tailStart]
+        guard Self.hasBlankLineBoundary(in: stablePrefix),
+              !Self.containsPotentialReferenceLink(in: stablePrefix) else {
+            return nil
+        }
+
+        return TopLevelStreamingSplit(
+            stablePrefix: String(stablePrefix),
+            mutableTail: String(source[tailStart...])
+        )
+    }
+
+    /// Convert swift-markdown's one-based UTF-8 line/column location into a
+    /// native String index without assuming ASCII input or LF-only newlines.
+    private static func index(at location: SourceLocation, in source: String) -> String.Index? {
+        guard location.line >= 1, location.column >= 1 else { return nil }
+
+        var line = 1
+        var lineStart = source.startIndex
+        while line < location.line {
+            guard let newline = source[lineStart...].firstIndex(where: \.isNewline) else {
+                return nil
+            }
+            lineStart = source.index(after: newline)
+            line += 1
+        }
+
+        let utf8 = source.utf8
+        guard let utf8LineStart = lineStart.samePosition(in: utf8),
+              let utf8Target = utf8.index(
+                utf8LineStart,
+                offsetBy: location.column - 1,
+                limitedBy: utf8.endIndex
+              ) else {
+            return nil
+        }
+        return utf8Target.samePosition(in: source)
+    }
+
+    /// A new AST sibling is not by itself proof of a stable boundary. While a
+    /// GFM table row is still being typed, cmark temporarily reports an empty
+    /// table followed by a paragraph, then folds that paragraph into the table
+    /// once the row is complete. A blank line is the conservative CommonMark
+    /// boundary that prevents that cross-node reinterpretation.
+    private static func hasBlankLineBoundary(in prefix: Substring) -> Bool {
+        var newlineCount = 0
+        for character in prefix.reversed() {
+            if character.isNewline {
+                newlineCount += 1
+                if newlineCount >= 2 { return true }
+            } else if character == " " || character == "\t" {
+                continue
+            } else {
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Reference-link definitions are document-global and may appear after the
+    /// paragraph they style. Keep reference-like brackets mutable, while still
+    /// allowing complete inline links such as `[label](URL)` to be committed.
+    private static func containsPotentialReferenceLink(in source: Substring) -> Bool {
+        source.range(
+            of: #"(?<!\\)\[[^\]\n]+\](?!\()"#,
+            options: .regularExpression
+        ) != nil
     }
 
     /// Drop a trailing fence marker that is still being typed.

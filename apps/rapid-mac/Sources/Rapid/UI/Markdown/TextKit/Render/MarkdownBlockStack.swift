@@ -43,19 +43,23 @@ struct MarkdownBlockStack: View {
 
     public var body: some View {
         let groups = self.groups
-        let lastTextIndex = groups.lastIndex { if case .text = $0 { return true } else { return false } }
+        let lastTextID = groups.last {
+            if case .text = $0.content { return true }
+            return false
+        }?.id
 
         VStack(alignment: .leading, spacing: options.interContentSpacing) {
-            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
-                switch group {
+            ForEach(groups) { group in
+                switch group.content {
                 case .text(let blocks):
                     MarkdownTextBlockRepresentable(
                         blocks: blocks,
                         options: options,
+                        revision: result.revision,
                         // Only the trailing text group grows during a stream —
                         // earlier ones are already stable, and fading them
                         // would replay text the reader has read.
-                        streaming: isStreaming && index == lastTextIndex,
+                        streaming: isStreaming && group.id == lastTextID,
                         fadeState: fadeState,
                         fadeConfiguration: fadeConfiguration
                     )
@@ -87,21 +91,32 @@ struct MarkdownBlockStack: View {
         }
     }
 
-    private enum Group {
-        case text([MarkdownItem.TextBlock])
-        case code(MarkdownItem.CodeBlock)
-        case table(MarkdownItem.TableBlock)
-        case images(MarkdownItem.ImagesBlock)
-        case math(MarkdownItem.MathBlock)
+    private struct Group: Identifiable {
+        let id: String
+        let content: Content
+
+        enum Content {
+            case text([MarkdownItem.TextBlock])
+            case code(MarkdownItem.CodeBlock)
+            case table(MarkdownItem.TableBlock)
+            case images(MarkdownItem.ImagesBlock)
+            case math(MarkdownItem.MathBlock)
+        }
     }
 
     private var groups: [Group] {
         var groups: [Group] = []
         var pendingText: [MarkdownItem.TextBlock] = []
+        var textIndex = 0
+        var codeIndex = 0
+        var tableIndex = 0
+        var imagesIndex = 0
+        var mathIndex = 0
 
         func flushText() {
             guard !pendingText.isEmpty else { return }
-            groups.append(.text(pendingText))
+            groups.append(Group(id: "text-\(textIndex)", content: .text(pendingText)))
+            textIndex += 1
             pendingText = []
         }
 
@@ -110,13 +125,21 @@ struct MarkdownBlockStack: View {
             case .text(let block):
                 pendingText.append(block)
             case .code(let block):
-                flushText(); groups.append(.code(block))
+                flushText()
+                groups.append(Group(id: "code-\(codeIndex)", content: .code(block)))
+                codeIndex += 1
             case .table(let block):
-                flushText(); groups.append(.table(block))
+                flushText()
+                groups.append(Group(id: "table-\(tableIndex)", content: .table(block)))
+                tableIndex += 1
             case .images(let block):
-                flushText(); groups.append(.images(block))
+                flushText()
+                groups.append(Group(id: "images-\(imagesIndex)", content: .images(block)))
+                imagesIndex += 1
             case .math(let block):
-                flushText(); groups.append(.math(block))
+                flushText()
+                groups.append(Group(id: "math-\(mathIndex)", content: .math(block)))
+                mathIndex += 1
             }
         }
         flushText()
@@ -128,6 +151,7 @@ struct MarkdownBlockStack: View {
 private struct MarkdownTextBlockRepresentable: NSViewRepresentable {
     let blocks: [MarkdownItem.TextBlock]
     let options: MarkdownOptions
+    let revision: Int?
     var streaming: Bool = false
     var fadeState: TextFadeAnimationState?
     var fadeConfiguration: TextFadeConfiguration = TextFadeConfiguration()
@@ -150,6 +174,7 @@ private struct MarkdownTextBlockRepresentable: NSViewRepresentable {
         view.configure(
             blocks: blocks,
             options: options,
+            revision: revision,
             streaming: streaming,
             fadeState: fadeState,
             fadeConfiguration: fadeConfiguration

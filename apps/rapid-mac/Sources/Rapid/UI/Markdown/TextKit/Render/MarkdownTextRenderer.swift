@@ -15,11 +15,20 @@ import AppKit
 @MainActor
 final class MarkdownTextRenderer {
 
+    enum TextStorageUpdate {
+        case initial
+        case incremental
+        case replaced
+    }
+
     public let textContentStorage = NSTextContentStorage()
     public let textLayoutManager = NSTextLayoutManager()
     public let textContainer: NSTextContainer
 
     private var options: MarkdownOptions
+    /// The prose portion is kept separately because the optional typing dot
+    /// is removed and re-added on every streaming flush.
+    private var renderedProse: NSAttributedString?
 
     public init(options: MarkdownOptions) {
         self.options = options
@@ -40,8 +49,45 @@ final class MarkdownTextRenderer {
     /// `showsTypingDot` appends the pulsing indicator as an attachment on the
     /// last line. It is part of the text, not an overlay, so it flows and wraps
     /// with the final glyph and needs no frame maintenance.
-    public func setBlocks(_ blocks: [MarkdownItem.TextBlock], showsTypingDot: Bool = false) {
-        let string = NSMutableAttributedString(attributedString: attributedString(for: blocks))
+    @discardableResult
+    public func setBlocks(
+        _ blocks: [MarkdownItem.TextBlock], showsTypingDot: Bool = false
+    ) -> TextStorageUpdate {
+        let newProse = attributedString(for: blocks)
+        let oldProse = renderedProse
+
+        if let oldProse,
+           let storage = textContentStorage.textStorage,
+           oldProse.length > 0,
+           storage.length >= oldProse.length,
+           isAttributedPrefix(oldProse, of: newProse) {
+            // The normal streaming path is an append. Replace only the old
+            // typing decoration and insert the new suffix, preserving TextKit
+            // rendering state for the already-visible prefix.
+            let changedRange = NSRange(
+                location: oldProse.length,
+                length: storage.length - oldProse.length
+            )
+            let replacement = NSMutableAttributedString()
+            if newProse.length > oldProse.length {
+                replacement.append(newProse.attributedSubstring(from: NSRange(
+                    location: oldProse.length,
+                    length: newProse.length - oldProse.length
+                )))
+            }
+            proseLength = newProse.length
+            typingDotLocation = nil
+            if showsTypingDot {
+                replacement.append(typingDotString(trailing: newProse))
+            }
+            textContentStorage.performEditingTransaction {
+                storage.replaceCharacters(in: changedRange, with: replacement)
+            }
+            renderedProse = newProse.copy() as? NSAttributedString
+            return .incremental
+        }
+
+        let string = NSMutableAttributedString(attributedString: newProse)
         proseLength = string.length
         typingDotLocation = nil
         if showsTypingDot {
@@ -50,6 +96,40 @@ final class MarkdownTextRenderer {
         textContentStorage.performEditingTransaction {
             textContentStorage.textStorage?.setAttributedString(string)
         }
+        renderedProse = newProse.copy() as? NSAttributedString
+        return oldProse == nil ? .initial : .replaced
+    }
+
+    /// Markdown can restyle existing characters when a fence, heading, or
+    /// list marker becomes complete. Only an attributed prefix is safe to
+    /// update incrementally; structural changes use the replacement path.
+    private func isAttributedPrefix(
+        _ prefix: NSAttributedString,
+        of value: NSAttributedString
+    ) -> Bool {
+        guard prefix.length <= value.length else { return false }
+        var offset = 0
+        while offset < prefix.length {
+            var prefixRange = NSRange()
+            var valueRange = NSRange()
+            let prefixAttributes = prefix.attributes(at: offset, effectiveRange: &prefixRange)
+            let valueAttributes = value.attributes(at: offset, effectiveRange: &valueRange)
+            let count = min(
+                prefixRange.location + prefixRange.length,
+                valueRange.location + valueRange.length
+            ) - offset
+            guard count > 0,
+                  prefixAttributes as NSDictionary == valueAttributes as NSDictionary,
+                  (prefix.string as NSString).substring(
+                      with: NSRange(location: offset, length: count)
+                  ) == (value.string as NSString).substring(
+                      with: NSRange(location: offset, length: count)
+                  ) else {
+                return false
+            }
+            offset += count
+        }
+        return true
     }
 
     /// Length of the prose, excluding any typing dot.
@@ -261,6 +341,7 @@ final class MarkdownTextRenderer {
 
         proseLength = string.length
         typingDotLocation = nil
+        renderedProse = nil
         textContentStorage.performEditingTransaction {
             textContentStorage.textStorage?.setAttributedString(string)
         }

@@ -29,6 +29,50 @@ struct TextKitMarkdownParityTests {
         #expect(view.accessibilityValue() as? String == "Hello from TextKit")
     }
 
+    @Test("Changing render options refreshes existing TextKit content")
+    func optionChangesRefreshExistingContent() {
+        var options = MarkdownOptions.assistantTranscript()
+        options.textPointSize = 12
+        let view = MarkdownTextBlockView(options: options)
+        let blocks = [MarkdownItem.TextBlock(
+            runs: [InlineRun(text: "Text that wraps across several words")],
+            kind: .paragraph
+        )]
+        view.configure(
+            blocks: blocks,
+            options: options,
+            streaming: false,
+            fadeState: nil
+        )
+        let compactHeight = view.height(forWidth: 120)
+
+        options.textPointSize = 24
+        view.configure(
+            blocks: blocks,
+            options: options,
+            streaming: false,
+            fadeState: nil
+        )
+
+        #expect(view.height(forWidth: 120) > compactHeight)
+    }
+
+    @Test("The presentation display link sleeps while no text is pending")
+    func presentationDisplayLinkPausesWhenInactive() {
+        let coordinator = StreamingPresentationDisplayLink.Coordinator(
+            isActive: false,
+            onFrame: { _ in }
+        )
+        coordinator.attach(to: NSView(frame: .zero))
+
+        #expect(coordinator.isDisplayLinkPaused)
+        coordinator.setActive(true)
+        #expect(!coordinator.isDisplayLinkPaused)
+        coordinator.setActive(false)
+        #expect(coordinator.isDisplayLinkPaused)
+        coordinator.invalidate()
+    }
+
     @Test("Custom TextKit prose resolves rendered links for click handling")
     @MainActor
     func customTextKitLinkHitTesting() throws {
@@ -45,18 +89,41 @@ struct TextKitMarkdownParityTests {
         #expect(renderer.link(at: CGPoint(x: rect.midX, y: rect.midY))?.absoluteString == "https://rapidmlx.ai")
     }
 
-    @Test("A long transcript does not release follow mode for a short new answer")
-    func followModeUsesCurrentAnswerGrowth() {
-        #expect(!TranscriptScrollPositionProbe.Coordinator.answerOutgrewViewport(
-            documentHeight: 5_300,
-            documentHeightAtStreamStart: 5_000,
-            viewportHeight: 800
-        ))
-        #expect(TranscriptScrollPositionProbe.Coordinator.answerOutgrewViewport(
-            documentHeight: 5_900,
-            documentHeightAtStreamStart: 5_000,
-            viewportHeight: 800
-        ))
+    @Test("Streaming prose appends through the incremental TextKit path")
+    func streamingAppendIsIncremental() {
+        let renderer = MarkdownTextRenderer(options: .assistantTranscript())
+        let first = [MarkdownItem.TextBlock(
+            runs: [InlineRun(text: "alpha beta")], kind: .paragraph
+        )]
+        let second = [MarkdownItem.TextBlock(
+            runs: [InlineRun(text: "alpha beta gamma")], kind: .paragraph
+        )]
+
+        guard case .initial = renderer.setBlocks(first, showsTypingDot: true) else {
+            Issue.record("the first render should initialise storage")
+            return
+        }
+        guard case .incremental = renderer.setBlocks(second, showsTypingDot: true) else {
+            Issue.record("an appended stream should use the incremental path")
+            return
+        }
+        #expect(renderer.accessibleText == "alpha beta gamma")
+    }
+
+    @Test("Structural markdown changes use the replacement path")
+    func structuralUpdateReplacesStorage() {
+        let renderer = MarkdownTextRenderer(options: .assistantTranscript())
+        renderer.setBlocks([
+            .init(runs: [InlineRun(text: "alpha beta")], kind: .paragraph)
+        ])
+        let update = renderer.setBlocks([
+            .init(runs: [InlineRun(text: "rewritten")], kind: .paragraph)
+        ])
+        guard case .replaced = update else {
+            Issue.record("a rewritten document must not be treated as an append")
+            return
+        }
+        #expect(renderer.accessibleText == "rewritten")
     }
 
     // MARK: - Structural parity with the MarkdownUI path

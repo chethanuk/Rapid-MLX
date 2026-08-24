@@ -40,7 +40,7 @@ struct JumpToBottomScrollTests {
         )
     }
 
-    /// Drains the coalescing hop `requestScrollToBottom` schedules.
+    /// Drains the target-update hop `requestScrollToBottom` schedules.
     private func settle() async {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 60_000_000)
@@ -66,11 +66,21 @@ struct JumpToBottomScrollTests {
         coordinator.attach(to: probe)
         coordinator.honourScrollRequest(1)
         await settle()
+        coordinator.advanceScrollFrame(duration: 1.0 / 60.0)
 
         #expect(
             scrollView.contentView.bounds.minY > 0,
             "the transcript did not move — re-pinning alone never scrolled an already-attached view"
         )
+        #expect(
+            scrollView.contentView.bounds.minY < 1_800,
+            "the first frame jumped directly to the target instead of moving smoothly"
+        )
+
+        for _ in 0..<30 {
+            coordinator.advanceScrollFrame(duration: 1.0 / 60.0)
+        }
+        #expect(abs(scrollView.contentView.bounds.minY - 1_800) < 1)
     }
 
     /// The coalescing this sits next to exists because `updateNSView` runs for
@@ -117,6 +127,85 @@ struct JumpToBottomScrollTests {
         await settle()
 
         #expect(scrollView.contentView.bounds.minY == 0)
+    }
+
+    @Test("Unchanged document heights do not schedule follow scrolling")
+    func unchangedDocumentHeightIsIgnored() {
+        #expect(!TranscriptScrollPositionProbe.Coordinator.documentHeightChanged(
+            from: 2_000, to: 2_000
+        ))
+        #expect(!TranscriptScrollPositionProbe.Coordinator.documentHeightChanged(
+            from: 2_000, to: 2_000.4
+        ))
+        #expect(TranscriptScrollPositionProbe.Coordinator.documentHeightChanged(
+            from: 2_000, to: 2_001
+        ))
+        #expect(TranscriptScrollPositionProbe.Coordinator.documentHeightChanged(
+            from: nil, to: 2_000
+        ))
+    }
+
+    @Test("Frame interpolation moves monotonically and converges")
+    func frameInterpolationConverges() {
+        var current: CGFloat = 0
+        var offsets: [CGFloat] = []
+
+        for _ in 0..<30 {
+            current = TranscriptScrollPositionProbe.Coordinator.nextScrollOffset(
+                current: current,
+                target: 100,
+                duration: 1.0 / 60.0
+            )
+            offsets.append(current)
+        }
+
+        #expect(offsets[0] > 0 && offsets[0] < 100)
+        #expect(zip(offsets, offsets.dropFirst()).allSatisfy { $0.0 <= $0.1 })
+        #expect(offsets[0] < offsets[1])
+        #expect(current == 100)
+    }
+
+    @Test("A user scroll cancels an in-flight bottom target")
+    func userScrollCancelsTarget() async {
+        var pinned = false
+        let binding = Binding(get: { pinned }, set: { pinned = $0 })
+        let (scrollView, _, probe) = makeScrollView()
+        let coordinator = makeCoordinator(pinned: binding)
+
+        coordinator.attach(to: probe)
+        coordinator.honourScrollRequest(0)
+        pinned = true
+        coordinator.honourScrollRequest(1)
+        await settle()
+
+        NotificationCenter.default.post(
+            name: NSScrollView.willStartLiveScrollNotification,
+            object: scrollView
+        )
+        let originBeforeFrame = scrollView.contentView.bounds.origin
+        coordinator.advanceScrollFrame(duration: 1.0 / 60.0)
+
+        #expect(!pinned)
+        #expect(scrollView.contentView.bounds.origin == originBeforeFrame)
+    }
+
+    @Test("A long streaming answer stays pinned without user input")
+    func longAnswerKeepsFollowing() async {
+        var pinned = true
+        let binding = Binding(get: { pinned }, set: { pinned = $0 })
+        let (scrollView, document, probe) = makeScrollView()
+        let coordinator = makeCoordinator(pinned: binding)
+
+        coordinator.attach(to: probe)
+        await settle()
+        #expect(abs(scrollView.contentView.bounds.minY - 1_800) < 1)
+
+        document.setFrameSize(NSSize(width: 400, height: 4_000))
+        await settle()
+        coordinator.advanceScrollFrame(duration: 1.0 / 60.0)
+
+        #expect(pinned)
+        #expect(scrollView.contentView.bounds.minY > 1_800)
     }
 }
 

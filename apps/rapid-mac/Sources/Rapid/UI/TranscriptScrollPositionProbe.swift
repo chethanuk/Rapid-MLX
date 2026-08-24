@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 /// Owns transcript follow-mode at the AppKit layer. User live-scroll gestures
@@ -7,9 +8,6 @@ import SwiftUI
 struct TranscriptScrollPositionProbe: NSViewRepresentable {
     @Binding var isPinnedToBottom: Bool
     let bottomResumeSlack: CGFloat
-    /// Whether an answer is currently being written. Drives the one-shot
-    /// release described on ``Coordinator/releaseIfAnswerOutgrewViewport()``.
-    var isStreaming: Bool = false
     /// Bumped by anything outside that wants the transcript moved to the
     /// bottom right now, ``JumpToBottomButton`` being the only caller today.
     ///
@@ -43,7 +41,6 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
             isPinnedToBottom: $isPinnedToBottom,
             bottomResumeSlack: bottomResumeSlack
         )
-        context.coordinator.setStreaming(isStreaming)
         context.coordinator.attach(to: probe)
         // After ``attach``: a first render arrives with the token already at
         // its initial value, and attaching is what anchors that one.
@@ -62,6 +59,13 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         private weak var documentView: NSView?
         private var isLiveScrolling = false
         private var bottomScrollScheduled = false
+        private var pendingBottomTargetIsAnimated = true
+        private var targetScrollOrigin: NSPoint?
+        private var displayLink: CADisplayLink?
+        /// Last document height handled by ``documentFrameDidChange``. AppKit
+        /// can post several frame notifications for one layout pass; equal
+        /// heights do not require another follow-to-bottom operation.
+        private var lastDocumentHeight: CGFloat?
         /// Last token acted on. Starts at `nil` so the initial value — whatever
         /// it happens to be — is recorded rather than treated as a request.
         private var lastScrollRequest: Int?
@@ -83,23 +87,21 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         }
 
         func attach(to probe: NSView) {
+            attachDisplayLink(to: probe)
             guard let enclosingScrollView = probe.enclosingScrollView else { return }
             var attachmentChanged = false
             if enclosingScrollView !== scrollView {
-                detach()
+                detachScrollView()
                 scrollView = enclosingScrollView
                 observeScrollView(enclosingScrollView)
                 attachmentChanged = true
             }
             attachmentChanged = observeDocumentViewIfNeeded() || attachmentChanged
-            if isStreaming, documentHeightAtStreamStart == nil {
-                documentHeightAtStreamStart = documentView?.bounds.height
-            }
             // updateNSView runs for every streamed mutation. Document-frame
             // notifications own steady-state following; only a new attachment
             // needs an explicit initial anchor (#1877).
             if attachmentChanged, isPinnedToBottom.wrappedValue {
-                requestScrollToBottom()
+                requestScrollToBottom(animated: false)
             }
         }
 
@@ -114,11 +116,20 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         }
 
         func detach() {
+            detachScrollView()
+            displayLink?.invalidate()
+            displayLink = nil
+        }
+
+        private func detachScrollView() {
             NotificationCenter.default.removeObserver(self)
             scrollView = nil
             documentView = nil
             isLiveScrolling = false
             bottomScrollScheduled = false
+            pendingBottomTargetIsAnimated = true
+            lastDocumentHeight = nil
+            cancelScrollTarget()
         }
 
         @objc private func liveScrollWillStart(_ notification: Notification) {
@@ -134,7 +145,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         }
 
         @objc private func boundsDidChange(_ notification: Notification) {
-            // Our own ``scrollToBottom`` emits this too; it is not user intent.
+            // Our frame-driven movement emits this too; it is not user intent.
             guard !isProgrammaticScroll else { return }
             if !isAtBottom {
                 // Any move away from the bottom releases the pin — whether or
@@ -165,72 +176,26 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         }
 
         @objc private func documentFrameDidChange(_ notification: Notification) {
+            guard let documentView else { return }
+            let height = documentView.bounds.height
+            let previousHeight = lastDocumentHeight
+            lastDocumentHeight = height
+            guard Self.documentHeightChanged(
+                from: previousHeight, to: height
+            ) else { return }
             guard isPinnedToBottom.wrappedValue else { return }
-            if releaseIfAnswerOutgrewViewport() { return }
             requestScrollToBottom()
         }
 
-        /// Whether this stream has already handed control back to the reader.
-        private var didReleaseForCurrentStream = false
-        private var isStreaming = false
-        private var documentHeightAtStreamStart: CGFloat?
-
-        func setStreaming(_ streaming: Bool) {
-            guard streaming != isStreaming else { return }
-            isStreaming = streaming
-            if streaming {
-                didReleaseForCurrentStream = false
-                documentHeightAtStreamStart = documentView?.bounds.height
-            } else {
-                documentHeightAtStreamStart = nil
-            }
-        }
-
-        /// Stop following the moment a streamed answer grows taller than the
-        /// viewport, once per stream.
-        ///
-        /// Following unconditionally is right while the answer still fits: the
-        /// text simply fills space the reader can already see, and nothing
-        /// appears to move. Past that point every batch drags the viewport
-        /// down, so the reader is held at the newest words and cannot read the
-        /// answer from its start without fighting the scroll — which is what
-        /// "keeps slamming into the bottom" describes.
-        ///
-        /// Releasing the pin instead leaves the text where the reader is
-        /// looking and surfaces ``JumpToBottomButton``, so catching up becomes
-        /// something they ask for rather than something done to them. One shot
-        /// per stream: after the reader presses the button they are pinned
-        /// again deliberately, and that choice is theirs to keep.
-        ///
-        /// Returns true when it released, meaning the caller must not scroll.
-        private func releaseIfAnswerOutgrewViewport() -> Bool {
-            guard isStreaming, !didReleaseForCurrentStream else { return false }
-            guard let scrollView, let documentView,
-                  let startingHeight = documentHeightAtStreamStart else { return false }
-            let viewportHeight = scrollView.contentView.bounds.height
-            guard Self.answerOutgrewViewport(
-                documentHeight: documentView.bounds.height,
-                documentHeightAtStreamStart: startingHeight,
-                viewportHeight: viewportHeight
-            ) else { return false }
-            didReleaseForCurrentStream = true
-            // Not `setPinned(false)` — that helper is reserved for the
-            // user-gesture path (`liveScrollWillStart` / `boundsDidChange`).
-            // This is the app deciding to stop following, and routing it
-            // through the same helper would blur who released the pin.
-            if isPinnedToBottom.wrappedValue {
-                isPinnedToBottom.wrappedValue = false
-            }
-            return true
-        }
-
-        nonisolated static func answerOutgrewViewport(
-            documentHeight: CGFloat,
-            documentHeightAtStreamStart: CGFloat,
-            viewportHeight: CGFloat
+        /// Frame notifications also cover unchanged-size layout passes. Only
+        /// a meaningful height change can move the transcript's trailing edge;
+        /// filtering the rest prevents scroll scheduling from becoming part of
+        /// the normal streaming redraw loop.
+        nonisolated static func documentHeightChanged(
+            from previous: CGFloat?, to current: CGFloat, tolerance: CGFloat = 0.5
         ) -> Bool {
-            viewportHeight > 0
-                && documentHeight - documentHeightAtStreamStart > viewportHeight
+            guard let previous else { return true }
+            return abs(previous - current) > tolerance
         }
 
         private func observeScrollView(_ scrollView: NSScrollView) {
@@ -275,6 +240,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 )
             }
             documentView = nextDocumentView
+            lastDocumentHeight = nextDocumentView.bounds.height
             nextDocumentView.postsFrameChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self,
@@ -300,28 +266,41 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
             return distance <= bottomResumeSlack
         }
 
-        /// True while ``scrollToBottom`` is driving the clip view, so the
+        /// True while a display frame is driving the clip view, so the
         /// bounds notification it emits is not mistaken for the user moving.
         private var isProgrammaticScroll = false
-        /// SwiftUI can resize the document several times for one streamed
-        /// token. Collapse those notifications into one end-of-run-loop scroll.
-        private func requestScrollToBottom() {
+        /// SwiftUI can resize the document several times for one presented
+        /// frame. Collapse those notifications into one target update at the
+        /// end of the run loop; the display link owns actual movement.
+        private func requestScrollToBottom(animated: Bool = true) {
+            if !animated { pendingBottomTargetIsAnimated = false }
             guard !bottomScrollScheduled else { return }
             bottomScrollScheduled = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.bottomScrollScheduled = false
+                let shouldAnimate = self.pendingBottomTargetIsAnimated
+                self.pendingBottomTargetIsAnimated = true
                 guard self.isPinnedToBottom.wrappedValue, !self.isLiveScrolling else {
                     return
                 }
-                self.scrollToBottom()
+                self.updateBottomTarget(animated: shouldAnimate)
             }
         }
 
-        private func scrollToBottom() {
-            guard let scrollView, let documentView else { return }
-            isProgrammaticScroll = true
-            defer { isProgrammaticScroll = false }
+        private func updateBottomTarget(animated: Bool) {
+            guard let target = constrainedBottomOrigin() else { return }
+            if !animated {
+                applyScroll(to: target)
+                cancelScrollTarget()
+                return
+            }
+            targetScrollOrigin = target
+            displayLink?.isPaused = false
+        }
+
+        private func constrainedBottomOrigin() -> NSPoint? {
+            guard let scrollView, let documentView else { return nil }
             let clipView = scrollView.contentView
             let targetY: CGFloat
             if documentView.isFlipped {
@@ -346,20 +325,98 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 origin: NSPoint(x: clipView.bounds.minX, y: targetY),
                 size: clipView.bounds.size
             )
-            let constrained = clipView.constrainBoundsRect(proposed).origin
-            // Scrolling to the current origin still emits AppKit notifications
-            // and schedules SwiftUI layout. At streaming cadence that no-op can
-            // become a self-sustaining AttributeGraph loop (#1877).
-            guard abs(clipView.bounds.minY - constrained.y) > 0.5 else { return }
-            clipView.scroll(to: constrained)
+            return clipView.constrainBoundsRect(proposed).origin
+        }
+
+        /// Advance the current scroll target by one display frame. Internal so
+        /// deterministic tests can drive the same path without a real screen.
+        func advanceScrollFrame(duration: TimeInterval) {
+            guard isPinnedToBottom.wrappedValue, !isLiveScrolling,
+                  let target = targetScrollOrigin,
+                  let scrollView else {
+                cancelScrollTarget()
+                return
+            }
+            let clipView = scrollView.contentView
+            let current = clipView.bounds.origin
+            let nextY = Self.nextScrollOffset(
+                current: current.y,
+                target: target.y,
+                duration: duration
+            )
+            applyScroll(to: NSPoint(x: target.x, y: nextY))
+
+            if abs(nextY - target.y) <= Self.scrollSnapTolerance {
+                applyScroll(to: target)
+                cancelScrollTarget()
+            }
+        }
+
+        nonisolated static func nextScrollOffset(
+            current: CGFloat,
+            target: CGFloat,
+            duration: TimeInterval,
+            responseTime: TimeInterval = 0.045
+        ) -> CGFloat {
+            let distance = target - current
+            guard abs(distance) > scrollSnapTolerance else { return target }
+            let safeDuration = duration.isFinite && duration > 0
+                ? min(duration, 1.0 / 15.0)
+                : 1.0 / 60.0
+            let progress = 1 - exp(-safeDuration / max(responseTime, 0.001))
+            let next = current + distance * CGFloat(progress)
+            return abs(target - next) <= scrollSnapTolerance ? target : next
+        }
+
+        private nonisolated static let scrollSnapTolerance: CGFloat = 0.5
+        private nonisolated static let scrollApplicationTolerance: CGFloat = 0.01
+
+        private func applyScroll(to origin: NSPoint) {
+            guard let scrollView else { return }
+            let clipView = scrollView.contentView
+            guard abs(clipView.bounds.minY - origin.y) > Self.scrollApplicationTolerance
+                    || abs(clipView.bounds.minX - origin.x)
+                        > Self.scrollApplicationTolerance else {
+                return
+            }
+            isProgrammaticScroll = true
+            defer { isProgrammaticScroll = false }
+            clipView.scroll(to: origin)
             scrollView.reflectScrolledClipView(clipView)
+        }
+
+        private func cancelScrollTarget() {
+            targetScrollOrigin = nil
+            displayLink?.isPaused = true
+        }
+
+        private func attachDisplayLink(to probe: NSView) {
+            guard displayLink == nil else { return }
+            let link = probe.displayLink(
+                target: self,
+                selector: #selector(displayLinkDidFire(_:))
+            )
+            link.isPaused = true
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+
+        @objc private func displayLinkDidFire(_ link: CADisplayLink) {
+            let duration = link.duration > 0
+                ? link.duration
+                : link.targetTimestamp - link.timestamp
+            advanceScrollFrame(duration: duration)
         }
 
         private func setPinned(_ pinned: Bool) {
             if pinned != isPinnedToBottom.wrappedValue {
                 isPinnedToBottom.wrappedValue = pinned
             }
-            if pinned { requestScrollToBottom() }
+            if pinned {
+                requestScrollToBottom()
+            } else {
+                cancelScrollTarget()
+            }
         }
     }
 }

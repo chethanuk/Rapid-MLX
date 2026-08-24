@@ -5,8 +5,8 @@ import SwiftUI
 ///
 /// Replaces the MarkdownUI-backed `LaTeXMarkdownView` for settled messages
 /// (#1843). Streaming messages render through
-/// ``StreamingTextKitMarkdownView`` — a debounced compiler feeding the same
-/// block stack — so both paths are TextKit 2 now.
+/// ``StreamingTextKitMarkdownView`` — an incremental, frame-presented document
+/// feeding the same block stack — so both paths are TextKit 2 now.
 ///
 /// ## What carries over unchanged
 ///

@@ -1,11 +1,11 @@
 import Foundation
 
 
-/// ⚠️ UNWIRED — not instantiated anywhere in this app. The production
-/// streaming compiler is ``StreamingMarkdownStore`` (also a 100 ms debounce,
-/// per-message, with a revision token); this class is a prototype port from
-/// native-chat that nothing calls. Keep it for a future PR or delete it —
-/// either way it must not be mistaken for the live stage-two below.
+/// ⚠️ UNWIRED — not instantiated anywhere in this app. The production path is
+/// ``StreamingMarkdownStore`` with a frame-driven presentation buffer and an
+/// incremental document; this class is a prototype port from native-chat that
+/// nothing calls. Keep it for a future PR or delete it — either way it must not
+/// be mistaken for the live stage-two below.
 ///
 /// Debounced markdown compilation for streaming messages.
 ///

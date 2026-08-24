@@ -89,6 +89,33 @@ struct TextFadeBacklogTests {
         }
         #expect((alpha ?? 1) > 0.99, "text stayed dim after the schedule elapsed")
     }
+
+    @Test("Disabled streaming fade leaves new text visible immediately")
+    func disabledFadeDoesNotHideNewText() {
+        let (renderer, animator) = makeAnimator()
+        animator.configuration = .off
+        renderer.setBlocks([
+            .init(runs: [InlineRun(text: "latest answer")], kind: .paragraph)
+        ])
+        animator.contentDidGrow()
+
+        guard let location = renderer.textContentStorage.location(
+            renderer.textContentStorage.documentRange.location, offsetBy: 0
+        ) else {
+            Issue.record("streaming text has no TextKit location")
+            return
+        }
+        var alpha: CGFloat?
+        renderer.textLayoutManager.enumerateRenderingAttributes(
+            from: location, reverse: false
+        ) { _, attributes, _ in
+            alpha = (attributes[.foregroundColor] as? NSColor)?.alphaComponent
+            return false
+        }
+        // No temporary foreground attribute means TextKit uses the normal
+        // opaque text color after the disabled fade clears its overrides.
+        #expect((alpha ?? 1) > 0.99, "new streaming text was hidden by the fade")
+    }
 }
 
 /// The rate the reveal adapts to must be *units per second*, not *flushes per

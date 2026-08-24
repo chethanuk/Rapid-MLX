@@ -180,11 +180,12 @@ private func copySanitizedToPasteboard(_ raw: String) {
 /// or attachments.
 struct ChatView: View {
     @Bindable var viewModel: ChatViewModel
-    /// Compiled blocks for the streaming message. Keeps the raw streamed
-    /// string out of the streaming view's inputs — see
-    /// `StreamingMarkdownStore`. (`MessageRow` still receives the raw
-    /// `ChatMessage` for non-markdown concerns like tool chips.)
+    /// Incremental documents for assistant messages created in this view.
+    /// A completed row keeps its document so finishing never swaps renderers.
     @State private var streamingMarkdown = StreamingMarkdownStore()
+    /// Messages that started on the incremental renderer keep using it after
+    /// completion. The set changes once per response, not once per token.
+    @State private var incrementalAssistantIDs: Set<UUID> = []
     @Bindable var server: ServerManager
     @Binding var alias: String
     /// The single readiness value for this window, resolved once by
@@ -254,6 +255,20 @@ struct ChatView: View {
         nonmutating set { attachmentDrafts[viewModel.activeConversationID] = newValue }
     }
 
+    /// Startup failures and app-added grounding sources can change content
+    /// after `streamingBody` disappears. Observe only the retained live row so
+    /// token updates do not compare every completed message in the transcript.
+    private var retainedSettledAssistantBody: ChatViewModel.StreamingBody? {
+        guard let id = streamingMarkdown.documentMessageID,
+              incrementalAssistantIDs.contains(id),
+              let message = messages.first(where: { $0.id == id }),
+              message.role == .assistant,
+              message.status != .streaming else {
+            return nil
+        }
+        return .init(id: message.id, text: message.content)
+    }
+
     var body: some View {
         // The reader exists for one value: the surface's own width, which
         // the lifecycle band needs in order to pick its height on the
@@ -318,26 +333,66 @@ struct ChatView: View {
         } else {
             ScrollView {
                 transcriptRows
-                    .onChange(of: viewModel.streamingBody) { _, body in
-                        // The one place the raw string is fed into the
-                        // debounced compiler. The row itself is still
-                        // invalidated per SSE batch — `MessageRow` holds the
-                        // raw `ChatMessage` — but the expensive part (markdown
-                        // parse + block rebuild) now runs on the store's
-                        // 100 ms beat instead of once per delta.
+                    .onChange(of: viewModel.streamingBody, initial: true) { previous, body in
+                        // The one place the raw accumulated string enters the
+                        // presentation buffer. The live row does not receive
+                        // this growing value; display frames release deltas to
+                        // its incremental Markdown document instead.
                         if let body {
+                            if let previous, previous.id != body.id {
+                                streamingMarkdown.finish(
+                                    id: previous.id,
+                                    finalText: authoritativeContent(
+                                        for: previous.id,
+                                        fallback: previous.text
+                                    )
+                                )
+                            }
+                            if streamingMarkdown.documentMessageID != body.id {
+                                incrementalAssistantIDs.removeAll()
+                            }
+                            incrementalAssistantIDs.insert(body.id)
                             streamingMarkdown.enqueue(id: body.id, text: body.text)
+                        } else if let previous {
+                            streamingMarkdown.finish(
+                                id: previous.id,
+                                finalText: authoritativeContent(
+                                    for: previous.id,
+                                    fallback: previous.text
+                                )
+                            )
                         } else {
                             streamingMarkdown.finish()
+                        }
+                    }
+                    .onChange(of: retainedSettledAssistantBody) { _, body in
+                        guard let body else { return }
+                        streamingMarkdown.synchronizeCompleted(
+                            id: body.id,
+                            text: body.text
+                        )
+                    }
+                    .onChange(of: messages.map(\.id), initial: true) { _, ids in
+                        let visibleIDs = Set(ids)
+                        incrementalAssistantIDs.formIntersection(visibleIDs)
+                        if let owner = streamingMarkdown.documentMessageID,
+                           !visibleIDs.contains(owner) {
+                            streamingMarkdown.reset()
                         }
                     }
                     .background(
                         TranscriptScrollPositionProbe(
                             isPinnedToBottom: $isPinnedToBottom,
                             bottomResumeSlack: bottomResumeSlack,
-                            isStreaming: viewModel.isStreaming,
                             scrollToBottomRequest: scrollToBottomRequest
                         )
+                    )
+                    .background(
+                        StreamingPresentationDisplayLink(
+                            isActive: streamingMarkdown.isPresentationActive
+                        ) { duration in
+                            streamingMarkdown.advancePresentationFrame(duration: duration)
+                        }
                     )
             }
             // The probe is the single owner of transcript positioning.
@@ -352,6 +407,8 @@ struct ChatView: View {
             // at A's old scroll offset instead of B's latest message.
             .onChange(of: viewModel.activeConversationID) { _, _ in
                 isPinnedToBottom = true
+                incrementalAssistantIDs.removeAll()
+                streamingMarkdown.reset()
             }
             .overlay(alignment: .bottom) { jumpToBottomOverlay }
         }
@@ -403,67 +460,80 @@ struct ChatView: View {
         // and the cost is bounded by conversation length rather than
         // transcript length. Settled rows are not recompiled on streamed
         // deltas — `ForEach` re-instantiates only the row whose identity
-        // changed, and their markdown views read no per-delta state; profiled
-        // at ~0.2 % of the main thread during a stream. `MessageRow` itself
-        // still re-evaluates per delta (it holds the raw `ChatMessage`), but
-        // its expensive part, the markdown compile, is what this keeps cheap.
+        // changed, and their markdown views read no per-delta state. The live
+        // assistant receives a presentation snapshot whose growing prose is
+        // blanked while streaming, so a token update does not rebuild row
+        // chrome. Its Markdown child reads the incremental store directly.
         VStack(alignment: .leading, spacing: RapidTheme.Space.lg) {
             ForEach(messages) { message in
                 if message.role != .tool {
+                    let usesIncrementalMarkdown = message.role == .assistant
+                        && (
+                            message.status == .streaming
+                                || (
+                                    incrementalAssistantIDs.contains(message.id)
+                                        && streamingMarkdown.hasDocument(for: message.id)
+                                )
+                        )
                     MessageRow(
-                        message: message,
-                        isStreaming: viewModel.isStreaming,
-                        streamingMarkdown: streamingMarkdown,
-                        toolResults: toolResults,
-                        onEdit: { newContent in
-                            // Edit and Retry re-enter ``send`` inside the view
-                            // model, so they answer to the same readiness gate
-                            // the composer does. Without this, a message action
-                            // could kick off a turn the Send button is refusing
-                            // to allow one row below.
-                            guard acknowledgeIfNotReady() else { return false }
-                            return viewModel.editUserMessage(
-                                id: message.id,
-                                newContent: newContent,
-                                alias: alias,
-                                supportsImageInput: supportsImageInput
-                            )
-                        },
-                        onRetry: {
-                            guard acknowledgeIfNotReady() else { return false }
-                            return viewModel.retryAssistantMessage(
-                                id: message.id,
-                                alias: alias,
-                                supportsImageInput: supportsImageInput
-                            )
-                        },
-                        // Retry re-enters ``send``, so it answers to the same
-                        // lifecycle gate — and must LOOK like it does. It used
-                        // to render at full weight in every state and then do
-                        // nothing at all when the model wasn't running: the
-                        // gate fired, the banner flashed 400pt away at the
-                        // bottom of the window, and the button the user
-                        // actually pressed gave no feedback whatsoever. It now
-                        // dims and carries the Send tooltip's sentence, which
-                        // is the pattern ``sendOrStopButton`` already uses.
-                        retryEnabled: readiness.sendAllowed,
-                        retryTooltip: readiness.sendTooltip,
-                        // Switching branches replays no turn, so unlike Edit
-                        // and Retry it deliberately does NOT go through
-                        // ``acknowledgeIfNotReady`` — reading an answer the
-                        // model already produced must keep working with the
-                        // model stopped.
-                        branchPosition: viewModel.branchPosition(of: message.id),
-                        onSelectBranch: { delta in
-                            _ = viewModel.stepBranch(from: message.id, by: delta)
-                        },
-                        // Deleting removes content the model already produced,
-                        // so like the branch switcher it stays available with
-                        // the model stopped.
-                        deletionImpact: viewModel.deletionImpact(of: message.id),
-                        onDelete: {
-                            _ = viewModel.deleteMessage(id: message.id)
-                        }
+                            message: ChatView.transcriptPresentationMessage(message),
+                            isStreaming: viewModel.isStreaming,
+                            toolResults: toolResults,
+                            assistantHasContent: message.role == .assistant
+                                ? !message.content.isEmpty
+                                : nil,
+                            streamingMarkdown: usesIncrementalMarkdown
+                                ? streamingMarkdown
+                                : nil,
+                            onEdit: { newContent in
+                                // Edit and Retry re-enter ``send`` inside the view
+                                // model, so they answer to the same readiness gate
+                                // the composer does. Without this, a message action
+                                // could kick off a turn the Send button is refusing
+                                // to allow one row below.
+                                guard acknowledgeIfNotReady() else { return false }
+                                return viewModel.editUserMessage(
+                                    id: message.id,
+                                    newContent: newContent,
+                                    alias: alias,
+                                    supportsImageInput: supportsImageInput
+                                )
+                            },
+                            onRetry: {
+                                guard acknowledgeIfNotReady() else { return false }
+                                return viewModel.retryAssistantMessage(
+                                    id: message.id,
+                                    alias: alias,
+                                    supportsImageInput: supportsImageInput
+                                )
+                            },
+                            // Retry re-enters ``send``, so it answers to the same
+                            // lifecycle gate — and must LOOK like it does. It used
+                            // to render at full weight in every state and then do
+                            // nothing at all when the model wasn't running: the
+                            // gate fired, the banner flashed 400pt away at the
+                            // bottom of the window, and the button the user
+                            // actually pressed gave no feedback whatsoever. It now
+                            // dims and carries the Send tooltip's sentence, which
+                            // is the pattern ``sendOrStopButton`` already uses.
+                            retryEnabled: readiness.sendAllowed,
+                            retryTooltip: readiness.sendTooltip,
+                            // Switching branches replays no turn, so unlike Edit
+                            // and Retry it deliberately does NOT go through
+                            // ``acknowledgeIfNotReady`` — reading an answer the
+                            // model already produced must keep working with the
+                            // model stopped.
+                            branchPosition: viewModel.branchPosition(of: message.id),
+                            onSelectBranch: { delta in
+                                _ = viewModel.stepBranch(from: message.id, by: delta)
+                            },
+                            // Deleting removes content the model already produced,
+                            // so like the branch switcher it stays available with
+                            // the model stopped.
+                            deletionImpact: viewModel.deletionImpact(of: message.id),
+                            onDelete: {
+                                _ = viewModel.deleteMessage(id: message.id)
+                            }
                     )
                     .frame(maxWidth: contentMaxWidth, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -485,6 +555,23 @@ struct ChatView: View {
             if let id = m.toolCallID { out[id] = m }
         }
         return out
+    }
+
+    /// Keep transport deltas out of `MessageRow` while preserving all stable
+    /// metadata and the row's identity. The authoritative content continues
+    /// growing in the view model and is fed to `StreamingMarkdownStore`; the
+    /// completed snapshot enters this row exactly once when status settles.
+    static func transcriptPresentationMessage(_ message: ChatMessage) -> ChatMessage {
+        guard message.role == .assistant, message.status == .streaming else {
+            return message
+        }
+        var presentation = message
+        presentation.content = ""
+        return presentation
+    }
+
+    private func authoritativeContent(for id: UUID, fallback: String) -> String {
+        messages.first(where: { $0.id == id })?.content ?? fallback
     }
 
     /// Whether the lifecycle band owns the current moment.
@@ -1229,10 +1316,15 @@ struct ChatView: View {
 private struct MessageRow: View {
     let message: ChatMessage
     let isStreaming: Bool
-    let streamingMarkdown: StreamingMarkdownStore
     /// Tool-result rows keyed by the ``ToolCall.id`` they answer. Used to
     /// pair each dispatched call with its outcome inside this row.
     var toolResults: [String: ChatMessage] = [:]
+    /// The authoritative body is deliberately not part of `message` while it
+    /// streams. This one-bit projection changes only when content first lands.
+    var assistantHasContent: Bool? = nil
+    /// Present for assistant rows that originated from a live stream. Keeping
+    /// it after completion preserves the same incremental Markdown renderer.
+    var streamingMarkdown: StreamingMarkdownStore? = nil
     var onEdit: (String) -> Bool = { _ in false }
     var onRetry: () -> Bool = { false }
     /// Whether Retry can actually start a turn right now. Mirrors the
@@ -1513,22 +1605,16 @@ private struct MessageRow: View {
                 Text(ChatMessage.toolCallArtifactSuppressedCaptionCopy)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            } else if !message.content.isEmpty {
-                // #1843: both paths now render through TextKit 2.
-                //
-                // Streaming goes through a debounced compiler that caches per
-                // message, so a flush reparses on a 100 ms beat instead of
-                // rebuilding a SwiftUI subtree from the whole accumulated
-                // string every time. That is the O(length²) term `8f7e0847`
-                // could only bound rather than remove.
-                //
-                // The split is per-message (`message.status`), not the view
-                // model's `isStreaming` — the latter is true for the whole
-                // transcript while the last answer arrives, so keying off it
-                // would swap every earlier message's renderer the moment a new
-                // one starts.
-                if message.status == .streaming {
-                    StreamingTextKitMarkdownView(store: streamingMarkdown)
+            } else if hasAssistantContent {
+                if let streamingMarkdown {
+                    // The same child remains mounted when status changes from
+                    // streaming to complete. Its final mutable tail is
+                    // committed in place; actions and stats appear below it
+                    // without replacing or remeasuring the Markdown renderer.
+                    StreamingTextKitMarkdownView(
+                        store: streamingMarkdown,
+                        messageID: message.id
+                    )
                 } else {
                     TextKitMarkdownView(content: message.content)
                 }
@@ -1574,6 +1660,10 @@ private struct MessageRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var hasAssistantContent: Bool {
+        assistantHasContent ?? !message.content.isEmpty
     }
 
     /// "Calling web_search…" filler for the window between a tool_calls
