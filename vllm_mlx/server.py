@@ -693,6 +693,15 @@ async def lifespan(app: FastAPI):
             gpu_memory_utilization=_resident_gpu_memory_utilization,
         )
     if _engine is not None:
+        from .routes.audio import audio_routes_should_register
+        from .runtime.audio_worker import bind_audio_worker
+
+        if audio_routes_should_register(
+            model_name=_model_name,
+            model_alias=_model_alias,
+            enable_audio_lane=_enable_audio_lane,
+        ):
+            bind_audio_worker(_engine)
         _primary_entry = next(
             (
                 entry
@@ -873,8 +882,14 @@ async def lifespan(app: FastAPI):
         if _mcp_manager is not None:
             await _mcp_manager.stop()
             logger.info("MCP manager stopped")
+        from .routes.audio import shutdown_audio_lanes
+
+        await shutdown_audio_lanes()
         if _residency_manager is not None:
             await _residency_manager.shutdown()
+        from .runtime.audio_worker import bind_audio_worker
+
+        bind_audio_worker(None)
         if _engine is not None:
             await _engine.stop()
             logger.info("Engine stopped")
