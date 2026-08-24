@@ -116,6 +116,31 @@ struct TextFadeBacklogTests {
         // opaque text color after the disabled fade clears its overrides.
         #expect((alpha ?? 1) > 0.99, "new streaming text was hidden by the fade")
     }
+
+    @Test("Committing one segment preserves the message fade timeline")
+    func segmentStopPreservesSharedState() {
+        let state = TextFadeAnimationState()
+        state.smoothedWordsPerSecond = 96
+        state.accentDecayStartTime = 42
+
+        var options = MarkdownOptions.assistantTranscript()
+        options.textColor = .black
+        let renderer = MarkdownTextRenderer(options: options)
+        let animator = TextFadeAnimator(
+            textLayoutManager: renderer.textLayoutManager,
+            textContentStorage: renderer.textContentStorage,
+            animationState: state
+        )
+
+        animator.stopAndReveal()
+
+        #expect(state.smoothedWordsPerSecond == 96)
+        #expect(state.accentDecayStartTime == 42)
+
+        animator.reset()
+        #expect(state.smoothedWordsPerSecond == 0)
+        #expect(state.accentDecayStartTime == nil)
+    }
 }
 
 /// The rate the reveal adapts to must be *units per second*, not *flushes per

@@ -74,11 +74,17 @@ final class TextFadeAnimator {
     /// Called when a message finishes or the transcript changes, so a
     /// re-render does not replay the whole reveal.
     public func reset() {
+        stopAndReveal()
+        animationState.reset()
+    }
+
+    /// Stop this block's animator without resetting the message-wide pacing
+    /// state shared by the next mutable segment.
+    func stopAndReveal() {
         displayLink.stop()
         fadingParts.removeAll()
         scheduledLength = 0
         lastGrowthTime = nil
-        animationState.reset()
         clearRenderingAttributes()
     }
 

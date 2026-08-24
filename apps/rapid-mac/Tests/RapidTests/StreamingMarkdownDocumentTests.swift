@@ -119,6 +119,96 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.mutableSource == "Next paragraph")
     }
 
+    @Test("Code brackets do not block stable prefix commitment")
+    func codeBracketsCanCommit() {
+        let source = """
+        Intro paragraph.
+
+        Use `arr[0]` for the first value.
+
+        ```swift
+        let pivot = values[indexes[0]]
+        ```
+
+        Next paragraph
+        """
+        var document = StreamingMarkdownDocument()
+
+        document.append(source)
+
+        #expect(document.stableBlocks.count == 1)
+        #expect(document.stableBlocks[0].source.contains("arr[0]"))
+        #expect(document.stableBlocks[0].source.contains("indexes[0]"))
+        #expect(document.mutableSource == "Next paragraph")
+    }
+
+    @Test("An unresolved reference holds only its own suffix mutable")
+    func unresolvedReferenceCommitsSafeLeadingBlocks() {
+        var document = StreamingMarkdownDocument()
+
+        document.append("Safe paragraph.\n\nRead [**the docs**].\n\nFollowing paragraph")
+
+        #expect(document.stableBlocks.count == 1)
+        #expect(document.stableBlocks[0].source.contains("Safe paragraph."))
+        #expect(!document.stableBlocks[0].source.contains("the docs"))
+        #expect(document.mutableSource.hasPrefix("Read [**the docs**]."))
+
+        document.append(
+            "\n\n[**the docs**]: https://rapidmlx.ai/docs\n\nAfter the definition"
+        )
+
+        #expect(document.stableBlocks.contains { $0.source.contains("[**the docs**]:") })
+        #expect(document.mutableSource == "After the definition")
+        document.finish()
+        let source = document.receivedSource
+        #expect(document.result.items == MarkdownCompiler().compile(source).items)
+    }
+
+    @Test("Ordinary character frames do not probe for a structural split")
+    func proseFramesSkipSplitProbe() {
+        var document = StreamingMarkdownDocument()
+
+        for character in "A paragraph arriving one character at a time." {
+            document.append(String(character))
+        }
+        #expect(document.compilationStats.splitProbes == 0)
+
+        document.append("\n")
+        document.append("\n")
+        document.append("N")
+        let probesAtBoundary = document.compilationStats.splitProbes
+        #expect(probesAtBoundary == 2)
+
+        for character in "ext paragraph keeps growing." {
+            document.append(String(character))
+        }
+        #expect(document.compilationStats.splitProbes == probesAtBoundary)
+    }
+
+    @Test("Code-heavy bracket streams retain incremental work bounds")
+    func codeBracketsRetainIncrementalBounds() {
+        func replay(expression: String) -> StreamingMarkdownDocument {
+            var document = StreamingMarkdownDocument()
+            for index in 0..<40 {
+                document.append(
+                    "## Part \(index)\n\nUse `\(expression)` in this step.\n\n"
+                )
+            }
+            return document
+        }
+
+        let bracketed = replay(expression: "arr[0]")
+        let control = replay(expression: "arr.first")
+
+        #expect(bracketed.stableBlocks.count == control.stableBlocks.count)
+        #expect(bracketed.stableBlocks.count >= 30)
+        #expect(
+            bracketed.compilationStats.largestCompiledFragmentUTF8Bytes
+                <= control.compilationStats.largestCompiledFragmentUTF8Bytes + 16
+        )
+        #expect(bracketed.compilationStats.splitProbes == control.compilationStats.splitProbes)
+    }
+
     @Test("Unfinished inline syntax and fences remain in the mutable tail")
     func unfinishedSyntaxStaysMutable() {
         var document = StreamingMarkdownDocument()

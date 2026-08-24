@@ -51,9 +51,33 @@ struct MarkdownCompiler: Sendable {
             return nil
         }
         let stablePrefix = source[..<tailStart]
-        guard Self.hasBlankLineBoundary(in: stablePrefix),
-              !Self.containsPotentialReferenceLink(in: stablePrefix) else {
+        guard Self.hasBlankLineBoundary(in: stablePrefix) else {
             return nil
+        }
+
+        // Reparse only the candidate prefix so reference links count as
+        // resolved only when their definition is actually inside the chunk we
+        // are about to freeze. If one unresolved reference remains, commit the
+        // safe blocks before its top-level owner instead of pinning the whole
+        // growing answer behind it.
+        let stableDocument = Document(
+            parsing: String(stablePrefix),
+            options: [.parseBlockDirectives]
+        )
+        if let blockedLocation = Self.firstPotentialReferenceBlock(
+            in: stableDocument,
+            source: String(stablePrefix)
+        ),
+           let blockedStart = Self.index(at: blockedLocation, in: source) {
+            let safePrefix = source[..<blockedStart]
+            guard blockedStart > source.startIndex,
+                  Self.hasBlankLineBoundary(in: safePrefix) else {
+                return nil
+            }
+            return TopLevelStreamingSplit(
+                stablePrefix: String(safePrefix),
+                mutableTail: String(source[blockedStart...])
+            )
         }
 
         return TopLevelStreamingSplit(
@@ -109,14 +133,68 @@ struct MarkdownCompiler: Sendable {
         return false
     }
 
-    /// Reference-link definitions are document-global and may appear after the
-    /// paragraph they style. Keep reference-like brackets mutable, while still
-    /// allowing complete inline links such as `[label](URL)` to be committed.
-    private static func containsPotentialReferenceLink(in source: Substring) -> Bool {
-        source.range(
-            of: #"(?<!\\)\[[^\]\n]+\](?!\()"#,
-            options: .regularExpression
-        ) != nil
+    /// Return the first top-level block that still contains unresolved
+    /// reference-like syntax. swift-markdown turns a resolved reference into a
+    /// `Link`; code and HTML are opaque, so brackets in those nodes cannot hold
+    /// later blocks mutable.
+    private static func firstPotentialReferenceBlock(
+        in document: Document,
+        source: String
+    ) -> SourceLocation? {
+        for child in document.children
+        where containsPotentialReferenceLink(in: child, source: source) {
+            if let location = child.range?.lowerBound { return location }
+        }
+        return nil
+    }
+
+    private static func containsPotentialReferenceLink(
+        in markup: Markup,
+        source: String
+    ) -> Bool {
+        guard let scanRange = sourceRange(of: markup, in: source) else { return false }
+        var opaqueRanges: [Range<String.Index>] = []
+        collectReferenceOpaqueRanges(in: markup, source: source, into: &opaqueRanges)
+
+        var searchStart = scanRange.lowerBound
+        while searchStart < scanRange.upperBound,
+              let match = source.range(
+                of: #"(?<!\\)\[[^\]\n]+\](?!\()"#,
+                options: .regularExpression,
+                range: searchStart..<scanRange.upperBound
+              ) {
+            if !opaqueRanges.contains(where: { $0.overlaps(match) }) { return true }
+            searchStart = match.upperBound
+        }
+        return false
+    }
+
+    private static func collectReferenceOpaqueRanges(
+        in markup: Markup,
+        source: String,
+        into ranges: inout [Range<String.Index>]
+    ) {
+        switch markup {
+        case is CodeBlock, is InlineCode, is Link, is Image, is HTMLBlock, is InlineHTML:
+            if let range = sourceRange(of: markup, in: source) { ranges.append(range) }
+        default:
+            for child in markup.children {
+                collectReferenceOpaqueRanges(in: child, source: source, into: &ranges)
+            }
+        }
+    }
+
+    private static func sourceRange(
+        of markup: Markup,
+        in source: String
+    ) -> Range<String.Index>? {
+        guard let range = markup.range,
+              let lowerBound = index(at: range.lowerBound, in: source),
+              let upperBound = index(at: range.upperBound, in: source),
+              lowerBound <= upperBound else {
+            return nil
+        }
+        return lowerBound..<upperBound
     }
 
     /// Drop a trailing fence marker that is still being typed.

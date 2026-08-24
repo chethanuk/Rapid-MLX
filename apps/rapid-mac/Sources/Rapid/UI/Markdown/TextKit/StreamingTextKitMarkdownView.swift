@@ -13,6 +13,10 @@ struct StreamingTextKitMarkdownView: View {
     @Bindable var store: StreamingMarkdownStore
     let messageID: UUID
 
+    /// One timeline per message. Segment boundaries are an implementation
+    /// detail and must not restart the reveal as stable blocks are committed.
+    @State private var fadeState = TextFadeAnimationState()
+
     @ScaledMetric(relativeTo: .body) private var basePointSize: CGFloat = 15
 
     var body: some View {
@@ -21,13 +25,21 @@ struct StreamingTextKitMarkdownView: View {
             ForEach(store.segments(for: messageID)) { segment in
                 StreamingMarkdownSegmentView(
                     segment: segment,
-                    basePointSize: basePointSize
+                    basePointSize: basePointSize,
+                    fadeState: fadeState,
+                    fadeConfiguration: Self.fadeConfiguration
                 )
                 .equatable()
             }
         }
         .chatLinkSafetyFilter()
     }
+
+    private static let fadeConfiguration: TextFadeConfiguration = {
+        if UserDefaults.standard.bool(forKey: "rapid.chat.fade.disabled") { return .off }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return .off }
+        return TextFadeConfiguration()
+    }()
 }
 
 /// A committed segment stops changing and is skipped by SwiftUI's diffing.
@@ -36,6 +48,8 @@ struct StreamingTextKitMarkdownView: View {
 private struct StreamingMarkdownSegmentView: View, Equatable {
     let segment: StreamingMarkdownDocument.Segment
     let basePointSize: CGFloat
+    let fadeState: TextFadeAnimationState
+    let fadeConfiguration: TextFadeConfiguration
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.segment == rhs.segment && lhs.basePointSize == rhs.basePointSize
@@ -46,8 +60,8 @@ private struct StreamingMarkdownSegmentView: View, Equatable {
             result: segment.result,
             options: TextKitMarkdownView.options(basePointSize: basePointSize),
             isStreaming: segment.isMutable,
-            fadeState: nil,
-            fadeConfiguration: .off
+            fadeState: fadeState,
+            fadeConfiguration: fadeConfiguration
         )
     }
 }

@@ -26,8 +26,13 @@ struct StreamingMarkdownDocument: Sendable {
     struct CompilationStats: Equatable, Sendable {
         private(set) var stableFragmentCompilations = 0
         private(set) var mutableTailCompilations = 0
+        private(set) var splitProbes = 0
         private(set) var totalCompiledUTF8Bytes = 0
         private(set) var largestCompiledFragmentUTF8Bytes = 0
+
+        mutating func recordSplitProbe() {
+            splitProbes += 1
+        }
 
         mutating func recordStable(_ source: String) {
             stableFragmentCompilations += 1
@@ -49,6 +54,7 @@ struct StreamingMarkdownDocument: Sendable {
     private let compiler: MarkdownCompiler
     private(set) var mutableID = 0
     private var revision = 0
+    private var splitBoundaryTracker = SplitBoundaryTracker()
 
     private(set) var receivedSource = ""
     private(set) var stableBlocks: [StableBlock] = []
@@ -88,11 +94,15 @@ struct StreamingMarkdownDocument: Sendable {
 
     mutating func append(_ delta: String) {
         guard !delta.isEmpty, !isFinished else { return }
+        let shouldProbeForSplit = splitBoundaryTracker.consume(delta)
         receivedSource += delta
         mutableSource += delta
 
         revision += 1
-        commitStablePrefixIfAvailable()
+        if shouldProbeForSplit {
+            commitStablePrefixIfAvailable()
+            splitBoundaryTracker.reset(to: mutableSource)
+        }
         compileMutableTail(isComplete: false)
     }
 
@@ -117,7 +127,9 @@ struct StreamingMarkdownDocument: Sendable {
     }
 
     private mutating func commitStablePrefixIfAvailable() {
-        while let split = compiler.topLevelStreamingSplit(mutableSource) {
+        while true {
+            compilationStats.recordSplitProbe()
+            guard let split = compiler.topLevelStreamingSplit(mutableSource) else { return }
             let stable = compile(split.stablePrefix, isComplete: true, stable: true)
             if !stable.items.isEmpty {
                 stableBlocks.append(StableBlock(
@@ -128,6 +140,33 @@ struct StreamingMarkdownDocument: Sendable {
                 mutableID += 1
             }
             mutableSource = split.mutableTail
+        }
+    }
+
+    /// A stable split requires a blank line followed by the first character of
+    /// a new block. Track that cheap lexical event so ordinary display frames
+    /// do not parse the tail once for probing and again for rendering.
+    private struct SplitBoundaryTracker: Sendable {
+        private var trailingLineBreaks = 0
+
+        mutating func consume(_ text: String) -> Bool {
+            var establishedBoundary = false
+            for character in text {
+                if character.isNewline {
+                    trailingLineBreaks += 1
+                } else if character == " " || character == "\t" {
+                    continue
+                } else {
+                    if trailingLineBreaks >= 2 { establishedBoundary = true }
+                    trailingLineBreaks = 0
+                }
+            }
+            return establishedBoundary
+        }
+
+        mutating func reset(to source: String) {
+            self = SplitBoundaryTracker()
+            _ = consume(source)
         }
     }
 

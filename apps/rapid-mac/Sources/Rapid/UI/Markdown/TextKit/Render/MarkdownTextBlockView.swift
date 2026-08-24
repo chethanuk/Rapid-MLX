@@ -143,9 +143,11 @@ final class MarkdownTextBlockView: NSView {
             }
         } else if let animator = fadeAnimator {
             // Streaming ended: leave the text fully visible rather than
-            // replaying the reveal on the next render pass.
+            // replaying the reveal on the next render pass. A segment can end
+            // while its message continues in a new mutable segment, so retain
+            // the message-wide pacing state.
             animator.markAllRevealed()
-            animator.reset()
+            animator.stopAndReveal()
             fadeAnimator = nil
         }
 
