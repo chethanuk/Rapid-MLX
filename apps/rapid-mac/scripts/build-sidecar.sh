@@ -93,7 +93,21 @@ COMPILEALL_JOBS="${COMPILEALL_JOBS:-0}"
 # STT and Qwen3-TTS smoke imports passing. The non-Qwen TTS implementations
 # and SciPy subpackages outside the signal closure have already been removed
 # before this count is taken.
-MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-174}"
+#
+# Re-locked at 172 on 2026-08-24: step 3 now drops the unused shared
+# libpython3.12.dylib (the bundled interpreter is the statically-linked
+# `bin/python3.12`; nothing links the dylib). Same shape as the 2026-07-21
+# Tcl/Tk re-lock — we are REMOVING a Mach-O we used to sign, not adding one,
+# so there is no signing-safety implication.
+#
+# Note this is a re-lock of TWO, not one. The baseline had already drifted
+# before this change: the last green build on main reported "found 173
+# Mach-Os (baseline 174)", and a shipped 0.12.18 bundle counts 173 the same
+# way. A wheel dropped a binary at some point and the tolerance absorbed it
+# silently, which is the tolerance working as designed but also means the
+# stated baseline had stopped describing reality. 173 measured minus this
+# change's one removal is 172.
+MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-172}"
 # Allow modest drift without blocking — wheel updates sometimes shift
 # 1-2 .so files. Bigger drift means a new dependency, needs review.
 # Kept at 5 across the 51 → 77 baseline rebase to give Pillow and
@@ -500,6 +514,62 @@ rm -rf \
     "$STAGE/python/lib/"thread* \
     "$STAGE/python/lib/"itcl* \
     "$STAGE/python/lib/python3.12/lib-dynload/"_tkinter*.so
+# Drop the unused shared libpython. python-build-standalone ships BOTH a
+# statically-linked `bin/python3.12` and `lib/libpython3.12.dylib` — ~17 MB
+# each, distinct inodes, the same interpreter twice. sidecar-shim.sh only
+# ever execs the former, and nothing in the bundle links the dylib: on a
+# shipped 0.12.18 desktop the sidecar never mapped it across a session that
+# included a full dictation round-trip.
+#
+# The guard below is not ceremony. macOS extension modules conventionally
+# resolve CPython symbols against the executable (`-undefined
+# dynamic_lookup`) rather than linking libpython, but that is a convention,
+# not a rule — a future wheel that links it would turn this `rm` into a
+# bundle that builds clean and then fails to import on a user's Mac. Fail
+# the build instead of shipping that.
+LIBPYTHON="$STAGE/python/lib/libpython3.12.dylib"
+if [ -f "$LIBPYTHON" ]; then
+    # `|| true` is mandatory, not sloppy: xargs exits non-zero whenever ANY
+    # child does, and `grep -q` fails for every non-consumer, so the happy
+    # path always returns non-zero. That swallowing is why the sentinel
+    # below exists — without it a broken `find`/`otool` would also produce an
+    # empty result and read as "nothing links it", and we would delete on the
+    # strength of a scan that never ran.
+    LIBPYTHON_SCANNED="$(find "$STAGE" \( -name '*.so' -o -name '*.dylib' \) | wc -l | tr -d ' ')"
+    if [ "$LIBPYTHON_SCANNED" -lt 2 ]; then
+        echo "::error::libpython consumer scan found $LIBPYTHON_SCANNED Mach-Os under $STAGE; the scan is broken, refusing to trim on its say-so"
+        exit 1
+    fi
+    LIBPYTHON_CONSUMERS="$(
+        find "$STAGE" \( -name '*.so' -o -name '*.dylib' \) ! -path "$LIBPYTHON" -print0 \
+            | xargs -0 -n1 -P4 sh -c \
+                'otool -L "$0" 2>/dev/null | grep -q libpython3\.12 && echo "$0"' \
+            2>/dev/null || true
+    )"
+    if [ -n "$LIBPYTHON_CONSUMERS" ]; then
+        echo "::error::libpython3.12.dylib is linked by bundled extensions; refusing to drop it:"
+        echo "$LIBPYTHON_CONSUMERS"
+        exit 1
+    fi
+    echo "==> dropping unused libpython3.12.dylib ($(du -m "$LIBPYTHON" | cut -f1) MB)"
+    rm -f "$LIBPYTHON"
+fi
+# Packaging detritus that no runtime path reads. Small individually, ~5 MB
+# together, and none of it is a judgement call:
+#   * .pyi — type stubs, consumed by type checkers, never by the interpreter.
+#   * .dist-info/RECORD — the installed-file manifest pip uses to UNINSTALL.
+#     Nothing uninstalls from inside the bundle. METADATA stays, so
+#     importlib.metadata.version() (which the release smoke below calls)
+#     keeps working; RECORD is not part of that path.
+#   * headers and static libs — build inputs for compiling against these
+#     wheels, and nothing in the bundle compiles.
+#   * leftover tests/ packages in wheels other than numpy/scipy/mlx_audio,
+#     which already get swept by name further down.
+echo "==> trimming packaging detritus (stubs, RECORD, headers, stray tests)"
+find "$STAGE" -name '*.pyi' -delete
+find "$STAGE/site-packages" -path '*.dist-info/RECORD' -delete
+find "$STAGE" \( -name '*.h' -o -name '*.hpp' -o -name '*.a' \) -delete
+find "$STAGE/site-packages" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ----- step 3.5: aggressive trim (post-strip, pre-compileall) ----------
@@ -598,6 +668,28 @@ find "$STAGE/site-packages/transformers/models" \
     \( -name "image_processing_*.py" -o -name "feature_extraction_*.py" \) \
     -not -path "*/transformers/models/whisper/feature_extraction_whisper.py" \
     -print -delete
+
+# `modular_*.py` is the largest single thing left in models/ — 13 MB across
+# 518 files, 41% of the subtree. These are the SOURCE files transformers'
+# own `utils/modular_model_converter.py` reads to GENERATE `modeling_*.py`;
+# nothing imports them at runtime, and no file outside models/ references
+# them. We already delete the generated `modeling_*.py` above, so keeping
+# the generator input is strictly less defensible than what we drop.
+#
+# Deliberately NOT allowlisted the way modeling_/image_processing_ are: a
+# modular file is a build-time artifact for every model equally, including
+# the multimodal ones we preserve implementations for.
+#
+# Not to be confused with a whole-directory trim. Deleting unused
+# `models/<arch>/` directories looks tempting (another ~25 MB) but breaks
+# `AutoConfig`/`AutoTokenizer` for any architecture whose directory goes:
+# mlx-lm serves several transformers model_types from one module — Mistral
+# rides the llama implementation — so "what mlx-lm bundles" is not the set
+# of configs we must still parse. Dropping modular_ needs no such judgement.
+echo "==> trimming transformers modular_ generator sources"
+find "$STAGE/site-packages/transformers/models" -name "modular_*.py" -delete
+find "$STAGE/site-packages/transformers/models" \
+    -path "*__pycache__/modular_*.pyc" -delete
 
 echo "==> trimming numpy dev/test detritus"
 rm -rf \

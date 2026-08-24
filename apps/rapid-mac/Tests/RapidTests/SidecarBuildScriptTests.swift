@@ -150,8 +150,20 @@ struct SidecarBuildScriptTests {
                 "Only model-family directories outside Qwen3 TTS may be removed.")
         #expect(!script.contains(#"rm -rf "$STAGE/site-packages/mlx_audio/tts/models""#),
                 "The trim must never remove the complete TTS model directory.")
-        #expect(script.contains(#"MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-174}""#),
+        #expect(script.contains(#"MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-172}""#),
                 "The signing baseline must match the measured post-audio bundle.")
+        #expect(script.contains(#"LIBPYTHON="$STAGE/python/lib/libpython3.12.dylib""#),
+                "The unused shared libpython must be trimmed; it is ~17 MB of the size cap.")
+        #expect(script.contains("refusing to drop it"),
+                "Dropping libpython must stay guarded: a wheel that links it would otherwise produce a bundle that builds clean and fails to import on a user's Mac.")
+        #expect(script.contains(#"-name "modular_*.py" -delete"#),
+                "transformers' modular_ generator sources are 41% of models/ and no runtime path imports them.")
+        #expect(!script.contains(#"-name "configuration_*.py" -delete"#),
+                "configuration_*.py is what AutoConfig reads; trimming it breaks every model whose directory it covers.")
+        #expect(script.contains(#"-path '*.dist-info/RECORD' -delete"#),
+                "RECORD is pip's uninstall manifest; nothing uninstalls from inside the bundle.")
+        #expect(script.contains(#"-name '*.pyi' -delete"#),
+                "Type stubs are read by type checkers, never by the interpreter.")
     }
 
     private static var scriptURL: URL {
