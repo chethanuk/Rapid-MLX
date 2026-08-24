@@ -201,21 +201,19 @@ def test_start_model_waits_for_an_interactive_readiness_action():
 
 
 def test_image_inflight_baseline_uses_an_event_backed_warmup_phase():
-    flow = HARNESS.read_text().split("flow_image_generation() {", 1)[1].split(
-        "\n}", 1
-    )[0]
+    flow = (
+        HARNESS.read_text().split("flow_image_generation() {", 1)[1].split("\n}", 1)[0]
+    )
     fake = FAKE_SIDECAR.read_text()
 
     assert "FAKE_IMAGE_FIRST_WARMUP_MS=10000" in flow
-    wire_gate = "wait_fake_event '.event == \"image_request\""
+    wire_gate = 'wait_fake_event \'.event == "image_request"'
     assert wire_gate in flow
     assert flow.index(wire_gate) < flow.index('see_main "$OUT/ig-inflight.json"')
     assert '_setting("FAKE_IMAGE_FIRST_WARMUP_MS", 0)' in fake
     assert '"running": self.running and not warming_up' in fake
     warmup_state = "self.warmup_ms = first_warmup_ms if self.count == 0 else 0"
-    assert fake.index(warmup_state) < fake.index(
-        "time.sleep(request_warmup_ms / 1000)"
-    )
+    assert fake.index(warmup_state) < fake.index("time.sleep(request_warmup_ms / 1000)")
 
 
 def test_audio_baseline_waits_for_residency_poll_to_settle():
