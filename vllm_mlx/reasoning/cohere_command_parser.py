@@ -51,6 +51,35 @@ def _first_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None
     return min(matches) if matches else None
 
 
+def _json_container_end(text: str) -> int | None:
+    """Return the end offset of a leading JSON object/array, if complete."""
+    start = len(text) - len(text.lstrip())
+    if start == len(text) or text[start] not in "[{":
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
 class CohereCommand4ReasoningParser(ReasoningParser):
     """Parse Command-style thinking, text, and action blocks.
 
@@ -146,6 +175,9 @@ class CohereCommand4ReasoningParser(ReasoningParser):
             return None, None
 
         request_json_mode = self._json_mode if json_mode is None else bool(json_mode)
+        if request_json_mode and model_output.lstrip().startswith(("{", "[")):
+            end = _json_container_end(model_output)
+            return None, model_output if end is None else model_output[:end]
         has_protocol_marker = THINK_START in model_output or any(
             marker in model_output for marker in _REASONING_TRANSITIONS
         )
@@ -187,12 +219,7 @@ class CohereCommand4ReasoningParser(ReasoningParser):
         while self._buffer:
             if self._phase == "reasoning":
                 if self._json_protocol_undecided:
-                    has_protocol_marker = THINK_START in self._buffer or any(
-                        marker in self._buffer for marker in _REASONING_TRANSITIONS
-                    )
-                    if has_protocol_marker:
-                        self._json_protocol_undecided = False
-                    elif self._buffer.lstrip().startswith(("{", "[")):
+                    if self._buffer.lstrip().startswith(("{", "[")):
                         # A container opener is unambiguous JSON-document
                         # evidence. Stream the document incrementally while a
                         # tiny lexer tracks nesting and quoted strings; once
@@ -201,6 +228,11 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                         self._json_protocol_undecided = False
                         self._phase = "json_document"
                         continue
+                    has_protocol_marker = THINK_START in self._buffer or any(
+                        marker in self._buffer for marker in _REASONING_TRANSITIONS
+                    )
+                    if has_protocol_marker:
+                        self._json_protocol_undecided = False
                     elif flush:
                         self._phase = "bare"
                         continue

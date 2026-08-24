@@ -149,6 +149,20 @@ def test_json_container_lexer_ignores_brackets_and_escapes_inside_strings():
     assert content == wire.removesuffix("ignored")
 
 
+@pytest.mark.parametrize(
+    "wire",
+    [
+        '{"value":"<|START_TEXT|>"}',
+        '\n["<|END_THINKING|>", {"action":"<|START_ACTION|>"}]',
+    ],
+)
+def test_json_container_treats_protocol_markers_inside_strings_as_data(wire):
+    parser = CohereCommand4ReasoningParser()
+    assert parser.extract_reasoning(wire, json_mode=True) == (None, wire)
+    for chunks in _all_two_part_splits(wire):
+        assert _stream(wire, chunks, json_mode=True) == (None, wire)
+
+
 def test_json_looking_thought_stays_private_without_json_request():
     document = '{"draft":1} — reconsider'
     assert CohereCommand4ReasoningParser().extract_reasoning(document) == (
