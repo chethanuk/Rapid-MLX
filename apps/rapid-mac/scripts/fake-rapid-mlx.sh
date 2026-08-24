@@ -340,10 +340,11 @@ class _ImageRenders:
         self.step = 0
         self.total = 0
         self.started_at = 0.0
+        self.warmup_ms = 0
         self.cancelled = False
         self.count = 0
 
-    def begin(self, total):
+    def begin(self, total, first_warmup_ms=0):
         with self._lock:
             # One render at a time, decided atomically under the lock. The real
             # server is a single model in a single process; a second concurrent
@@ -357,6 +358,9 @@ class _ImageRenders:
             self.step = 0
             self.total = total
             self.started_at = time.time()
+            # Cold preparation is a first-render property. Later generations
+            # on the same resident model must not inherit that delay.
+            self.warmup_ms = first_warmup_ms if self.count == 0 else 0
             self.cancelled = False
             self.count += 1
             return self.count
@@ -378,8 +382,14 @@ class _ImageRenders:
     def snapshot(self):
         with self._lock:
             elapsed = int((time.time() - self.started_at) * 1000) if self.started_at else 0
+            warming_up = self.running and elapsed < self.warmup_ms
             return {
-                "running": self.running,
+                # Internally the request already owns the render slot, but
+                # externally denoising has not begun during admission/warmup.
+                # This mirrors a real cold image request and gives GUI fixtures
+                # an event-backed preparing phase without weakening the
+                # single-render concurrency gate.
+                "running": self.running and not warming_up,
                 "step": self.step,
                 "total": self.total,
                 "elapsed_ms": elapsed,
@@ -686,7 +696,8 @@ class Handler(BaseHTTPRequestHandler):
         count = raw_count if isinstance(raw_count, int) and raw_count > 0 else 1
         total = max(1, int(_setting("FAKE_IMAGE_STEPS", 8)))
         step_ms = max(0, int(_setting("FAKE_IMAGE_STEP_MS", 300)))
-        index = RENDERS.begin(total)
+        first_warmup_ms = max(0, int(_setting("FAKE_IMAGE_FIRST_WARMUP_MS", 0)))
+        index = RENDERS.begin(total, first_warmup_ms)
         if index is None:
             # A render is already in flight. The real server runs one model in
             # one process and refuses an overlapping generation rather than
@@ -699,6 +710,7 @@ class Handler(BaseHTTPRequestHandler):
                 "code": "image_render_in_progress",
             }})
             return
+        request_warmup_ms = first_warmup_ms if index == 1 else 0
         _event(
             "image_request",
             prompt=prompt,
@@ -710,6 +722,11 @@ class Handler(BaseHTTPRequestHandler):
             image_rgba_sha256=(_png_rgba_sha256(_extract_image_part(raw_body, self.headers.get("content-type")))
                                if editing else None),
         )
+        # A real engine may spend meaningful time admitting the request and
+        # preparing tensors before its first denoise step. Keep this opt-in so
+        # the GUI journey can inspect that genuine protocol phase on machines
+        # where an accessibility-tree read itself takes several seconds.
+        time.sleep(request_warmup_ms / 1000)
         cancelled = False
         for _ in range(total):
             time.sleep(step_ms / 1000)
