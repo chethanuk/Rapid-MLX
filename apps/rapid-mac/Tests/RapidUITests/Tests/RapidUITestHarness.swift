@@ -146,11 +146,9 @@ final class RapidUITestHarness {
             }
             return self.serverStartCount() > priorServerStartCount
         })
-        let send = element("ChatView.SendOrStopButton")
-        XCTAssertTrue(send.waitForExistence(timeout: 20))
-        XCTAssertTrue(waitUntil(timeout: 60) {
-            send.label == "Send message" && send.isEnabled
-        })
+        let composer = element("rapid.chat.compose")
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil(timeout: 60) { composer.isEnabled })
     }
 
     func waitForConversationPersistence(containing markers: [String]) {
