@@ -4763,6 +4763,12 @@ flow_dictation() {
         FAKE_AUDIO_TRANSCRIPTION_DELAY_MS=1800
     dismiss_first_run
     see_main "$OUT/chat.json"
+
+    # Dictation is an input method for the active conversation. Start that
+    # conversation first so this journey detects the release-blocking failure:
+    # enabling speech input must reuse the mounted audio lane, never replace
+    # the conversation process with a transcription-only server.
+    start_model
     press "$OUT/chat.json" Sidebar.Audio "$OUT/dictation-open.json" \
         || die "Sidebar.Audio is not pressable"
 
@@ -4826,10 +4832,9 @@ flow_dictation() {
     press "$OUT/speech-ready.json" Audio.Mode.Dictation "$OUT/dictation-return.json" \
         || die "Dictation mode is not pressable after visiting Speech"
     wait_identifier Dictation.Enable "$OUT/dictation-restored.json"
-    if jq -e -s 'any(.[]; .event == "server_started")' "$OUT/fake-events.jsonl" \
-        >/dev/null 2>&1; then
-        die "Opening and configuring Dictation started a model before dictation"
-    fi
+    [[ "$(jq -rs 'map(select(.event == "server_started")) | length' \
+            "$OUT/fake-events.jsonl")" == 1 ]] \
+        || die "Opening and configuring Dictation started another server"
 
     # Enabling is a readiness operation, not merely a preference flip. Hold
     # the fake STT probe open long enough to observe the contract in AX: the
@@ -4871,7 +4876,22 @@ flow_dictation() {
     [[ "$ready_seen" == 1 ]] \
         || die "Dictation did not become Ready after model warmup"
 
-    log "  setup controls, privacy toggle, vocabulary, mode round-trip, and Loading -> Ready produced effects"
+    # The warmup request must have stayed on the conversation server. A
+    # transcription-only start here is the exact silent-eviction regression.
+    [[ "$(jq -rs 'map(select(.event == "server_started")) | length' \
+            "$OUT/fake-events.jsonl")" == 1 ]] \
+        || die "Dictation replaced the active conversation server"
+    jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-alias")
+              and (any(.[]; .event == "server_started" and .alias == "fake-whisper-small") | not)' \
+        "$OUT/fake-events.jsonl" >/dev/null \
+        || die "Dictation did not preserve the active conversation alias"
+
+    press "$OUT/dictation-ready.json" Sidebar.Chat "$OUT/chat-after-dictation.json" \
+        || die "Chat is not reachable after Dictation warmup"
+    wait_send_idle "$OUT/chat-after-dictation-ready.json"
+    send_prompt "Conversation survives dictation" "dictation-chat"
+
+    log "  setup controls, privacy toggle, vocabulary, co-loaded warmup, and preserved chat produced effects"
     log "  dictation OK"
     cleanup_persona
 }
