@@ -13,6 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-ci.yml"
+COVERAGE_CONFIG = ROOT / ".coveragerc"
 
 
 def _step_run(workflow: Path, job: str, step_name: str) -> str:
@@ -137,6 +138,7 @@ def test_type_check_enforces_shrink_only_error_budget():
 
 
 def test_changed_lines_coverage_combines_linux_and_apple_evidence():
+    assert "relative_files = true" in COVERAGE_CONFIG.read_text()
     test_matrix = _job(ENGINE_WORKFLOW, "test-matrix")
     linux_upload = next(
         step
@@ -148,9 +150,7 @@ def test_changed_lines_coverage_combines_linux_and_apple_evidence():
 
     apple = _job(ENGINE_WORKFLOW, "test-apple-silicon")
     apple_run = next(
-        step
-        for step in apple["steps"]
-        if step.get("name") == "Run MLX-dependent tests"
+        step for step in apple["steps"] if step.get("name") == "Run MLX-dependent tests"
     )
     assert "--cov=vllm_mlx" in apple_run["run"]
     assert "tests/test_audio*.py" in apple_run["run"]
@@ -177,4 +177,6 @@ def test_changed_lines_coverage_combines_linux_and_apple_evidence():
 
     aggregate = _step_run(ENGINE_WORKFLOW, "tests", "Check test results")
     coverage_gate = aggregate.index("needs.changed-lines-coverage.result")
-    assert aggregate.rfind('github.event_name }}" = "pull_request"', 0, coverage_gate) >= 0
+    assert (
+        aggregate.rfind('github.event_name }}" = "pull_request"', 0, coverage_gate) >= 0
+    )
