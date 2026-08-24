@@ -709,22 +709,24 @@ class HermesToolParser(ToolParser):
         return len(matches)
 
     @staticmethod
-    def _new_residual_content(
-        previous_length: int,
+    def _residual_after_malformed_calls(
         current_text: str,
         spans: list[tuple[int, int, str, str]],
+        calls: list[dict[str, Any]],
     ) -> str:
-        """Return newly arrived bytes outside newly completed call spans."""
-        cursor = previous_length
+        """Return prose after malformed calls, stopping at the next call."""
         residual: list[str] = []
-        for start, end, _name, _arguments in spans:
-            if end <= previous_length:
+        for index, ((_start, end, _name, _arguments), call) in enumerate(
+            zip(spans, calls, strict=True)
+        ):
+            if not call["arguments"].startswith(
+                ("<malformed_function_body>", "<malformed_json_arguments>")
+            ):
                 continue
-            if start > cursor:
-                residual.append(current_text[cursor:start])
-            cursor = max(cursor, end)
-        if cursor < len(current_text):
-            residual.append(current_text[cursor:])
+            next_start = (
+                spans[index + 1][0] if index + 1 < len(spans) else len(current_text)
+            )
+            residual.append(current_text[end:next_start])
         return "".join(residual)
 
     def extract_tool_calls_streaming(
@@ -791,21 +793,20 @@ class HermesToolParser(ToolParser):
                         formatted = self._format_streaming_tool_calls(
                             new_calls, start_index=prev_completed
                         )
-                        recovered_malformed = any(
-                            call["arguments"].startswith(
-                                (
-                                    "<malformed_function_body>",
-                                    "<malformed_json_arguments>",
-                                )
-                            )
-                            for call in new_calls
+                        malformed_prefixes = (
+                            "<malformed_function_body>",
+                            "<malformed_json_arguments>",
                         )
-                        if recovered_malformed:
-                            residual = self._new_residual_content(
-                                len(previous_text), current_text, current_matches
-                            )
-                            if residual:
-                                formatted["content"] = residual
+                        final_call_is_malformed = new_calls[-1]["arguments"].startswith(
+                            malformed_prefixes
+                        )
+                        new_matches = current_matches[prev_completed:]
+                        residual = self._residual_after_malformed_calls(
+                            current_text, new_matches, new_calls
+                        )
+                        if residual:
+                            formatted["content"] = residual
+                        if final_call_is_malformed:
                             formatted["preserve_post_tool_content"] = True
                         return formatted
 

@@ -173,7 +173,12 @@ def test_stream_valid_call_after_malformed_call_restores_prose_suppression():
     events.extend(processor.process_chunk(_make_output("\nSuppressed.")))
     events.extend(processor.finalize())
 
-    assert len([event for event in events if event.type == "tool_call"]) == 2
+    assert (
+        sum(
+            len(event.tool_calls or []) for event in events if event.type == "tool_call"
+        )
+        == 2
+    )
     content = "".join(
         event.content or "" for event in events if event.type in {"content", "finish"}
     )
@@ -199,3 +204,31 @@ def test_stream_valid_call_does_not_preserve_same_chunk_trailing_prose():
         event.content or "" for event in events if event.type in {"content", "finish"}
     )
     assert "Suppressed." not in content
+
+
+def test_stream_malformed_then_valid_in_one_chunk_suppresses_only_final_prose():
+    cfg = _make_cfg(
+        enable_auto_tool_choice=True, tool_parser_instance=HermesToolParser(None)
+    )
+    processor = StreamingPostProcessor(cfg, tools_requested=True, request=REQUEST)
+    processor.reset()
+    valid = (
+        '<tool_call>{"name":"browse","arguments":'
+        '{"url":"https://example.com"}}</tool_call>'
+    )
+
+    events = processor.process_chunk(
+        _make_output(MALFORMED + "\nBetween.\n" + valid + "\nSuppressed.")
+    )
+    events.extend(processor.finalize())
+
+    assert (
+        sum(
+            len(event.tool_calls or []) for event in events if event.type == "tool_call"
+        )
+        == 2
+    )
+    content = "".join(
+        event.content or "" for event in events if event.type in {"content", "finish"}
+    )
+    assert content == "\nBetween.\n"
