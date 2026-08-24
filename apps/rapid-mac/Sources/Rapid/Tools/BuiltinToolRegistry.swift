@@ -141,7 +141,11 @@ final class BuiltinToolRegistry: ToolRegistry {
             return first
         }
 
-        guard !Task.isCancelled else { return first }
+        // Once the persistent transition begins, finish its one bounded replay
+        // even if cancellation races with the synchronous Keychain mutation.
+        // Otherwise the call could return the old credential failure after
+        // having already removed the key. The real transport still observes
+        // task cancellation and can terminate the replay promptly.
         let recovered = await webSearchRunner(call.function.arguments, provider, nil)
         return ToolCallResult(
             toolCallID: recovered.toolCallID,

@@ -199,6 +199,28 @@ final class WebSearchRejectedKeyRecoveryTests {
         #expect(config.apiKey(for: .keenable) == "keen_keep_on_cancel")
     }
 
+    @Test("Cancellation racing with key removal completes the bounded replay")
+    func cancellationDuringPersistentTransitionCompletesReplay() async {
+        let keychain = CancellationOnDeleteKeychain()
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: keychain)
+        #expect(config.setAPIKey("keen_rejected_during_delete", for: .keenable))
+
+        var observedKeys: [String?] = []
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, key in
+            observedKeys.append(key)
+            if key != nil { return Self.rejectedResult() }
+            return ToolCallResult(toolCallID: "", content: "keyless result")
+        }
+
+        let result = await Task { await registry.run(makeCall()) }.value
+
+        #expect(!result.isError)
+        #expect(observedKeys.count == 2)
+        #expect(observedKeys[0] == "keen_rejected_during_delete")
+        #expect(observedKeys[1] == nil)
+        #expect(config.apiKey(for: .keenable) == nil)
+    }
+
     @Test("A failed Keychain delete keeps the original failure and does not replay")
     func persistenceFailureDoesNotPretendToRecover() async {
         let keychain = DeleteFailingKeychain()
@@ -284,6 +306,26 @@ private final class DeleteFailingKeychain: KeychainStoring, @unchecked Sendable 
     }
 
     func delete(account: String) -> Bool { false }
+}
+
+private final class CancellationOnDeleteKeychain: KeychainStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+
+    func read(account: String) -> String? {
+        lock.withLock { storage[account] }
+    }
+
+    func write(account: String, secret: String) -> Bool {
+        lock.withLock { storage[account] = secret }
+        return true
+    }
+
+    func delete(account: String) -> Bool {
+        _ = lock.withLock { storage.removeValue(forKey: account) }
+        withUnsafeCurrentTask { $0?.cancel() }
+        return true
+    }
 }
 
 private final class FirstChatSearchProtocol: URLProtocol, @unchecked Sendable {
