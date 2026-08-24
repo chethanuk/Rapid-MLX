@@ -13,6 +13,7 @@ import tempfile
 import threading
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, UploadFile
 from starlette.responses import PlainTextResponse, Response
@@ -155,7 +156,7 @@ _AUDIO_READ_CHUNK_SIZE = 1024 * 1024  # 1 MB chunks
 # Audio engines (lazy loaded, module-level to persist across requests)
 _stt_engine = None
 _tts_engine = None
-_music_engine = None
+_music_engine: Any = None
 
 # OpenAI-style STT model alias → MLX repo. Promoted to module scope so
 # the route can validate the model BEFORE streaming the upload (F-165):

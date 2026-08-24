@@ -40,6 +40,7 @@ import gc
 import logging
 import os
 from dataclasses import dataclass
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI
@@ -231,7 +232,7 @@ _default_frequency_penalty: float | None = None  # Set via --default-frequency-p
 def _bind_audio_worker_for_engine(engine: object | None) -> bool:
     """Bind a compatible primary engine or select the isolated fallback."""
 
-    from .runtime.audio_worker import bind_audio_worker
+    from .runtime.audio_worker import ModelWorker, bind_audio_worker
 
     compatible = engine is not None and all(
         callable(getattr(engine, method, None))
@@ -240,7 +241,7 @@ def _bind_audio_worker_for_engine(engine: object | None) -> bool:
             "execute_on_model_worker_sync",
         )
     )
-    bind_audio_worker(engine if compatible else None)
+    bind_audio_worker(cast(ModelWorker, engine) if compatible else None)
     return compatible
 
 
