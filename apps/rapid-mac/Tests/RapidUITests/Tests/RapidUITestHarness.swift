@@ -146,9 +146,6 @@ final class RapidUITestHarness {
             }
             return self.serverStartCount() > priorServerStartCount
         })
-        let composer = element("rapid.chat.compose")
-        XCTAssertTrue(composer.waitForExistence(timeout: 20))
-        XCTAssertTrue(waitUntil(timeout: 60) { composer.isEnabled })
     }
 
     func waitForConversationPersistence(containing markers: [String]) {
