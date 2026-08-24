@@ -124,6 +124,7 @@ final class DictationController {
     private let testingPrewarm: (@MainActor () async -> Bool)?
     private let testingWarmup: (@MainActor () async -> Bool)?
     private let testingHotkeyStart: (@MainActor () -> Bool)?
+    private let testingRecorderStart: (@MainActor () throws -> Void)?
     private let testingRecorderCancel: (@MainActor () -> Void)?
     private let testingTranscribeCancel: (@MainActor () -> Void)?
 
@@ -170,6 +171,7 @@ final class DictationController {
         testingPrewarm: (@MainActor () async -> Bool)? = nil,
         testingWarmup: (@MainActor () async -> Bool)? = nil,
         testingHotkeyStart: (@MainActor () -> Bool)? = nil,
+        testingRecorderStart: (@MainActor () throws -> Void)? = nil,
         testingRecorderCancel: (@MainActor () -> Void)? = nil,
         testingTranscribeCancel: (@MainActor () -> Void)? = nil,
         audioCatalogLoader: @escaping @MainActor (URL) async -> [ModelEntry]? = {
@@ -185,6 +187,7 @@ final class DictationController {
         self.testingPrewarm = testingPrewarm
         self.testingWarmup = testingWarmup
         self.testingHotkeyStart = testingHotkeyStart
+        self.testingRecorderStart = testingRecorderStart
         self.testingRecorderCancel = testingRecorderCancel
         self.testingTranscribeCancel = testingTranscribeCancel
 
@@ -304,7 +307,7 @@ final class DictationController {
             selectedAlias: modelAlias,
             preparingAlias: preparingAlias,
             isPreparing: phase == .preparingModel,
-            servingAlias: server.servingAlias
+            voiceLaneReady: server.isVoiceLaneReady(for: preparingAlias)
         )) else {
             if isEnabled, enableRequestID == requestID, modelAlias == preparingAlias {
                 lastError = "\(preparingAlias) couldn't load. There may not be enough memory to start dictation."
@@ -521,7 +524,7 @@ final class DictationController {
         // disable() or a model change to land. Re-check before each step
         // that mutates the sidecar or touches the wire.
         guard !Task.isCancelled, isEnabled, modelAlias == alias else { return false }
-        if server.servingAlias != alias {
+        if !server.isVoiceLaneReady(for: alias) {
             guard await ensureModelServing(alias: alias) else { return false }
             guard !Task.isCancelled, isEnabled, modelAlias == alias else { return false }
         }
@@ -529,7 +532,7 @@ final class DictationController {
         guard !Task.isCancelled,
               isEnabled,
               modelAlias == alias,
-              server.servingAlias == alias else { return false }
+              server.isVoiceLaneReady(for: alias) else { return false }
         if warmed {
             lastWarmupWarning = nil
         } else {
@@ -548,7 +551,7 @@ final class DictationController {
         guard phase == .idle || phase == .preparingModel else { return false }
         // A live conversation server owns the lazy audio lane; otherwise the
         // audio-only fallback must itself be serving this transcription model.
-        guard server.servingAlias == modelAlias || server.voiceCoLoadsOnPrimary else {
+        guard server.isVoiceLaneReady(for: modelAlias) else {
             return false
         }
         if let testingWarmup { return await testingWarmup() }
@@ -648,7 +651,7 @@ final class DictationController {
             return
         }
         let requestedAlias = modelAlias
-        guard server.servingAlias == requestedAlias else {
+        guard server.isVoiceLaneReady(for: requestedAlias) else {
             hotkey.stop()
             phase = .preparingModel
             beginRecordingTask = nil
@@ -677,7 +680,11 @@ final class DictationController {
             return
         }
         do {
-            try recorder.startCapture()
+            if let testingRecorderStart {
+                try testingRecorderStart()
+            } else {
+                try recorder.startCapture()
+            }
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             refreshReadiness()

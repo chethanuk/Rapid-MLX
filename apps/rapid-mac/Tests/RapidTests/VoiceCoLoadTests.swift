@@ -41,6 +41,7 @@ struct VoiceCoLoadTests {
         )
         #expect(server.servingAlias == "qwen3.6-27b-4bit")
         #expect(server.voiceCoLoadsOnPrimary == true)
+        #expect(server.isVoiceLaneReady(for: "whisper-small") == true)
     }
 
     @Test("mid-start is not co-loaded (no live serving alias yet)")

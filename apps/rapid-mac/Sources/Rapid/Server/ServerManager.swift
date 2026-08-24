@@ -204,6 +204,15 @@ final class ServerManager {
         servingAlias != nil && activeBearer != nil
     }
 
+    /// Whether the selected voice model can receive requests without another
+    /// process transition. An audio-only server is ready when it already owns
+    /// that alias; a conversation server is ready through its mounted lazy
+    /// audio lane. Callers use this capability boundary instead of requiring
+    /// the process-owning alias to equal an auxiliary voice alias.
+    func isVoiceLaneReady(for alias: String) -> Bool {
+        servingAlias == alias || voiceCoLoadsOnPrimary
+    }
+
     /// Bring up a server for a voice (STT/TTS) request, reusing the primary
     /// chat LLM/VLM process when one is already up so voice and text/vision
     /// run side-by-side instead of voice replacing the chat model.
