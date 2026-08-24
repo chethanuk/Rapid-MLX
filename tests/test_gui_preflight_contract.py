@@ -206,14 +206,21 @@ def test_image_inflight_baseline_uses_an_event_backed_warmup_phase():
     )
     fake = FAKE_SIDECAR.read_text()
 
-    assert "FAKE_IMAGE_FIRST_WARMUP_MS=10000" in flow
+    assert (
+        'FAKE_IMAGE_FIRST_WARMUP_ACK="$OUT_ROOT/image-generation/ig-warmup-ack"' in flow
+    )
     wire_gate = 'wait_fake_event \'.event == "image_request"'
     assert wire_gate in flow
     assert flow.index(wire_gate) < flow.index('see_main "$OUT/ig-inflight.json"')
-    assert '_setting("FAKE_IMAGE_FIRST_WARMUP_MS", 0)' in fake
-    assert '"running": self.running and not warming_up' in fake
-    warmup_state = "self.warmup_ms = first_warmup_ms if self.count == 0 else 0"
-    assert fake.index(warmup_state) < fake.index("time.sleep(request_warmup_ms / 1000)")
+    assert '_setting("FAKE_IMAGE_FIRST_WARMUP_ACK")' in fake
+    assert '"running": self.running and not self.warming_up' in fake
+    assert "while not os.path.exists(first_warmup_ack)" in fake
+    assert '[[ "$inflight" == 1 ]]' in flow
+    acknowledgement = ': > "$OUT/ig-warmup-ack"'
+    assert flow.index('[[ "$inflight" == 1 ]]') < flow.index(acknowledgement)
+    assert flow.index(acknowledgement) < flow.index(
+        "baseline image-generation.inflight"
+    )
 
 
 def test_audio_baseline_waits_for_residency_poll_to_settle():
