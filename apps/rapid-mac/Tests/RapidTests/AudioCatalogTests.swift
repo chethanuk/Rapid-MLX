@@ -126,6 +126,43 @@ struct AudioCatalogTests {
         #expect(viewModel.selectedTranscriptionAlias == "qwen3-asr")
     }
 
+    @Test("runtime selection deduplicates aliases without presentation sorting")
+    @MainActor
+    func transcriptionSelectionPreservesDeduplication() {
+        let viewModel = AudioViewModel(server: ServerManager(testingState: .idle))
+        let qwenRepo = "mlx-community/Qwen3-ASR-1.7B-5bit"
+        viewModel.audioModels = [
+            audioEntry(
+                alias: "qwen3-asr-1.7b",
+                capability: .transcription,
+                family: "qwen3_asr",
+                repo: qwenRepo,
+                cached: true
+            ),
+            audioEntry(
+                alias: "qwen3-asr",
+                capability: .transcription,
+                family: "qwen3_asr",
+                repo: qwenRepo,
+                cached: true
+            ),
+            audioEntry(
+                alias: "whisper-large-v3-turbo",
+                capability: .transcription,
+                family: "whisper",
+                cached: true
+            ),
+        ]
+
+        viewModel.resolveSelections()
+
+        #expect(viewModel.selectedTranscriptionAlias == "qwen3-asr")
+        #expect(viewModel.transcriptionModels.map(\.alias) == [
+            "whisper-large-v3-turbo",
+            "qwen3-asr",
+        ])
+    }
+
     @Test("speech-to-text picker renders explanatory rows instead of a native alias menu")
     func transcriptionPickerUsesRichRows() throws {
         let source = try String(contentsOf: Self.dictationViewURL, encoding: .utf8)

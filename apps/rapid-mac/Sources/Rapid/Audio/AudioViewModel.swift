@@ -69,10 +69,11 @@ final class AudioViewModel {
     /// with a Recommended badge may appear first), and feeding that order
     /// back into default selection silently changes the active checkpoint.
     private var transcriptionSelectionModels: [ModelEntry] {
-        audioModels.filter {
+        let candidates = audioModels.filter {
             $0.audioCapability?.supportsTranscription == true
                 && ModelCatalog.isDesktopAudioAliasVisible($0.alias)
         }
+        return Self.stablyDeduplicatedTranscriptionModels(candidates)
     }
 
     var speechModels: [ModelEntry] {
@@ -332,6 +333,31 @@ final class AudioViewModel {
     /// a visual picker should not show the same checkpoint three times. Group
     /// by HF repo and keep the explicit product alias where one exists.
     static func deduplicatedTranscriptionModels(_ entries: [ModelEntry]) -> [ModelEntry] {
+        let deduplicated = stablyDeduplicatedTranscriptionModels(entries)
+        let position = Dictionary(
+            uniqueKeysWithValues: deduplicated.enumerated().map {
+                let key = $1.hfRepo?.lowercased() ?? "alias:\($1.alias.lowercased())"
+                return (key, $0)
+            }
+        )
+        return deduplicated.sorted { lhs, rhs in
+            let lhsRecommended = transcriptionDetails(
+                alias: lhs.alias, family: lhs.audioFamily
+            ).isRecommended
+            let rhsRecommended = transcriptionDetails(
+                alias: rhs.alias, family: rhs.audioFamily
+            ).isRecommended
+            if lhsRecommended != rhsRecommended { return lhsRecommended }
+            if lhs.cached != rhs.cached { return lhs.cached }
+            let lhsKey = lhs.hfRepo?.lowercased() ?? "alias:\(lhs.alias.lowercased())"
+            let rhsKey = rhs.hfRepo?.lowercased() ?? "alias:\(rhs.alias.lowercased())"
+            return position[lhsKey, default: .max] < position[rhsKey, default: .max]
+        }
+    }
+
+    private static func stablyDeduplicatedTranscriptionModels(
+        _ entries: [ModelEntry]
+    ) -> [ModelEntry] {
         var order: [String] = []
         var representative: [String: ModelEntry] = [:]
 
@@ -347,20 +373,7 @@ final class AudioViewModel {
                 representative[key] = entry
             }
         }
-        let position = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
-        return order.compactMap { representative[$0] }.sorted { lhs, rhs in
-            let lhsRecommended = transcriptionDetails(
-                alias: lhs.alias, family: lhs.audioFamily
-            ).isRecommended
-            let rhsRecommended = transcriptionDetails(
-                alias: rhs.alias, family: rhs.audioFamily
-            ).isRecommended
-            if lhsRecommended != rhsRecommended { return lhsRecommended }
-            if lhs.cached != rhs.cached { return lhs.cached }
-            let lhsKey = lhs.hfRepo?.lowercased() ?? "alias:\(lhs.alias.lowercased())"
-            let rhsKey = rhs.hfRepo?.lowercased() ?? "alias:\(rhs.alias.lowercased())"
-            return position[lhsKey, default: .max] < position[rhsKey, default: .max]
-        }
+        return order.compactMap { representative[$0] }
     }
 
     private static func transcriptionAliasPriority(_ alias: String) -> Int {
