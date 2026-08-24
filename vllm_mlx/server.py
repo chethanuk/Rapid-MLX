@@ -227,6 +227,23 @@ _default_repetition_penalty: float | None = None  # Set via --default-repetition
 _default_presence_penalty: float | None = None  # Set via --default-presence-penalty
 _default_frequency_penalty: float | None = None  # Set via --default-frequency-penalty
 
+
+def _bind_audio_worker_for_engine(engine: object | None) -> bool:
+    """Bind a compatible primary engine or select the isolated fallback."""
+
+    from .runtime.audio_worker import bind_audio_worker
+
+    compatible = engine is not None and all(
+        callable(getattr(engine, method, None))
+        for method in (
+            "execute_on_model_worker",
+            "execute_on_model_worker_sync",
+        )
+    )
+    bind_audio_worker(engine if compatible else None)
+    return compatible
+
+
 # Sampling overlays populated from the model's AliasProfile +
 # generation_config.json once the path is known (load_model). Both stay
 # as None pre-load; the resolve helpers tolerate missing dicts.
@@ -694,14 +711,13 @@ async def lifespan(app: FastAPI):
         )
     if _engine is not None:
         from .routes.audio import audio_routes_should_register
-        from .runtime.audio_worker import bind_audio_worker
 
         if audio_routes_should_register(
             model_name=_model_name,
             model_alias=_model_alias,
             enable_audio_lane=_enable_audio_lane,
         ):
-            bind_audio_worker(_engine)
+            _bind_audio_worker_for_engine(_engine)
         _primary_entry = next(
             (
                 entry

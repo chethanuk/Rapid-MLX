@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import threading
 import time
 from collections.abc import Callable
@@ -38,6 +40,7 @@ class AudioWorkerDispatcher:
 
     def __init__(self) -> None:
         self._worker: ModelWorker | None = None
+        self._fallback: concurrent.futures.ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
         self._lanes: dict[str, AudioLaneState] = {}
 
@@ -47,12 +50,31 @@ class AudioWorkerDispatcher:
             or not callable(getattr(worker, "execute_on_model_worker_sync", None))
         ):
             raise TypeError("engine does not expose the model-worker contract")
+        fallback = None
         with self._lock:
             self._worker = worker
+            fallback = self._fallback
+            self._fallback = None
+        if fallback is not None:
+            fallback.shutdown(wait=True)
 
     def _bound_worker(self) -> ModelWorker | None:
         with self._lock:
             return self._worker
+
+    def _fallback_worker(self) -> concurrent.futures.ThreadPoolExecutor:
+        """Return the dedicated worker used by audio-only/non-batched servers."""
+
+        with self._lock:
+            if self._fallback is None:
+                from ..engine_core import _init_mlx_step_thread
+
+                self._fallback = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="mlx-audio",
+                    initializer=_init_mlx_step_thread,
+                )
+            return self._fallback
 
     def _begin(self, lane: str, model: str, operation: str) -> None:
         now = time.monotonic()
@@ -116,18 +138,45 @@ class AudioWorkerDispatcher:
         *args: Any,
         **kwargs: Any,
     ) -> _T:
-        self._begin(lane, model, operation)
-        error: BaseException | None = None
+        async def invoke() -> _T:
+            self._begin(lane, model, operation)
+            error: BaseException | None = None
+            try:
+                worker = self._bound_worker()
+                if worker is not None:
+                    return await worker.execute_on_model_worker(func, *args, **kwargs)
+                loop = asyncio.get_running_loop()
+                executor = self._fallback_worker()
+                return await loop.run_in_executor(
+                    executor, lambda: func(*args, **kwargs)
+                )
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                self._finish(lane, model, operation, error)
+
+        task = asyncio.create_task(invoke())
         try:
-            worker = self._bound_worker()
-            if worker is None:
-                return func(*args, **kwargs)
-            return await worker.execute_on_model_worker(func, *args, **kwargs)
-        except BaseException as exc:
-            error = exc
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The callable may still be reading a request tempfile or touching
+            # cached weights. Do not let the route release its lane lock and
+            # cleanup resources until the worker reaches a terminal state.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            # Retrieve a terminal exception to avoid an unobserved-task
+            # warning; cancellation remains the caller-visible outcome.
+            try:
+                task.result()
+            except BaseException:
+                pass
             raise
-        finally:
-            self._finish(lane, model, operation, error)
 
     def execute_sync(
         self,
@@ -142,9 +191,9 @@ class AudioWorkerDispatcher:
         error: BaseException | None = None
         try:
             worker = self._bound_worker()
-            if worker is None:
-                return func(*args, **kwargs)
-            return worker.execute_on_model_worker_sync(func, *args, **kwargs)
+            if worker is not None:
+                return worker.execute_on_model_worker_sync(func, *args, **kwargs)
+            return self._fallback_worker().submit(func, *args, **kwargs).result()
         except BaseException as exc:
             error = exc
             raise

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import threading
 
@@ -26,18 +27,19 @@ class _RecordingWorker:
 
 
 @pytest.mark.asyncio
-async def test_audio_only_dispatch_runs_inline_without_primary_worker():
+async def test_audio_only_dispatch_uses_dedicated_worker_without_primary():
     dispatcher = AudioWorkerDispatcher()
     caller_thread = threading.get_ident()
 
     assert (
         await dispatcher.execute("stt", "whisper", "infer", threading.get_ident)
-        == caller_thread
+        != caller_thread
     )
     assert (
         dispatcher.execute_sync("tts", "kokoro", "infer", threading.get_ident)
-        == caller_thread
+        != caller_thread
     )
+    dispatcher.bind(None)
 
 
 @pytest.mark.asyncio
@@ -67,16 +69,24 @@ def test_bind_rejects_engine_without_complete_worker_contract():
         dispatcher.bind(object())
 
 
+def test_server_selects_isolated_fallback_for_non_batched_engine():
+    from vllm_mlx import server
+
+    assert server._bind_audio_worker_for_engine(object()) is False
+
+
 @pytest.mark.asyncio
-async def test_unbind_restores_audio_only_inline_path():
+async def test_unbind_restores_dedicated_audio_only_worker():
     dispatcher = AudioWorkerDispatcher()
     dispatcher.bind(_RecordingWorker())
     dispatcher.bind(None)
 
+    caller_thread = threading.get_ident()
     assert (
-        await dispatcher.execute("stt", "whisper", "infer", lambda: "inline")
-        == "inline"
+        await dispatcher.execute("stt", "whisper", "infer", threading.get_ident)
+        != caller_thread
     )
+    dispatcher.bind(None)
 
 
 @pytest.mark.asyncio
@@ -144,6 +154,7 @@ async def test_lane_snapshot_reports_resident_model_after_successful_load():
             "last_error": None,
         }
     ]
+    dispatcher.bind(None)
 
 
 def test_lane_snapshot_records_failure_without_leaking_message():
@@ -162,6 +173,35 @@ def test_lane_snapshot_records_failure_without_leaking_message():
     assert lane["active_requests"] == 0
     assert lane["last_error"] == "ValueError"
     assert "secret detail" not in repr(lane)
+    dispatcher.bind(None)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_drains_worker_before_releasing_lane_lease():
+    dispatcher = AudioWorkerDispatcher()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_transcription() -> str:
+        started.set()
+        assert release.wait(timeout=5)
+        return "done"
+
+    task = asyncio.create_task(
+        dispatcher.execute("stt", "whisper", "infer", blocking_transcription)
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert dispatcher.snapshot()[0]["active_requests"] == 1
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert dispatcher.snapshot()[0]["active_requests"] == 0
+    dispatcher.bind(None)
 
 
 @pytest.mark.asyncio
