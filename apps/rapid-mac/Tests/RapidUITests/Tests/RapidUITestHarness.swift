@@ -153,6 +153,16 @@ final class RapidUITestHarness {
         ).firstMatch
     }
 
+    func element(accessibilityTextPrefix prefix: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@ OR value BEGINSWITH %@",
+                prefix,
+                prefix
+            )
+        ).firstMatch
+    }
+
     func messageAction(_ action: String) -> XCUIElement {
         app.descendants(matching: .any).matching(
             NSPredicate(

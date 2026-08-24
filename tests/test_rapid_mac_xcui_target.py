@@ -112,6 +112,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "pasteboard.changeCount == ownedPasteboardChangeCount" in harness
     assert "originalPasteboardItems == nil || !stillOwnsPasteboard" in harness
     assert "func relaunch()" in harness
+    assert "func element(accessibilityTextPrefix prefix: String)" in harness
+    assert 'format: "label BEGINSWITH %@ OR value BEGINSWITH %@"' in harness
     assert "terminateFakeSidecars()" in harness
     assert 'messageAction("Retry")' in harness
     assert "testDragPasteAndRemovalPreserveWireIdentity" in chat_source

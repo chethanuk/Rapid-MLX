@@ -124,7 +124,7 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         )
         let sentImage = harness.element(label: image.lastPathComponent)
         let sentDocument = harness.element(
-            label: "TXT file, \(document.lastPathComponent), TXT"
+            accessibilityTextPrefix: "TXT file, \(document.lastPathComponent.prefix(8))"
         )
         let expectedImageHash = try dataURLHash(image)
 
