@@ -26,6 +26,13 @@ def generate_tool_id() -> str:
     return f"call_{uuid.uuid4().hex[:8]}"
 
 
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    """Read a request/tool field from either wire dicts or typed models."""
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
 def _parse_function_body(
     body: str, valid_names: set[str] | None = None
 ) -> dict[str, Any] | None:
@@ -145,6 +152,16 @@ class HermesToolParser(ToolParser):
     NEMOTRON_PATTERN = re.compile(
         r"<tool_call>\s*<function=([^>]+)>(.*?)</function>\s*</tool_call>", re.DOTALL
     )
+    # Recovery boundary for a canonical wrapper whose inner XML was cut off.
+    # This deliberately captures ONLY a closed <tool_call> wrapper with an
+    # explicit function header. It does not repair the body into executable
+    # JSON: callers must receive a normal tool call whose arguments fail their
+    # schema/JSON boundary, then return that parse error to the model for a
+    # correction round.
+    MALFORMED_NEMOTRON_PATTERN = re.compile(
+        r"<tool_call>\s*<function=([^>]+)>(.*?)</tool_call>", re.DOTALL
+    )
+    MALFORMED_JSON_NAME_PATTERN = re.compile(r'"name"\s*:\s*"([A-Za-z0-9_.:-]+)"')
     PARAM_PATTERN = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
     REASONING_PATTERN = re.compile(
         r"<tool_call_reasoning>(.*?)</tool_call_reasoning>", re.DOTALL
@@ -306,6 +323,43 @@ class HermesToolParser(ToolParser):
                 if args is None:
                     return None
                 return (m.end(), name, json.dumps(args, ensure_ascii=False))
+            # A closed outer wrapper is enough to identify the protocol
+            # boundary, but never enough to authorize execution when the
+            # inner function/parameter XML is incomplete. Surface the call
+            # only when the request actually advertised that exact name and
+            # preserve the malformed body as deliberately non-JSON arguments.
+            # The executor then follows its ordinary fail-closed path and the
+            # tool error is fed back to the model for self-correction.
+            request_tools = _field(request, "tools", []) or []
+            declared_names = {
+                _field(_field(tool, "function"), "name") for tool in request_tools
+            }
+            malformed = cls.MALFORMED_NEMOTRON_PATTERN.match(text, pos)
+            if malformed is not None and "</function>" not in malformed.group(0):
+                name = malformed.group(1).strip()
+                if name and name in declared_names:
+                    raw_body = malformed.group(2).strip()
+                    arguments = f"<malformed_function_body>{raw_body}"
+                    return (malformed.end(), name, arguments)
+            # Same contract for the canonical JSON-body envelope: an outer
+            # close plus an advertised name and an arguments key establishes
+            # intent, but invalid JSON must remain invalid for the executor.
+            wrapper_end = text.find("</tool_call>", pos)
+            if wrapper_end >= 0:
+                end = wrapper_end + len("</tool_call>")
+                body = text[pos + len("<tool_call>") : wrapper_end].strip()
+                name_match = cls.MALFORMED_JSON_NAME_PATTERN.search(body)
+                if (
+                    body.startswith("{")
+                    and '"arguments"' in body
+                    and name_match is not None
+                    and name_match.group(1) in declared_names
+                ):
+                    return (
+                        end,
+                        name_match.group(1),
+                        f"<malformed_json_arguments>{body}",
+                    )
             return None
         if shape == "function_eq":
             # Shape #3: <function=NAME>...</function>
