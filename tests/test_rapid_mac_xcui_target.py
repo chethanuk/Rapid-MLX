@@ -102,6 +102,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "click(forDuration: 1, thenDragTo: dropTarget)" in harness
     assert "NSImage(data: data)" in harness
     assert "pasteboard.writeObjects([image])" in harness
+    assert "XCTAssertNotNil(NSImage(pasteboard: pasteboard))" in harness
+    assert 'composer.typeKey("v", modifierFlags: .command)' in harness
     assert "reserveLoopbackPort" in harness
     assert "reservationTransferred" in harness
     assert "Darwin.close(reservedPort.descriptor)" in harness

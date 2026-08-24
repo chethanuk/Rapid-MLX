@@ -197,10 +197,11 @@ final class RapidUITestHarness {
         // NSImage(pasteboard:) portable across hosted macOS image versions.
         XCTAssertTrue(pasteboard.writeObjects([image]))
         ownedPasteboardChangeCount = pasteboard.changeCount
+        XCTAssertNotNil(NSImage(pasteboard: pasteboard))
         let composer = element("rapid.chat.compose")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.click()
-        app.typeKey("v", modifierFlags: .command)
+        composer.typeKey("v", modifierFlags: .command)
     }
 
     private func restorePasteboardIfOwned() {
