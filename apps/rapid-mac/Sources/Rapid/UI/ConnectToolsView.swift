@@ -115,11 +115,34 @@ struct ConnectToolsView: View {
     /// resolved. Anything less and the snippets below would be a
     /// half-filled template.
     private var configReady: Bool {
-        let selectedModelIsServing = readiness?.isReady ?? true
-        return port > 0
-            && !bearer.isEmpty
-            && resolvedModel != nil
-            && selectedModelIsServing
+        Self.configIsReady(
+            hasPort: port > 0,
+            hasBearer: !bearer.isEmpty,
+            modelResolved: resolvedModel != nil,
+            modelServing: readiness?.isReady
+        )
+    }
+
+    /// The single decision behind the page's disabled-Copy gate, factored
+    /// out so the whole truth table is behaviorally testable without a view
+    /// host (the readiness boundary itself is pinned in ``ModelReadiness``).
+    ///
+    /// A snippet is only paste-worthy once the server has a real port, has
+    /// minted a bearer, and a model name is resolved — and, when a readiness
+    /// value is supplied (the live page), that model is actually serving.
+    /// Passing ``modelServing == false`` (the #2297 stopped state) forces the
+    /// config NOT ready even when every static value is present: copying a
+    /// half-filled template is the silent-failure defect the disabled-Copy
+    /// gate exists to prevent. ``nil`` (the dev snapshot harness, which has
+    /// no live server to resolve against) keeps the legacy behavior of
+    /// trusting the static values alone.
+    static func configIsReady(
+        hasPort: Bool,
+        hasBearer: Bool,
+        modelResolved: Bool,
+        modelServing: Bool?
+    ) -> Bool {
+        hasPort && hasBearer && modelResolved && (modelServing ?? true)
     }
 
     /// One concise sentence naming what is missing.
