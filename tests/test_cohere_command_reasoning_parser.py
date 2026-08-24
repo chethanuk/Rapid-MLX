@@ -172,22 +172,32 @@ def test_json_mode_routes_bare_json_to_content(document):
         assert _stream(document, chunks, json_mode=True) == (None, document)
 
 
-def test_json_container_streams_before_eof_and_stops_at_document_boundary():
+def test_json_container_waits_for_eof_before_publishing_ambiguous_bytes():
     parser = CohereCommand4ReasoningParser()
     parser.configure_request(json_mode=True)
 
     first = parser.extract_reasoning_streaming("", '{"items":[1,', '{"items":[1,')
     second = parser.extract_reasoning_streaming(
         '{"items":[1,',
-        '{"items":[1,2]}trailing scratch<|END_THINKING|>',
-        "2]}trailing scratch<|END_THINKING|>",
+        '{"items":[1,2]}trailing scratch',
+        "2]}trailing scratch",
     )
     final = parser.finish_stream()
 
-    assert first is not None and first.content == '{"items":[1,'
-    assert second is not None and second.content == "2]}"
-    assert first.reasoning is None and second.reasoning is None
-    assert final is None
+    assert first is None
+    assert second is None
+    assert final is not None and final.content == '{"items":[1,2]}'
+    assert parser.extract_reasoning_streaming("", "ignored", "ignored") is None
+
+
+def test_json_shaped_reasoning_defers_to_typed_channel_at_every_boundary():
+    wire = f'{{"draft":1}}{THINK_END}{TEXT_START}{{"answer":4}}{TEXT_END}'
+    expected = ('{"draft":1}', '{"answer":4}')
+
+    parser = CohereCommand4ReasoningParser()
+    assert parser.extract_reasoning(wire, json_mode=True) == expected
+    for chunks in _all_two_part_splits(wire):
+        assert _stream(wire, chunks, json_mode=True) == expected, chunks
 
 
 def test_json_container_lexer_ignores_brackets_and_escapes_inside_strings():
@@ -297,10 +307,11 @@ def test_configure_request_resets_incremental_state():
     parser.extract_reasoning_streaming("", THINK_END, THINK_END)
     parser.configure_request(json_mode=True)
     message = parser.extract_reasoning_streaming("", '{"ok":', '{"ok":')
-    assert message is not None
-    assert message.reasoning is None
-    assert message.content == '{"ok":'
-    assert parser.finish_stream() is None
+    assert message is None
+    final = parser.finish_stream()
+    assert final is not None
+    assert final.reasoning is None
+    assert final.content == '{"ok":'
 
 
 def test_forced_reasoning_end_keeps_later_model_close_structural():

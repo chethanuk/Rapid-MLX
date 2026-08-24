@@ -80,6 +80,27 @@ def _json_container_end(text: str) -> int | None:
     return None
 
 
+def _first_reasoning_transition(
+    text: str, *, protect_leading_json: bool
+) -> tuple[int, str] | None:
+    """Find a typed-channel transition without inspecting JSON string data.
+
+    In structured mode a leading container is ambiguous until it closes: it
+    can be the final bare document or JSON-shaped scratch reasoning. Only a
+    transition after that top-level container is protocol evidence.
+    """
+    if protect_leading_json and text.lstrip().startswith(("{", "[")):
+        end = _json_container_end(text)
+        if end is None:
+            return None
+        trailing = _first_marker(text[end:], _REASONING_TRANSITIONS)
+        if trailing is None:
+            return None
+        index, marker = trailing
+        return end + index, marker
+    return _first_marker(text, _REASONING_TRANSITIONS)
+
+
 class CohereCommand4ReasoningParser(ReasoningParser):
     """Parse Command-style thinking, text, and action blocks.
 
@@ -181,16 +202,22 @@ class CohereCommand4ReasoningParser(ReasoningParser):
         # lifecycle probe; otherwise a bare structured document is mistaken
         # for implicit reasoning after it was already parsed as content.
         self._json_mode = request_json_mode
-        if request_json_mode and model_output.lstrip().startswith(("{", "[")):
+        transition = _first_reasoning_transition(
+            model_output, protect_leading_json=request_json_mode
+        )
+        if (
+            request_json_mode
+            and model_output.lstrip().startswith(("{", "["))
+            and transition is None
+        ):
             end = _json_container_end(model_output)
             return None, model_output if end is None else model_output[:end]
-        has_protocol_marker = THINK_START in model_output or any(
-            marker in model_output for marker in _REASONING_TRANSITIONS
-        )
+        has_protocol_marker = THINK_START in model_output or transition is not None
         if request_json_mode and not has_protocol_marker:
             return None, model_output
 
-        transition = _first_marker(model_output, _REASONING_TRANSITIONS)
+        if transition is None:
+            transition = _first_marker(model_output, _REASONING_TRANSITIONS)
         if transition is None:
             implicit_reasoning = self._strip_leading_think_start(model_output)
             return implicit_reasoning or None, None
@@ -227,30 +254,24 @@ class CohereCommand4ReasoningParser(ReasoningParser):
         while self._buffer:
             if self._phase == "reasoning":
                 if self._json_protocol_undecided:
-                    if self._buffer.lstrip().startswith(("{", "[")):
-                        # A container opener is unambiguous JSON-document
-                        # evidence. Stream the document incrementally while a
-                        # tiny lexer tracks nesting and quoted strings; once
-                        # the top-level value closes, discard any trailing
-                        # prose or protocol markers instead of leaking them.
-                        self._json_protocol_undecided = False
-                        self._phase = "json_document"
-                        continue
-                    has_protocol_marker = THINK_START in self._buffer or any(
-                        marker in self._buffer for marker in _REASONING_TRANSITIONS
+                    transition = _first_reasoning_transition(
+                        self._buffer, protect_leading_json=True
                     )
-                    if has_protocol_marker:
+                    if transition is not None or THINK_START in self._buffer:
                         self._json_protocol_undecided = False
                     elif flush:
-                        self._phase = "bare"
+                        self._phase = (
+                            "json_document"
+                            if self._buffer.lstrip().startswith(("{", "["))
+                            else "bare"
+                        )
                         continue
                     else:
-                        # A JSON-mode model may violate the template and emit
-                        # unframed scratch prose before eventually producing a
-                        # typed-channel close + answer. Do not classify from
-                        # the first character; wait for protocol evidence or
-                        # EOF. The route's existing JSON validator owns the
-                        # final bare-document decision.
+                        # A JSON-shaped prefix is not sufficient to publish:
+                        # scratch reasoning may itself be valid JSON and then
+                        # close through the typed-channel protocol. Since SSE
+                        # cannot retract bytes, wait for protocol evidence or
+                        # EOF before choosing the public channel.
                         break
 
                 if not self._reasoning_started:
@@ -260,7 +281,9 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                     if not flush and THINK_START.startswith(self._buffer):
                         break
 
-                transition = _first_marker(self._buffer, _REASONING_TRANSITIONS)
+                transition = _first_reasoning_transition(
+                    self._buffer, protect_leading_json=self._json_mode
+                )
                 if transition is not None:
                     index, marker = transition
                     prefix = self._buffer[:index]
