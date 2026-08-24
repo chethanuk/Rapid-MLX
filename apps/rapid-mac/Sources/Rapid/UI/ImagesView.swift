@@ -406,15 +406,10 @@ struct ImagesView: View {
                             .foregroundStyle(RapidTheme.bandInkSecondary)
                             .monospacedDigit()
                         Spacer()
-                        // ETA from the denoise-phase clock, not total elapsed —
-                        // otherwise cold-load time inflates the per-step estimate.
-                        let denoiseElapsed = viewModel.denoiseStartedAt
-                            .map { context.date.timeIntervalSince($0) } ?? elapsed
                         Text(finalizing
                              ? "Decoding and saving…"
                              : (denoising
-                                ? (etaText(step: step, total: total, elapsed: denoiseElapsed)
-                                   ?? "Finalizing next…")
+                                ? etaText(secondsRemaining: viewModel.denoiseETASeconds)
                                 : "First run — only happens once"))
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(RapidTheme.bandInkSecondary)
@@ -445,10 +440,11 @@ struct ImagesView: View {
         }
     }
 
-    private func etaText(step: Int, total: Int, elapsed: TimeInterval) -> String? {
-        guard step > 0, total > step, elapsed > 0 else { return nil }
-        let perStep = elapsed / Double(step)
-        return "~\(Int((perStep * Double(total - step)).rounded()))s left"
+    private func etaText(secondsRemaining: TimeInterval?) -> String {
+        guard let secondsRemaining, secondsRemaining.isFinite, secondsRemaining > 0 else {
+            return "Estimating…"
+        }
+        return "~\(max(1, Int(secondsRemaining.rounded())))s left"
     }
 
     // MARK: - Filmstrip
