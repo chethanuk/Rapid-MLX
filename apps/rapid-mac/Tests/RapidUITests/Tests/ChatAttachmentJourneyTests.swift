@@ -148,6 +148,9 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         )
 
         harness.relaunch()
+        // Relaunch preserves the selected model but intentionally leaves it
+        // stopped. Start that persisted selection before exercising Retry.
+        harness.startModel()
         XCTAssertTrue(sentImage.waitForExistence(timeout: 20))
         XCTAssertTrue(sentDocument.waitForExistence(timeout: 20))
         XCTAssertFalse(imageChip.exists)

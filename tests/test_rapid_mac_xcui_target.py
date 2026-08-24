@@ -112,6 +112,9 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "pasteboard.changeCount == ownedPasteboardChangeCount" in harness
     assert "originalPasteboardItems == nil || !stillOwnsPasteboard" in harness
     assert "func relaunch()" in harness
+    relaunch_index = chat_source.index("harness.relaunch()")
+    restart_index = chat_source.index("harness.startModel()", relaunch_index)
+    assert relaunch_index < restart_index
     assert "func staticText(valuePrefix prefix: String)" in harness
     assert "app.staticTexts.matching(" in harness
     assert 'NSPredicate(format: "value BEGINSWITH %@", prefix)' in harness

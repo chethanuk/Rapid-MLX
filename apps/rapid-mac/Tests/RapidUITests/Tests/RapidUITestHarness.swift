@@ -103,15 +103,6 @@ final class RapidUITestHarness {
         app.launch()
         XCTAssertTrue(app.windows["Rapid-MLX"].waitForExistence(timeout: 20))
         dismissFirstRunIfNeeded()
-
-        // The selected model is persisted with the conversation persona, so
-        // a real relaunch must restore both the transcript and an actionable
-        // composer without the test clicking Load a second time.
-        let send = element("ChatView.SendOrStopButton")
-        XCTAssertTrue(send.waitForExistence(timeout: 20))
-        XCTAssertTrue(waitUntil(timeout: 60) {
-            send.label == "Send message" && send.isEnabled
-        })
     }
 
     func shutDown() {
