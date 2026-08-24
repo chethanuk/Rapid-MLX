@@ -177,6 +177,10 @@ final class RapidUITestHarness {
 
     func pasteImage(_ url: URL) throws {
         let data = try Data(contentsOf: url)
+        guard let image = NSImage(data: data) else {
+            XCTFail("Could not decode image for native pasteboard journey")
+            return
+        }
         let pasteboard = NSPasteboard.general
         let stillOwnsPasteboard = ownedPasteboardChangeCount != nil
             && pasteboard.changeCount == ownedPasteboardChangeCount
@@ -188,7 +192,10 @@ final class RapidUITestHarness {
             } ?? []
         }
         pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setData(data, forType: .png))
+        // Use AppKit's image pasteboard writer instead of publishing only a
+        // bare PNG representation. This matches a native image copy and makes
+        // NSImage(pasteboard:) portable across hosted macOS image versions.
+        XCTAssertTrue(pasteboard.writeObjects([image]))
         ownedPasteboardChangeCount = pasteboard.changeCount
         let composer = element("rapid.chat.compose")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
