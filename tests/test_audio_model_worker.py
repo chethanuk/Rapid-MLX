@@ -593,6 +593,7 @@ async def test_residency_snapshot_includes_audio_lane_truth(monkeypatch):
 async def test_lifespan_binds_audio_worker_when_lane_is_enabled(monkeypatch):
     import vllm_mlx._signal_observability as signal_observability
     import vllm_mlx.server as server
+    from vllm_mlx.routes import video as video_route
 
     class _Engine:
         _loaded = True
@@ -615,15 +616,32 @@ async def test_lifespan_binds_audio_worker_when_lane_is_enabled(monkeypatch):
 
     engine = _Engine()
     bound: list[object] = []
+    lifecycle_config = SimpleNamespace(
+        ready=False,
+        draining=False,
+        bind_host=None,
+        bind_port=None,
+        bind_listen_fd=None,
+        model_alias=None,
+        model_name=None,
+    )
+
+    async def _shutdown_video_jobs() -> None:
+        pass
+
     monkeypatch.setattr(
         signal_observability, "install_signal_observability", lambda: False
     )
+    monkeypatch.setattr(video_route, "start_video_jobs", lambda: None)
+    monkeypatch.setattr(video_route, "shutdown_video_jobs", _shutdown_video_jobs)
     monkeypatch.setattr(server, "_engine", engine)
     monkeypatch.setattr(server, "_residency_manager", _Residency())
     monkeypatch.setattr(server, "_mcp_manager", None)
+    monkeypatch.setattr(server, "_gc_control", False)
     monkeypatch.setattr(server, "_enable_audio_lane", True)
     monkeypatch.setattr(server, "_model_name", "chat-model")
     monkeypatch.setattr(server, "_model_alias", "chat-model")
+    monkeypatch.setattr(server, "get_config", lambda: lifecycle_config)
     monkeypatch.setattr(
         server,
         "_bind_audio_worker_for_engine",
