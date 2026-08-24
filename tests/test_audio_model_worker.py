@@ -231,3 +231,39 @@ async def test_server_shutdown_unloads_cached_audio_engines(monkeypatch):
     assert audio_route._aligner_engine is None
     assert audio_route._tts_engine is None
     assert audio_route._music_engine is None
+
+
+@pytest.mark.asyncio
+async def test_server_shutdown_continues_after_audio_unload_failure(
+    monkeypatch, caplog
+):
+    from vllm_mlx.routes import audio as audio_route
+
+    class _Cached:
+        def __init__(self, model_name: str, *, fails: bool = False) -> None:
+            self.model_name = model_name
+            self.fails = fails
+            self.unloaded = False
+
+        def unload(self) -> None:
+            self.unloaded = True
+            if self.fails:
+                raise RuntimeError("damaged test backend")
+
+    stt = _Cached("whisper", fails=True)
+    aligner = _Cached("aligner")
+    tts = _Cached("kokoro")
+    monkeypatch.setattr(audio_route, "_stt_engine", stt)
+    monkeypatch.setattr(audio_route, "_aligner_engine", aligner)
+    monkeypatch.setattr(audio_route, "_tts_engine", tts)
+    monkeypatch.setattr(audio_route, "_music_engine", object())
+
+    await audio_route.shutdown_audio_lanes()
+
+    assert stt.unloaded and aligner.unloaded and tts.unloaded
+    assert audio_route._stt_engine is None
+    assert audio_route._aligner_engine is None
+    assert audio_route._tts_engine is None
+    assert audio_route._music_engine is None
+    assert "Failed to unload stt audio lane" in caplog.text
+    assert "damaged test backend" in caplog.text

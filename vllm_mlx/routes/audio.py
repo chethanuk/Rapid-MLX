@@ -1527,32 +1527,39 @@ async def shutdown_audio_lanes() -> None:
 
     from ..runtime.audio_worker import run_audio_mlx_sync
 
+    def unload_cached(lane: str, cached: object | None) -> None:
+        if cached is None:
+            return
+        unload = getattr(cached, "unload", None)
+        if not callable(unload):
+            return
+        try:
+            run_audio_mlx_sync(
+                lane,
+                getattr(cached, "model_name", "unknown"),
+                "unload",
+                unload,
+            )
+        except Exception:
+            # Shutdown is best effort: one damaged auxiliary backend must not
+            # strand the remaining lanes or prevent the primary engine from
+            # stopping. Preserve the original exception and traceback in the
+            # server log while continuing terminal cleanup.
+            logger.exception("Failed to unload %s audio lane during shutdown", lane)
+
     async with _get_stt_lane_lock():
-        for lane, cached in (("stt", _stt_engine), ("alignment", _aligner_engine)):
-            if cached is None:
-                continue
-            unload = getattr(cached, "unload", None)
-            if callable(unload):
-                run_audio_mlx_sync(
-                    lane,
-                    getattr(cached, "model_name", "unknown"),
-                    "unload",
-                    unload,
-                )
-        _stt_engine = None
-        _aligner_engine = None
+        try:
+            unload_cached("stt", _stt_engine)
+            unload_cached("alignment", _aligner_engine)
+        finally:
+            _stt_engine = None
+            _aligner_engine = None
 
     async with _get_tts_lane_lock():
-        if _tts_engine is not None:
-            unload = getattr(_tts_engine, "unload", None)
-            if callable(unload):
-                run_audio_mlx_sync(
-                    "tts",
-                    getattr(_tts_engine, "model_name", "unknown"),
-                    "unload",
-                    unload,
-                )
-        _tts_engine = None
+        try:
+            unload_cached("tts", _tts_engine)
+        finally:
+            _tts_engine = None
 
     async with _get_music_lock():
         # MusicEngine owns a subprocess per generation rather than persistent
