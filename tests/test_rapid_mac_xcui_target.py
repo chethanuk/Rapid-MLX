@@ -95,6 +95,8 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert 'element("MemoryWarning.Confirm")' in harness
     assert "let priorServerStartCount = serverStartCount()" in harness
     assert "self.serverStartCount() > priorServerStartCount" in harness
+    assert "func waitForConversationPersistence(containing markers: [String])" in harness
+    assert 'app.launchEnvironment["RAPID_DESKTOP_PORT"] = String(reservedPort.port)' in harness
     assert 'app.dialogs["open-panel"].buttons["OKButton"]' in harness
     assert (
         'XCUIApplication(bundleIdentifier: "com.rapidmlx.rapid-uitest-host")' in harness

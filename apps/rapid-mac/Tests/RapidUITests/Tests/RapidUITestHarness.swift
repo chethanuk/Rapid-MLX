@@ -9,6 +9,7 @@ final class RapidUITestHarness {
     let rapidMacRoot: URL
 
     private let testHome: URL
+    private let conversationStore: URL
     private let sidecarAlias: String
     private let sidecarPIDFile: URL
     private var portReservation: Int32?
@@ -57,6 +58,9 @@ final class RapidUITestHarness {
         testHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("rapid-xcui-\(testName)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: testHome, withIntermediateDirectories: true)
+        conversationStore = testHome
+            .appendingPathComponent("Library/Application Support/com.rapidmlx.rapid")
+            .appendingPathComponent("conversations.json")
 
         rapidMacRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
@@ -100,6 +104,15 @@ final class RapidUITestHarness {
     func relaunch() {
         app.terminate()
         terminateFakeSidecars()
+        releasePortReservation()
+        do {
+            let reservedPort = try Self.reserveLoopbackPort()
+            portReservation = reservedPort.descriptor
+            app.launchEnvironment["RAPID_DESKTOP_PORT"] = String(reservedPort.port)
+        } catch {
+            XCTFail("Could not reserve a fresh loopback port for relaunch: \(error)")
+            return
+        }
         app.launch()
         XCTAssertTrue(app.windows["Rapid-MLX"].waitForExistence(timeout: 20))
         dismissFirstRunIfNeeded()
@@ -132,6 +145,21 @@ final class RapidUITestHarness {
                 confirmedMemoryWarning = true
             }
             return self.serverStartCount() > priorServerStartCount
+        })
+        let send = element("ChatView.SendOrStopButton")
+        XCTAssertTrue(send.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil(timeout: 60) {
+            send.label == "Send message" && send.isEnabled
+        })
+    }
+
+    func waitForConversationPersistence(containing markers: [String]) {
+        XCTAssertTrue(waitUntil(timeout: 20) {
+            guard let persisted = try? String(
+                contentsOf: self.conversationStore,
+                encoding: .utf8
+            ) else { return false }
+            return markers.allSatisfy(persisted.contains)
         })
     }
 

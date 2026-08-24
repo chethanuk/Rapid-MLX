@@ -146,6 +146,9 @@ final class ChatAttachmentJourneyTests: XCTestCase {
             in: harness.chatRequests()[1],
             expectedImageHash: expectedImageHash
         )
+        harness.waitForConversationPersistence(
+            containing: [image.lastPathComponent, document.lastPathComponent]
+        )
 
         harness.relaunch()
         // Relaunch preserves the selected model but intentionally leaves it
