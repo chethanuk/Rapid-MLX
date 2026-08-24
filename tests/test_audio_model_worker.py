@@ -267,3 +267,37 @@ async def test_server_shutdown_continues_after_audio_unload_failure(
     assert audio_route._music_engine is None
     assert "Failed to unload stt audio lane" in caplog.text
     assert "damaged test backend" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_stt_eviction_uses_async_model_worker(monkeypatch):
+    from vllm_mlx.routes import audio as audio_route
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker
+
+    class _CachedAligner:
+        model_name = "aligner"
+
+        def __init__(self) -> None:
+            self.unloaded = False
+
+        def unload(self) -> None:
+            self.unloaded = True
+
+    class _AsyncOnlyWorker:
+        async def execute_on_model_worker(self, func, *args, **kwargs):
+            await asyncio.sleep(0)
+            return func(*args, **kwargs)
+
+        def execute_on_model_worker_sync(self, func, *args, **kwargs):
+            raise AssertionError("async STT eviction used the blocking boundary")
+
+    aligner = _CachedAligner()
+    monkeypatch.setattr(audio_route, "_aligner_engine", aligner)
+    bind_audio_worker(_AsyncOnlyWorker())
+    try:
+        await audio_route._evict_other_lane("asr")
+    finally:
+        bind_audio_worker(None)
+
+    assert aligner.unloaded
+    assert audio_route._aligner_engine is None

@@ -1309,7 +1309,7 @@ async def _run_stt_request(
         async with _get_stt_lane_lock():
             if _stt_engine is None or _stt_engine.model_name != model_name:
                 # Symmetric with the alignment path: one STT model resident.
-                _evict_other_lane("asr")
+                await _evict_other_lane("asr")
                 _stt_engine = None
                 stt_engine = STTEngine(model_name)
                 from ..runtime.audio_worker import run_audio_mlx
@@ -1603,7 +1603,22 @@ def _is_client_alignment_error(exc: Exception) -> bool:
 _aligner_engine = None
 
 
-def _evict_other_lane(keep: str) -> None:
+def _other_stt_lane(keep: str) -> tuple[str, object | None]:
+    if keep == "aligner":
+        return "stt", _stt_engine
+    return "alignment", _aligner_engine
+
+
+def _clear_other_stt_lane(keep: str) -> None:
+    global _stt_engine, _aligner_engine
+
+    if keep == "aligner":
+        _stt_engine = None
+    else:
+        _aligner_engine = None
+
+
+async def _evict_other_lane(keep: str) -> None:
     """Release the STT lane's *other* cached engine before loading one.
 
     ``keep`` is ``"asr"`` or ``"aligner"``. Only ever called with the lane
@@ -1614,32 +1629,45 @@ def _evict_other_lane(keep: str) -> None:
     footprint — alternating requests would leave both models resident. MLX
     frees on refcount, so clearing the global is the release.
     """
-    global _stt_engine, _aligner_engine
+    lane, cached = _other_stt_lane(keep)
+    if cached is None:
+        return
+    logger.info(
+        "Releasing %s model %s to load the other STT lane "
+        "(one STT model resident at a time)",
+        lane,
+        getattr(cached, "model_name", "?"),
+    )
+    unload = getattr(cached, "unload", None)
+    if callable(unload):
+        from ..runtime.audio_worker import run_audio_mlx
 
-    from ..runtime.audio_worker import run_audio_mlx_sync
+        await run_audio_mlx(
+            lane, getattr(cached, "model_name", "unknown"), "unload", unload
+        )
+    _clear_other_stt_lane(keep)
 
-    if keep == "aligner" and _stt_engine is not None:
-        logger.info(
-            "Releasing ASR model %s to load the forced aligner "
-            "(one STT model resident at a time)",
-            getattr(_stt_engine, "model_name", "?"),
+
+def _evict_other_lane_sync(keep: str) -> None:
+    """Blocking counterpart for alignment's existing worker-thread pipeline."""
+
+    lane, cached = _other_stt_lane(keep)
+    if cached is None:
+        return
+    logger.info(
+        "Releasing %s model %s to load the other STT lane "
+        "(one STT model resident at a time)",
+        lane,
+        getattr(cached, "model_name", "?"),
+    )
+    unload = getattr(cached, "unload", None)
+    if callable(unload):
+        from ..runtime.audio_worker import run_audio_mlx_sync
+
+        run_audio_mlx_sync(
+            lane, getattr(cached, "model_name", "unknown"), "unload", unload
         )
-        old_model = getattr(_stt_engine, "model_name", "unknown")
-        unload = getattr(_stt_engine, "unload", None)
-        if callable(unload):
-            run_audio_mlx_sync("stt", old_model, "unload", unload)
-        _stt_engine = None
-    elif keep == "asr" and _aligner_engine is not None:
-        logger.info(
-            "Releasing forced aligner %s to load the ASR model "
-            "(one STT model resident at a time)",
-            getattr(_aligner_engine, "model_name", "?"),
-        )
-        old_model = getattr(_aligner_engine, "model_name", "unknown")
-        unload = getattr(_aligner_engine, "unload", None)
-        if callable(unload):
-            run_audio_mlx_sync("alignment", old_model, "unload", unload)
-        _aligner_engine = None
+    _clear_other_stt_lane(keep)
 
 
 def _align_blocking(
@@ -1676,7 +1704,7 @@ def _align_blocking(
         # unified memory for a server that can only use one at a time. The
         # caller holds the lane lock, so no ASR request is mid-flight and
         # this cannot pull weights out from under one.
-        _evict_other_lane("aligner")
+        _evict_other_lane_sync("aligner")
         # Also drop any PREVIOUS aligner (a different aligner alias) before
         # loading the replacement, so two multi-GB aligner models never sit
         # resident together during ``load()``. Inert under the current
