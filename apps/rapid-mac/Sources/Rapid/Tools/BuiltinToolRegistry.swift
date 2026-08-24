@@ -121,14 +121,27 @@ final class BuiltinToolRegistry: ToolRegistry {
         guard provider == .keenable,
               key != nil,
               first.failureKind == .webSearchKeyRejected,
-              !Task.isCancelled,
-              webSearch.apiKey(for: provider) == key,
-              webSearch.setAPIKey(nil, for: provider),
               !Task.isCancelled
         else {
             return first
         }
 
+        switch webSearch.apiKey(for: provider) {
+        case key:
+            // This request still owns the rejected value. Establish keyless
+            // mode persistently before replaying so it cannot be resent.
+            guard webSearch.setAPIKey(nil, for: provider) else { return first }
+        case nil:
+            // An overlapping rejection (or the user) already established
+            // keyless mode. This call can share that recovery transition.
+            break
+        default:
+            // Settings saved a replacement while this request was suspended.
+            // The stale response has no authority to clear or test that key.
+            return first
+        }
+
+        guard !Task.isCancelled else { return first }
         let recovered = await webSearchRunner(call.function.arguments, provider, nil)
         return ToolCallResult(
             toolCallID: recovered.toolCallID,

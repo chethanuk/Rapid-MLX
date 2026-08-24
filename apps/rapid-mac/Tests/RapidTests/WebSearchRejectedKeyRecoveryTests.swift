@@ -155,6 +155,31 @@ final class WebSearchRejectedKeyRecoveryTests {
         #expect(config.apiKey(for: .keenable) == "keen_new_valid")
     }
 
+    @Test("Overlapping rejections both share the transition to keyless mode")
+    func overlappingRejectionsBothRecover() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        #expect(config.setAPIKey("keen_shared_stale", for: .keenable))
+        let keyedBarrier = TestBarrier(participants: 2)
+        var observedKeys: [String?] = []
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, key in
+            observedKeys.append(key)
+            if key != nil {
+                await keyedBarrier.arriveAndWait()
+                return Self.rejectedResult()
+            }
+            return ToolCallResult(toolCallID: "", content: "keyless result")
+        }
+
+        async let first = registry.run(makeCall(id: "overlap_1"))
+        async let second = registry.run(makeCall(id: "overlap_2"))
+        let results = await [first, second]
+
+        #expect(results.allSatisfy { !$0.isError })
+        #expect(observedKeys.compactMap { $0 }.count == 2)
+        #expect(observedKeys.filter { $0 == nil }.count == 2)
+        #expect(config.apiKey(for: .keenable) == nil)
+    }
+
     @Test("Cancellation after rejection does not clear the key or start recovery")
     func cancellationStopsRecovery() async {
         let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
@@ -222,6 +247,26 @@ final class WebSearchRejectedKeyRecoveryTests {
             #expect(attempts == 1)
             #expect(config.apiKey(for: .keenable) == "keen_still_valid")
         }
+    }
+}
+
+private actor TestBarrier {
+    private var remaining: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(participants: Int) {
+        remaining = participants
+    }
+
+    func arriveAndWait() async {
+        remaining -= 1
+        if remaining == 0 {
+            let waiting = waiters
+            waiters.removeAll()
+            for waiter in waiting { waiter.resume() }
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
     }
 }
 
