@@ -136,34 +136,45 @@ def test_type_check_enforces_shrink_only_error_budget():
     assert "tests/test_check_mypy_error_budget.py" in unit_roster
 
 
-def test_python_311_enforces_changed_lines_coverage_without_repository_baseline():
+def test_changed_lines_coverage_combines_linux_and_apple_evidence():
     test_matrix = _job(ENGINE_WORKFLOW, "test-matrix")
-    checkout = next(
+    linux_upload = next(
         step
         for step in test_matrix["steps"]
-        if str(step.get("uses", "")).startswith("actions/checkout@")
+        if step.get("name") == "Upload Linux coverage evidence"
     )
-    assert checkout["with"]["fetch-depth"] == 0
+    assert linux_upload["if"] == "matrix.python-version == '3.11'"
+    assert linux_upload["with"]["retention-days"] == 1
 
-    install = next(
+    apple = _job(ENGINE_WORKFLOW, "test-apple-silicon")
+    apple_run = next(
         step
-        for step in test_matrix["steps"]
-        if step.get("name") == "Install dependencies"
+        for step in apple["steps"]
+        if step.get("name") == "Run MLX-dependent tests"
     )
-    assert '"diff-cover==8.0.3"' in install["run"]
+    assert "--cov=vllm_mlx" in apple_run["run"]
+    assert "tests/test_audio*.py" in apple_run["run"]
 
+    coverage = _job(ENGINE_WORKFLOW, "changed-lines-coverage")
+    assert set(coverage["needs"]) == {
+        "changes",
+        "test-matrix",
+        "test-apple-silicon",
+    }
     gate = next(
         step
-        for step in test_matrix["steps"]
+        for step in coverage["steps"]
         if step.get("name") == "Enforce changed-lines coverage"
-    )
-    assert gate["if"] == (
-        "github.event_name == 'pull_request' && matrix.python-version == '3.11'"
     )
     assert gate["env"] == {"PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
     assert "continue-on-error" not in gate
+    assert "coverage combine coverage-linux coverage-apple" in gate["run"]
     assert "coverage.xml" in gate["run"]
     assert '--compare-branch "$PR_BASE_SHA"' in gate["run"]
     assert "--show-uncovered" in gate["run"]
     assert "--fail-under 100" in gate["run"]
     assert "--cov-fail-under" not in gate["run"]
+
+    aggregate = _step_run(ENGINE_WORKFLOW, "tests", "Check test results")
+    coverage_gate = aggregate.index("needs.changed-lines-coverage.result")
+    assert aggregate.rfind('github.event_name }}" = "pull_request"', 0, coverage_gate) >= 0
