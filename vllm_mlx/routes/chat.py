@@ -6750,8 +6750,7 @@ async def stream_chat_completion(
                 buffered_finish = (
                     _replace_finish(
                         finish_event,
-                        reasoning=(finish_event.reasoning or "")
-                        + finalize_reasoning,
+                        reasoning=(finish_event.reasoning or "") + finalize_reasoning,
                     ),
                     finish_output,
                 )

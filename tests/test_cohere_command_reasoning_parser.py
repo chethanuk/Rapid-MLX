@@ -84,7 +84,7 @@ class TestRegistration:
         ),
         (f"{TEXT_START}direct{TEXT_END}", (None, "direct")),
         (
-            f"plan{THINK_END}{ACTION_START}[{{\"tool_name\":\"f\"}}]<|END_ACTION|>",
+            f'plan{THINK_END}{ACTION_START}[{{"tool_name":"f"}}]<|END_ACTION|>',
             ("plan", f'{ACTION_START}[{{"tool_name":"f"}}]<|END_ACTION|>'),
         ),
         ("unfinished thought", ("unfinished thought", None)),
@@ -101,7 +101,7 @@ def test_full_parse_protocol_shapes(wire, expected):
         f"plan{THINK_END}{TEXT_START}answer{TEXT_END}",
         f"{THINK_START}plan{THINK_END}{TEXT_START}answer{TEXT_END}",
         f"{TEXT_START}direct{TEXT_END}",
-        f"plan{THINK_END}{ACTION_START}[{{\"tool_name\":\"f\"}}]<|END_ACTION|>",
+        f'plan{THINK_END}{ACTION_START}[{{"tool_name":"f"}}]<|END_ACTION|>',
         "unfinished thought",
         f"plan{THINK_END}{TEXT_START}partial",
     ],
@@ -112,7 +112,9 @@ def test_streaming_is_invariant_at_every_boundary(wire):
         assert _stream(wire, chunks) == expected, chunks
 
 
-@pytest.mark.parametrize("document", ['{"answer":4}', "\n[1,2]", '"ok"', "42", "true", "null"])
+@pytest.mark.parametrize(
+    "document", ['{"answer":4}', "\n[1,2]", '"ok"', "42", "true", "null"]
+)
 def test_json_mode_routes_bare_json_to_content(document):
     parser = CohereCommand4ReasoningParser()
     assert parser.extract_reasoning(document, json_mode=True) == (None, document)
@@ -144,7 +146,9 @@ def test_nonstream_orchestrator_passes_json_request_contract():
 
 
 def test_action_marker_is_preserved_for_downstream_tool_parser():
-    action = f'{ACTION_START}[{{"tool_name":"weather","parameters":{{}}}}]<|END_ACTION|>'
+    action = (
+        f'{ACTION_START}[{{"tool_name":"weather","parameters":{{}}}}]<|END_ACTION|>'
+    )
     wire = f"check forecast{THINK_END}{action}"
     reasoning, content = _stream(wire, list(wire))
     assert reasoning == "check forecast"

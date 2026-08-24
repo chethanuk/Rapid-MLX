@@ -46,9 +46,7 @@ def _partial_marker_suffix_length(text: str, markers: tuple[str, ...]) -> int:
 
 def _first_marker(text: str, markers: tuple[str, ...]) -> tuple[int, str] | None:
     matches = [
-        (index, marker)
-        for marker in markers
-        if (index := text.find(marker)) >= 0
+        (index, marker) for marker in markers if (index := text.find(marker)) >= 0
     ]
     return min(matches) if matches else None
 
@@ -343,6 +341,8 @@ class CohereCommand4ReasoningParser(ReasoningParser):
     def finish_stream(self) -> DeltaMessage | None:
         return self._drain(flush=True)
 
-    def finalize_streaming(self, accumulated_text: str, **kwargs) -> DeltaMessage | None:
+    def finalize_streaming(
+        self, accumulated_text: str, **kwargs
+    ) -> DeltaMessage | None:
         del accumulated_text, kwargs
         return self.finish_stream()
