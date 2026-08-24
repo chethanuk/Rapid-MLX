@@ -151,13 +151,17 @@ final class ChatAttachmentJourneyTests: XCTestCase {
         )
 
         harness.relaunch()
-        // Relaunch preserves the selected model but intentionally leaves it
-        // stopped. Start that persisted selection before exercising Retry.
-        harness.startModel()
+        let restoredConversation = harness.element(label: "Persist both attachments")
+        XCTAssertTrue(restoredConversation.waitForExistence(timeout: 20))
+        restoredConversation.click()
         XCTAssertTrue(sentImage.waitForExistence(timeout: 20))
         XCTAssertTrue(sentDocument.waitForExistence(timeout: 20))
         XCTAssertFalse(imageChip.exists)
         XCTAssertFalse(documentChip.exists)
+
+        // Relaunch preserves the selected model but intentionally leaves it
+        // stopped. Start that persisted selection before exercising Retry.
+        harness.startModel()
 
         harness.retryResponse(expectedRequestCount: 3)
         assertCombinedIdentity(

@@ -127,6 +127,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "testDragPasteAndRemovalPreserveWireIdentity" in chat_source
     assert "testRetryAndRelaunchPreserveSentAttachmentIdentity" in chat_source
     assert "assertCombinedIdentity" in chat_source
+    assert 'element(label: "Persist both attachments")' in chat_source
     assert 'element("Sidebar.NewChat").click()' in chat_source
     assert 'element("ChatView.Attachment.Remove.Pasted image.png")' in chat_source
     assert "port: 65_001" not in chat_source
