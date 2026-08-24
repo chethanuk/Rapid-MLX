@@ -433,6 +433,7 @@ class TestChatRouteStreaming:
     )
     def test_server_sse_protocol_and_eof_drain(
         self,
+        monkeypatch,
         deltas,
         finish_reason,
         emit_terminal,
@@ -445,7 +446,13 @@ class TestChatRouteStreaming:
 
         from vllm_mlx.config import reset_config
         from vllm_mlx.engine.base import GenerationOutput
-        from vllm_mlx.routes.chat import router as chat_router
+        from vllm_mlx.routes import chat as chat_route
+
+        # This HTTP contract belongs to the no-MLX CI lane. Admission is
+        # orthogonal to protocol parsing and imports the MLX scheduler lazily,
+        # so replace only that boundary with the same successful no-op used by
+        # the lightweight route harnesses.
+        monkeypatch.setattr(chat_route, "_check_admission_or_503", lambda _engine: None)
 
         class Engine:
             preserve_native_tool_format = False
@@ -481,7 +488,7 @@ class TestChatRouteStreaming:
             config.no_thinking = False
 
             app = FastAPI()
-            app.include_router(chat_router)
+            app.include_router(chat_route.router)
             payload = {
                 "model": "cohere-command-test",
                 "messages": [{"role": "user", "content": "2+2?"}],

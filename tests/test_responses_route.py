@@ -150,7 +150,14 @@ def responses_client(monkeypatch):
     from vllm_mlx.config import reset_config
     from vllm_mlx.middleware.auth import rate_limiter
     from vllm_mlx.middleware.exception_handlers import install_exception_handlers
-    from vllm_mlx.routes.responses import router
+    from vllm_mlx.routes import responses as responses_route
+
+    # The route tests deliberately run without MLX. Admission is covered by
+    # its own contracts and otherwise imports the MLX scheduler lazily on the
+    # first request, so isolate that unrelated boundary in this harness.
+    monkeypatch.setattr(
+        responses_route, "_check_admission_or_503", lambda _engine: None
+    )
 
     cfg = reset_config()
     cfg.api_key = "test-secret"
@@ -170,7 +177,7 @@ def responses_client(monkeypatch):
     # producing the 400 instead, which masked the leak this fixture is
     # meant to gate against.
     install_exception_handlers(app)
-    app.include_router(router)
+    app.include_router(responses_route.router)
     yield SimpleNamespace(
         client=TestClient(app),
         cfg=cfg,
