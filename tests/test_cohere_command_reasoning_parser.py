@@ -340,6 +340,20 @@ def test_forced_content_preserves_action_and_partial_marker_at_eof():
     assert final is not None and final.content == "<|END_THI"
 
 
+def test_forced_close_routes_unaccounted_marker_prefix_to_content():
+    parser = CohereCommand4ReasoningParser()
+    prefix = "<|END_THI"
+    first = parser.extract_reasoning_streaming("", f"abcd{prefix}", f"abcd{prefix}")
+    assert first is not None and first.reasoning == "abcd"
+
+    parser.prepare_forced_reasoning_end()
+    forced = parser.extract_reasoning_streaming("", THINK_END, THINK_END)
+
+    assert forced is not None
+    assert forced.reasoning is None
+    assert forced.content == prefix
+
+
 def test_prompt_priming_detects_command_markers_and_mixed_templates():
     from vllm_mlx.service.helpers import _should_start_in_thinking
 
@@ -383,6 +397,7 @@ class TestChatRouteStreaming:
             "deltas",
             "finish_reason",
             "emit_terminal",
+            "reasoning_max_tokens",
             "expected_reasoning",
             "expected_content",
         ),
@@ -391,6 +406,7 @@ class TestChatRouteStreaming:
                 ["Provide answer: 4.", THINK_END, TEXT_START, "4", TEXT_END],
                 "stop",
                 True,
+                None,
                 "Provide answer: 4.",
                 "4",
             ),
@@ -398,6 +414,7 @@ class TestChatRouteStreaming:
                 ["deliberating", " about it<|END_THI"],
                 "length",
                 True,
+                None,
                 "deliberating about it<|END_THI",
                 None,
             ),
@@ -405,10 +422,12 @@ class TestChatRouteStreaming:
                 ["plan", THINK_END, TEXT_START, "answer<|END_TE"],
                 "length",
                 True,
+                None,
                 "plan",
                 "answer<|END_TE",
             ),
-            (["<|END_THI"], None, False, "<|END_THI", None),
+            (["<|END_THI"], None, False, None, "<|END_THI", None),
+            (["abcd<|END_THI"], "length", True, 1, "abcd", "<|END_THI"),
         ],
     )
     def test_server_sse_protocol_and_eof_drain(
@@ -416,6 +435,7 @@ class TestChatRouteStreaming:
         deltas,
         finish_reason,
         emit_terminal,
+        reasoning_max_tokens,
         expected_reasoning,
         expected_content,
     ):
@@ -461,14 +481,17 @@ class TestChatRouteStreaming:
 
             app = FastAPI()
             app.include_router(chat_router)
+            payload = {
+                "model": "cohere-command-test",
+                "messages": [{"role": "user", "content": "2+2?"}],
+                "stream": True,
+                "max_tokens": 100,
+            }
+            if reasoning_max_tokens is not None:
+                payload["reasoning_max_tokens"] = reasoning_max_tokens
             response = TestClient(app).post(
                 "/v1/chat/completions",
-                json={
-                    "model": "cohere-command-test",
-                    "messages": [{"role": "user", "content": "2+2?"}],
-                    "stream": True,
-                    "max_tokens": 100,
-                },
+                json=payload,
             )
             assert response.status_code == 200
             reasoning, content = self._read_channels(response.text)

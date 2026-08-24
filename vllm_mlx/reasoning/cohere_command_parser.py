@@ -259,11 +259,18 @@ class CohereCommand4ReasoningParser(ReasoningParser):
                     index, marker = transition
                     prefix = self._buffer[:index]
                     if prefix:
-                        if not self._reasoning_started:
-                            prefix = prefix.lstrip()
-                        if prefix:
-                            reasoning_parts.append(prefix)
-                            self._reasoning_started = True
+                        if self._forced_end_pending:
+                            # Incremental marker detection may own a suffix
+                            # that the reasoning budget has not seen yet. Once
+                            # the orchestrator declares a synthetic boundary,
+                            # those held bytes are post-cap public content.
+                            content_parts.append(prefix)
+                        else:
+                            if not self._reasoning_started:
+                                prefix = prefix.lstrip()
+                            if prefix:
+                                reasoning_parts.append(prefix)
+                                self._reasoning_started = True
                     if marker == ACTION_START:
                         self._buffer = self._buffer[index:]
                         self._phase = "action"

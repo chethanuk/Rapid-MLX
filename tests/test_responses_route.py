@@ -1128,7 +1128,8 @@ class TestResponsesStream:
     def test_reasoning_cap_exact_terminal_boundary_finishes_cleanly(
         self, responses_client
     ):
-        self._install_cohere_stream(responses_client, ["abcd"])
+        prefix = "<|END_THI"
+        self._install_cohere_stream(responses_client, [f"abcd{prefix}"])
 
         with responses_client.client.stream(
             "POST",
@@ -1140,8 +1141,14 @@ class TestResponsesStream:
             events = _parse_sse("".join(response.iter_text()))
 
         names = [name for name, _ in events]
-        assert names[-1] == "response.failed"
-        assert all("<|" not in data.get("delta", "") for _, data in events)
+        output_text = "".join(
+            data["delta"]
+            for name, data in events
+            if name == "response.output_text.delta"
+        )
+        assert names[-1] == "response.completed"
+        assert output_text == prefix
+        assert "<|END_THINKING|>" not in output_text
 
     def test_stream_emits_codex_required_events(self, responses_client):
         """Codex CLI hard-requires ``response.created`` first and
