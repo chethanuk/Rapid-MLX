@@ -15,7 +15,23 @@ struct ConnectToolsView: View {
     let host: String
     let port: Int
     let bearer: String
-    let alias: String
+    /// The currently-chosen model. A binding so the inline model picker
+    /// (see ``stoppedSetup``) can change it directly and the shared
+    /// readiness value in ``ContentView`` re-derives from the new choice —
+    /// choosing a different downloaded model then Start both work without
+    /// leaving this page.
+    @Binding var alias: String
+    /// The live server, fed straight to the inline ``ModelPickerBar`` in
+    /// the stopped state so the user can pick any compatible downloaded
+    /// model before starting. Kept as a direct reference (not merely the
+    /// readiness value) because the picker is the app's single
+    /// model-selection source of truth and knows how to read the catalog
+    /// and cache itself — embedding it here beats building a second,
+    /// ad-hoc model list.
+    @Bindable var server: ServerManager
+    /// Side-channel downloader the inline picker's context menu uses
+    /// ("Download in background") and its cache-state glyphs.
+    @Bindable var downloads: DownloadManager
     /// The absolute path to the `rapid-mlx` sidecar binary this app owns
     /// (``ServerLocator`` resolution). The Desktop app deliberately does NOT
     /// install its sidecar onto the user's `PATH` (see ``ServerLocator`` —
@@ -161,14 +177,23 @@ struct ConnectToolsView: View {
             // the composer renders, so the two surfaces cannot disagree,
             // and unlike the old local sentence it carries the action
             // that resolves the problem.
+            //
+            // #2297: the stopped state used to return here — ONLY the
+            // "Start here" banner — and hide the endpoint shape and the
+            // integration rows entirely. That is the exact moment a new
+            // user needs guidance, and they got a mostly-blank page.
+            // The endpoint base URLs are real information even before a
+            // model runs (the loopback address and port are known), and
+            // the setup rows are usable as documentation with Copy gated
+            // on readiness (``configReady`` already disables Copy on
+            // runtime-only values). So the stopped branch now leads with
+            // the pick-and-start flow and STILL renders that static
+            // content below it, marked pending via the existing
+            // ``CopyableRow`` placeholder machinery.
             if let readiness, !readiness.isReady {
-                VStack(alignment: .leading, spacing: RapidTheme.Space.md) {
-                    SectionHeader(
-                        "Start here",
-                        subtitle: "Run a text model first. Rapid will then create a private local endpoint and ready-to-copy setup commands."
-                    )
-                    ReadinessBanner(readiness: readiness, onAction: onReadinessAction)
-                }
+                stoppedSetup(readiness: readiness)
+                endpointSection
+                toolsSection(tools)
             } else if !configReady {
                 // Either no readiness was supplied (dev snapshot), or the
                 // model is up but a value is still missing — a narrow
@@ -217,6 +242,46 @@ struct ConnectToolsView: View {
         .frame(maxWidth: RapidTheme.Layout.pageMaxWidth, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(RapidTheme.Space.xl)
+    }
+
+    /// The pick-and-start block shown in the stopped state (#2297).
+    ///
+    /// Answers the four questions a first-time user lands with — what a
+    /// connection enables, why a text model must run, what Start will do,
+    /// and how the resulting details are used — as one short flow:
+    ///
+    ///   1. Name the model to start and let the user swap it for any other
+    ///      compatible downloaded model (inline ``ModelPickerBar`` — the
+    ///      app's single model-selection source of truth, reused rather
+    ///      than reinvented).
+    ///   2. Run the shared readiness banner, whose Start action already
+    ///      routes through ``ContentView`` → ``ReadinessModelStart`` and
+    ///      owns its own starting/progress/failed states.
+    ///   3. Point at the endpoint rows right below ("the details here fill
+    ///      in the moment the model is running").
+    @ViewBuilder
+    private func stoppedSetup(readiness: ModelReadiness) -> some View {
+        VStack(alignment: .leading, spacing: RapidTheme.Space.md) {
+            SectionHeader(
+                "Start here",
+                subtitle: "Run a text model first. Rapid will then create a private local endpoint and ready-to-copy setup commands."
+            )
+            // The inline picker lets the user choose a different compatible
+            // downloaded model before starting, without leaving the page.
+            // Composer style renders only the compact chip (no duplicate
+            // Start/Stop — the readiness banner below owns the action).
+            ModelPickerBar(
+                server: server,
+                downloads: downloads,
+                alias: $alias,
+                composerStyle: true
+            )
+            .accessibilityIdentifier("ConnectTools.ModelPicker")
+            ReadinessBanner(readiness: readiness, onAction: onReadinessAction)
+            Text("When the model is running, the key and model rows below fill in and the Copy buttons wake up.")
+                .font(RapidFont.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var header: some View {

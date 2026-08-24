@@ -4175,13 +4175,23 @@ flow_launch_integrations() {
     press "$OUT/main.json" Sidebar.Launch "$OUT/launch.json"
     wait_tree_text "Connect your agents" "$OUT/launch.json" 40
 
-    # Cold Launch is a beginner path, not a wall of dead commands. It should
-    # offer the same actionable readiness banner as Chat and reveal no setup
-    # snippets until the endpoint/key actually exist.
+    # Cold Launch is a beginner path, not a wall of live (copyable) commands.
+    # The stopped state now stays a useful setup destination (#2297): the
+    # endpoint shape and integration rows are shown as documentation, the
+    # inline model picker lets a user choose a different downloaded model,
+    # and the readiness banner offers Start. What must NOT happen is a
+    # command the user can paste while it is still a placeholder — so every
+    # `Launch.Integration.Copy.*` button must be present but `.enabled == false`
+    # until the endpoint/key actually exist (Copy on a placeholder is the
+    # silent-failure defect the disabled-Copy gate exists to prevent).
     count="$(jq '[.data.ui_elements[]? | (.identifier // "") | select(startswith("Launch.Integration.Copy."))] | unique | length' "$OUT/launch.json")"
-    [[ "$count" == 0 ]] || die "Cold Launch rendered $count dead integration commands"
+    [[ "$count" -gt 0 ]] || die "Cold Launch hid the integration setup rows entirely"
+    enabled_count="$(jq '[.data.ui_elements[]? | select(((.identifier // "") | startswith("Launch.Integration.Copy.")) and .enabled == true)] | length' "$OUT/launch.json")"
+    [[ "$enabled_count" == 0 ]] || die "Cold Launch offered $enabled_count copyable commands before the endpoint/key existed"
     jq -e '.data.ui_elements[]? | select(.identifier == "Readiness.Action")' "$OUT/launch.json" >/dev/null \
         || die "Cold Launch offered no primary model-start action"
+    jq -e '.data.ui_elements[]? | select(.identifier == "ConnectTools.ModelPicker")' "$OUT/launch.json" >/dev/null \
+        || die "Cold Launch offered no inline model picker"
     baseline launch-integrations.complete "$OUT/launch.json"
 
     press "$OUT/launch.json" Sidebar.NewChat "$OUT/launch-chat.json" \
