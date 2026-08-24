@@ -365,6 +365,8 @@ class StreamingPostProcessor:
                             tools_requested=self.tools_requested,
                         )
                     )
+                if "json_mode" in configure_parameters:
+                    configure_kwargs["json_mode"] = self.json_mode
                 _configure(**configure_kwargs)
             _set = getattr(self.reasoning_parser, "set_enable_thinking", None)
             if callable(_set):
@@ -1751,10 +1753,31 @@ class StreamingPostProcessor:
         if self.reasoning_parser is None:
             # Standard / channel-routed path doesn't need the injection.
             return delta_text
-        # Prepend the marker so the parser sees ``</think>`` BEFORE the
-        # next body bytes. The caller flips ``_reasoning_close_injected``
-        # only after the parser call succeeds.
-        return "</think>" + delta_text
+        self._prepare_forced_reasoning_end()
+        # Prepend the parser's protocol boundary BEFORE the next body bytes.
+        # The caller flips ``_reasoning_close_injected`` only after the parser
+        # call succeeds.
+        return self._reasoning_close_marker() + delta_text
+
+    def _reasoning_close_marker(self) -> str:
+        """Return the configured protocol's reasoning terminator.
+
+        ``</think>`` remains the compatibility fallback for legacy and
+        third-party parsers that predate the explicit boundary capability.
+        """
+        marker = getattr(self.reasoning_parser, "reasoning_end_str", None)
+        if isinstance(marker, str) and marker:
+            return marker
+        marker = getattr(self.reasoning_parser, "end_token", None)
+        if isinstance(marker, str) and marker:
+            return marker
+        return "</think>"
+
+    def _prepare_forced_reasoning_end(self) -> None:
+        """Invoke the typed boundary hook with legacy-parser compatibility."""
+        prepare = getattr(self.reasoning_parser, "prepare_forced_reasoning_end", None)
+        if callable(prepare):
+            prepare()
 
     def _forced_tool_choice_name(self) -> str | None:
         """Return the forced ``tool_choice`` function name, if any.
@@ -2483,6 +2506,8 @@ class StreamingPostProcessor:
                             tools_requested=self.tools_requested,
                         )
                     )
+                if "json_mode" in configure_parameters:
+                    configure_kwargs["json_mode"] = self.json_mode
                 _configure(**configure_kwargs)
             else:
                 self.reasoning_parser.reset_state()
@@ -3150,9 +3175,10 @@ class StreamingPostProcessor:
                     # this represents the model output "up to the cap
                     # firing point" from the parser's POV.
                     flip_previous = previous_text + kept_reasoning
-                    flip_delta = "</think>"
+                    flip_delta = self._reasoning_close_marker()
                     flip_current = flip_previous + flip_delta
                     try:
+                        self._prepare_forced_reasoning_end()
                         flip_msg = self.reasoning_parser.extract_reasoning_streaming(
                             flip_previous, flip_current, flip_delta
                         )
@@ -3699,7 +3725,7 @@ class StreamingPostProcessor:
         ):
             self._reasoning_close_injected = True
             previous_text = self.accumulated_text
-            injected_delta = "</think>"
+            injected_delta = self._reasoning_close_marker()
             # Codex round-5 BLOCKING #1: build the parser's view of
             # ``current`` LOCALLY rather than mutating
             # ``self.accumulated_text``. Downstream (routes/chat.py
@@ -3715,6 +3741,7 @@ class StreamingPostProcessor:
             local_current = previous_text + injected_delta
             delta_msg = None
             try:
+                self._prepare_forced_reasoning_end()
                 delta_msg = self.reasoning_parser.extract_reasoning_streaming(
                     previous_text, local_current, injected_delta
                 )
@@ -3920,6 +3947,34 @@ class StreamingPostProcessor:
                         )
                     )
                     self.tool_calls_detected = True
+
+        # Drain incremental detector state for every parser. Parsers that do
+        # not buffer marker prefixes inherit the no-op base implementation.
+        # This lifecycle is intentionally separate from
+        # ``finalize_streaming(accumulated_text)``: that older hook may
+        # reclassify or re-parse an entire response and is not safe to call
+        # generically.
+        if self.reasoning_parser is not None:
+            try:
+                finish_stream = getattr(self.reasoning_parser, "finish_stream", None)
+                final_msg = finish_stream() if callable(finish_stream) else None
+            except Exception as e:
+                logger.warning(
+                    "Reasoning parser finish_stream raised: %s — buffered "
+                    "trailing bytes may not be emitted for this request",
+                    e,
+                )
+                final_msg = None
+            if final_msg is not None:
+                final_reasoning = getattr(final_msg, "reasoning", None)
+                if isinstance(final_reasoning, str) and final_reasoning:
+                    self.accumulated_reasoning += final_reasoning
+                    events.append(
+                        StreamEvent(type="reasoning", reasoning=final_reasoning)
+                    )
+                final_content = getattr(final_msg, "content", None)
+                if isinstance(final_content, str) and final_content:
+                    events.append(StreamEvent(type="content", content=final_content))
 
         # Dogfood F-R1-04 (codex r5 BLOCKING): UI-TARS reasoning
         # parser-specific EOF flush. The opener-prefix hold-back

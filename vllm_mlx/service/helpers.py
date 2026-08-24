@@ -187,6 +187,7 @@ def _finalize_content_and_reasoning(
     prompt_thinking_active: bool | None = None,
     reasoning_max_tokens: int | None = None,
     finish_reason: str | None = None,
+    json_mode: bool = False,
 ) -> tuple[str, str | None]:
     """Compute final ``content`` + ``reasoning_text`` after tool parsing.
 
@@ -366,6 +367,8 @@ def _finalize_content_and_reasoning(
         extract_kwargs["enable_thinking"] = enable_thinking
     if _parser_accepts_parameter(reasoning_parser, "prompt_thinking_active"):
         extract_kwargs["prompt_thinking_active"] = prompt_thinking_active
+    if _parser_accepts_parameter(reasoning_parser, "json_mode"):
+        extract_kwargs["json_mode"] = json_mode
     extract = lambda text: reasoning_parser.extract_reasoning(text, **extract_kwargs)
     if tool_calls:
         reasoning_text, _ = extract(raw_text)
@@ -790,6 +793,12 @@ def _apply_reasoning_cap(
     return cleaned_text, truncated
 
 
+_IMPLICIT_THINK_MARKER_PAIRS = (
+    ("<think>", "</think>"),
+    ("<|START_THINKING|>", "<|END_THINKING|>"),
+)
+
+
 def _should_start_in_thinking(
     chat_template,
     enable_thinking: bool | None,
@@ -839,7 +848,10 @@ def _should_start_in_thinking(
     if enable_thinking is False and not unconditional:
         return False
     if unconditional:
-        if "<think>" not in chat_template:
+        present_pairs = [
+            pair for pair in _IMPLICIT_THINK_MARKER_PAIRS if pair[0] in chat_template
+        ]
+        if not present_pairs:
             return False
         # Use the same sandboxed Jinja compiler as Hugging Face tokenizers.
         # Rendering, unlike source scanning, honors assignments, macros,
@@ -880,10 +892,14 @@ def _should_start_in_thinking(
             return False
         # Priming means the rendered prompt ends *inside* a think block, not
         # merely that it contains a historical closed block.
-        if rendered.rfind("<think>") <= rendered.rfind("</think>"):
-            return False
-        return True
-    return "<think>" in chat_template and "add_generation_prompt" in chat_template
+        return any(
+            rendered.rfind(opener) > rendered.rfind(closer)
+            for opener, closer in present_pairs
+        )
+    return (
+        any(opener in chat_template for opener, _ in _IMPLICIT_THINK_MARKER_PAIRS)
+        and "add_generation_prompt" in chat_template
+    )
 
 
 def _rescue_silent_drop_from_reasoning(

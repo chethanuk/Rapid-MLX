@@ -80,6 +80,7 @@ def list_parsers() -> list[str]:
 
 def _register_builtin_parsers():
     """Register built-in parsers."""
+    from .cohere_command_parser import CohereCommand4ReasoningParser
     from .deepseek_r1_parser import (
         DeepSeekR1DistillReasoningParser,
         DeepSeekR1ReasoningParser,
@@ -122,6 +123,10 @@ def _register_builtin_parsers():
     # regex in ``model_auto_config`` and by the alias entries in
     # ``aliases.json``.
     register_parser("ui_tars", UiTarsReasoningParser)
+    # Canonical protocol name plus the legacy model-facing alias retained for
+    # callers that configured the short name while North support was new.
+    register_parser("cohere_command4", CohereCommand4ReasoningParser)
+    register_parser("north", CohereCommand4ReasoningParser)
 
 
 # Register built-in parsers on module load

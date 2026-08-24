@@ -395,6 +395,14 @@ _MODEL_PATTERNS: list[tuple[re.Pattern, ModelConfig]] = [
             reasoning_parser=None,
         ),
     ),
+    # Cohere Command typed-channel protocol used by North Mini Code.
+    (
+        re.compile(r"north[-_]?mini", re.IGNORECASE),
+        ModelConfig(
+            tool_call_parser=None,
+            reasoning_parser="cohere_command4",
+        ),
+    ),
     # MiniMax M2.5
     (
         re.compile(r"minimax", re.IGNORECASE),
