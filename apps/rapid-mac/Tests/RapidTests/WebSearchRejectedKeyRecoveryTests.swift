@@ -270,6 +270,24 @@ final class WebSearchRejectedKeyRecoveryTests {
             #expect(config.apiKey(for: .keenable) == "keen_still_valid")
         }
     }
+
+    @Test("A provider without the recovery capability never clears or replays")
+    func ineligibleProviderDoesNotRecover() async {
+        let config = WebSearchConfig(defaults: freshDefaults(), keychain: InMemoryKeychain())
+        config.provider = .parallel
+        #expect(config.setAPIKey("parallel_rejected", for: .parallel))
+        var attempts = 0
+        let registry = BuiltinToolRegistry(webSearch: config) { _, _, _ in
+            attempts += 1
+            return Self.rejectedResult()
+        }
+
+        let result = await registry.run(makeCall())
+
+        #expect(result.failureKind == .webSearchKeyRejected)
+        #expect(attempts == 1)
+        #expect(config.apiKey(for: .parallel) == "parallel_rejected")
+    }
 }
 
 private actor TestBarrier {

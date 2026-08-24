@@ -24,7 +24,9 @@ final class BuiltinToolRegistry: ToolRegistry {
 
     /// Model-visible audit note for the one credential-recovery transition.
     /// It deliberately names the mode change without echoing any credential.
-    static let rejectedKeyRecoveryNote = "Note: Rapid removed a rejected saved Keenable key and retried this search using Keenable's keyless mode. Future searches will stay keyless until a new key is saved."
+    static func rejectedKeyRecoveryNote(for provider: WebSearchProvider) -> String {
+        "Note: Rapid removed a rejected saved \(provider.displayName) key and retried this search using \(provider.displayName)'s keyless mode. Future searches will stay keyless until a new key is saved."
+    }
 
     /// Per-invocation approval gate for ``browse``. Held on the shared registry
     /// so the SwiftUI approval dialog + the Settings auto-approve switch bind to
@@ -118,7 +120,7 @@ final class BuiltinToolRegistry: ToolRegistry {
         let key = webSearch.apiKey(for: provider)
         let first = await webSearchRunner(call.function.arguments, provider, key)
 
-        guard provider == .keenable,
+        guard provider.recoversRejectedKeyKeylessly,
               key != nil,
               first.failureKind == .webSearchKeyRejected,
               !Task.isCancelled
@@ -149,7 +151,7 @@ final class BuiltinToolRegistry: ToolRegistry {
         let recovered = await webSearchRunner(call.function.arguments, provider, nil)
         return ToolCallResult(
             toolCallID: recovered.toolCallID,
-            content: recovered.content + "\n\n" + Self.rejectedKeyRecoveryNote,
+            content: recovered.content + "\n\n" + Self.rejectedKeyRecoveryNote(for: provider),
             isError: recovered.isError,
             failureKind: recovered.failureKind
         )

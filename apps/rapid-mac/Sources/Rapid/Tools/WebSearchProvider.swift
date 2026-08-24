@@ -29,6 +29,10 @@ struct WebSearchProviderDescriptor: Sendable {
     /// optional and lifts the shared keyless rate limit. Drives the
     /// Settings key field + Keychain prefetch.
     let acceptsKey: Bool
+    /// A rejected optional key can be removed and the same request can run in
+    /// this provider's supported keyless mode. This is deliberately narrower
+    /// than generic retry or fallback eligibility.
+    let recoversRejectedKeyKeylessly: Bool
     /// Keychain account label for this provider's API key. Distinct
     /// per-provider so one provider's key never leaks into another's
     /// call.
@@ -84,6 +88,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 keyDashboardURL: URL(string: "https://keenable.ai/console"),
                 requiresKey: false,
                 acceptsKey: true,
+                recoversRejectedKeyKeylessly: true,
                 keychainAccount: "rapid.web-search.keenable"
             )
         case .parallel:
@@ -94,6 +99,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 keyDashboardURL: URL(string: "https://platform.parallel.ai/"),
                 requiresKey: true,
                 acceptsKey: true,
+                recoversRejectedKeyKeylessly: false,
                 keychainAccount: "rapid.web-search.parallel"
             )
         case .tavily:
@@ -104,6 +110,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 keyDashboardURL: URL(string: "https://app.tavily.com/home"),
                 requiresKey: true,
                 acceptsKey: true,
+                recoversRejectedKeyKeylessly: false,
                 keychainAccount: "rapid.web-search.tavily"
             )
         case .brave:
@@ -122,6 +129,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 keyDashboardURL: URL(string: "https://api-dashboard.search.brave.com/app/keys"),
                 requiresKey: true,
                 acceptsKey: true,
+                recoversRejectedKeyKeylessly: false,
                 keychainAccount: "rapid.web-search.brave"
             )
         case .duckduckgo:
@@ -138,6 +146,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
                 keyDashboardURL: nil,
                 requiresKey: false,
                 acceptsKey: false,
+                recoversRejectedKeyKeylessly: false,
                 keychainAccount: nil
             )
         }
@@ -151,6 +160,7 @@ enum WebSearchProvider: String, CaseIterable, Codable, Identifiable, Sendable {
     var keyDashboardURL: URL? { descriptor.keyDashboardURL }
     var requiresKey: Bool { descriptor.requiresKey }
     var acceptsKey: Bool { descriptor.acceptsKey }
+    var recoversRejectedKeyKeylessly: Bool { descriptor.recoversRejectedKeyKeylessly }
     var keychainAccount: String? { descriptor.keychainAccount }
 }
 
