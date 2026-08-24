@@ -3134,13 +3134,7 @@ def _generate_music_blocking(
     ):
         _music_engine = MusicEngine(dit=dit, decoder=decoder)
 
-    from ..runtime.audio_worker import run_audio_mlx_sync
-
-    run_audio_mlx_sync(
-        "music",
-        f"{dit}:{decoder}",
-        "infer",
-        _music_engine.generate,
+    _music_engine.generate(
         request.input,
         out_path,
         seconds=request.seconds,
