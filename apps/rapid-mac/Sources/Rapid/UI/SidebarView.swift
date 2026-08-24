@@ -1364,9 +1364,9 @@ private struct SidebarRow<Content: View>: View {
 /// `rapid-mlx launch …` command without changing this surface's shape.
 struct LaunchView: View {
     @Bindable var server: ServerManager
-    /// The side-channel downloader the inline model picker uses. Optional
-    /// so the dev snapshot harness can render the page without threading a
-    /// download manager; the real ContentView always supplies it.
+    /// The side-channel downloader the inline model picker uses. Always
+    /// supplied by the real ``ContentView``; the dev snapshot harness passes
+    /// its own empty manager so the page renders standalone.
     @Bindable var downloads: DownloadManager
     /// The currently-chosen model, bound so the stopped state's inline
     /// picker can change it and the shared readiness re-derives.
