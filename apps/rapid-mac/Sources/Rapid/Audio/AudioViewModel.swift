@@ -61,11 +61,18 @@ final class AudioViewModel {
     }
 
     var transcriptionModels: [ModelEntry] {
-        let candidates = audioModels.filter {
+        Self.deduplicatedTranscriptionModels(transcriptionSelectionModels)
+    }
+
+    /// Runtime selection keeps the catalog's stable order among cached models.
+    /// ``transcriptionModels`` is presentation-ranked (for example, a model
+    /// with a Recommended badge may appear first), and feeding that order
+    /// back into default selection silently changes the active checkpoint.
+    private var transcriptionSelectionModels: [ModelEntry] {
+        audioModels.filter {
             $0.audioCapability?.supportsTranscription == true
                 && ModelCatalog.isDesktopAudioAliasVisible($0.alias)
         }
-        return Self.deduplicatedTranscriptionModels(candidates)
     }
 
     var speechModels: [ModelEntry] {
@@ -387,10 +394,12 @@ final class AudioViewModel {
         return serving
     }
 
-    private func resolveSelections() {
-        if !transcriptionModels.contains(where: { $0.alias == selectedTranscriptionAlias }) {
+    func resolveSelections() {
+        if !transcriptionSelectionModels.contains(where: {
+            $0.alias == selectedTranscriptionAlias
+        }) {
             selectedTranscriptionAlias = preferredAlias(
-                from: transcriptionModels,
+                from: transcriptionSelectionModels,
                 preferred: ["whisper-small", "whisper-large-v3-turbo", "whisper-large-v3"]
             )
         }
