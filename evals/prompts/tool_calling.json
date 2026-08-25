@@ -739,6 +739,9 @@
       "18°C",
       "62%"
     ],
-    "first_call_stream": false
+    "first_call_stream": false,
+    "forbid_tools": [
+      "web_search"
+    ]
   }
 ]

@@ -933,6 +933,23 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
 
             result.update(grade)
             result["elapsed_s"] = round(elapsed, 2)
+
+            # A scenario may forbid certain tools from being called at all (e.g.
+            # issue #2222 requires weather and NEVER web_search). _check_tool_call
+            # grades only tool_calls[0], so a response that ALSO calls a forbidden
+            # tool must fail even though the first call is correct — only the
+            # first-tool metadata is fed back downstream. Check every call in the
+            # response's first turn.
+            if sc.get("forbid_tools"):
+                forbidden_calls = [
+                    t.get("function", {}).get("name")
+                    for t in (tool_calls or [])
+                    if t.get("function", {}).get("name") in sc["forbid_tools"]
+                ]
+                if forbidden_calls:
+                    result["forbidden_tool_called"] = forbidden_calls
+                    first_ok = False
+
             steps_passed = [first_ok]
 
             # --- Followup rounds (sequential scenarios) ---

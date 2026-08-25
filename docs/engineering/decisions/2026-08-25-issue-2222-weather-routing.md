@@ -127,6 +127,11 @@ The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in
   non-streaming completion and captures the structured `weather` call (this model
   family emits the call as streamed text under SSE). That ensures the tool result is
   fed back and the `verify_final_text` check actually runs through the real suite path.
+- tc31 sets `forbid_tools: ["web_search"]`: the standard branch checks EVERY tool call
+  in the first response and fails if a forbidden tool was also called (a weather-then-
+  web_search multi-call response must fail, not just grade on the first call), so
+  "routes to weather, never web_search" is enforced, with a unit-level multi-call
+  verification.
 - Unit checks: JSON valid; `run_eval.py` parses; resolver resolves `[weather,
   web_search]`, keeps default behavior, raises on `weather`+`web_seach` and on `[]` /
   dict / scalar `tools`.
