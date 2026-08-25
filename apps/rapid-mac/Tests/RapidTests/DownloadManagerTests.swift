@@ -142,7 +142,12 @@ struct DownloadManagerTests {
         let written = try #require(invocation, "invoked but the marker contents were not captured")
         #expect(written.contains(fresh.path))
         #expect(written.contains("pull fake-alias"))
-        #expect(!mgr.isDownloading("fake-alias"))
+
+        // No intermediate ``isDownloading`` assertion here: the marker is the
+        // subprocess's FIRST act, so a check that the job is no longer running
+        // would race the still-active child (and its @MainActor termination
+        // handler) — reintroducing the load-sensitive timing this fix removes.
+        // The `defer` above is what reaps the child on every exit path.
     }
 
     @Test("Seeded running job → completed exit transitions cleanly")
