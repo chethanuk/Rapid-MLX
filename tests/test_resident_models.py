@@ -171,9 +171,10 @@ class FakeEngine:
     def __init__(self) -> None:
         self.stopped = False
         self.running = 0
+        self.waiting = 0
 
     def get_stats(self):
-        return {"num_running": self.running, "num_waiting": 0}
+        return {"num_running": self.running, "num_waiting": self.waiting}
 
     async def stop(self) -> None:
         self.stopped = True
@@ -428,6 +429,8 @@ async def test_second_image_model_evicts_the_first_without_an_explicit_group():
 async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
     manager, registry, loaded, _ = manager_fixture(limit_gib=20)
     registry.get_engine("chat").running = 1
+    chat = next(item for item in manager.snapshot()["models"] if item["id"] == "chat")
+    assert chat["active_requests"] == 1
 
     with pytest.raises(ResidentModelBusyError, match="active request"):
         await manager.load(
@@ -581,6 +584,31 @@ def test_residency_control_plane_load_pin_status_and_unload(monkeypatch):
         )
         assert client.delete("/v1/models/image").status_code == 204
         assert "image" not in registry
+
+
+def test_residency_snapshot_reports_primary_running_and_queued_requests(monkeypatch):
+    """Primary requests bypass manager leases but still belong in residency."""
+    from types import SimpleNamespace
+
+    from vllm_mlx.routes.residency import router
+
+    manager, registry, _, _ = manager_fixture(limit_gib=12)
+    primary = registry.get_engine("chat")
+    primary.running = 1
+    primary.waiting = 1
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.get_config",
+        lambda: SimpleNamespace(residency_manager=manager),
+    )
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models/residency")
+
+    assert response.status_code == 200
+    chat = next(item for item in response.json()["models"] if item["id"] == "chat")
+    assert chat["active_requests"] == 2
 
 
 def test_residency_control_plane_validates_and_forwards_performance(monkeypatch):
