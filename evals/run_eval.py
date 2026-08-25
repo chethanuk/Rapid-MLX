@@ -791,7 +791,12 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Irrelevance / Missing Params: expect NO tool call ──
             if sc_type in ("irrelevance", "missing_params"):
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
                 )
                 no_tool = not tool_calls
                 has_content = bool(content and content.strip())
@@ -819,7 +824,12 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Parallel: expect multiple tool calls in one response ──
             if sc_type == "parallel":
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
                 )
                 grade = _check_parallel_calls(tool_calls, sc)
                 ok = (
@@ -843,7 +853,12 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Error Recovery: feed error result, check model adapts ──
             if sc_type == "error_recovery":
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
                 )
                 grade = _check_tool_call(tool_calls, sc)
                 first_ok = grade["tool_detected"] and grade["correct_name"]
@@ -926,13 +941,23 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # the tool result would never be fed back and the check would no-op.
             if sc.get("first_call_stream", True):
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
                 )
             else:
                 _start = time.monotonic()
                 nonstream = chat_request(
-                    host, port, messages, tools=_resolve_tools(sc),
-                    max_tokens=512, temperature=0.0, stream=False,
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
+                    stream=False,
                 )
                 elapsed = time.monotonic() - _start
                 first_msg = nonstream["choices"][0]["message"]
@@ -1087,8 +1112,13 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # scenario-declared phrases — never regex over arbitrary model text.
             if sc.get("verify_final_text"):
                 final_resp = chat_request(
-                    host, port, messages, tools=_resolve_tools(sc),
-                    max_tokens=512, temperature=0.0, stream=False,
+                    host,
+                    port,
+                    messages,
+                    tools=_resolve_tools(sc),
+                    max_tokens=512,
+                    temperature=0.0,
+                    stream=False,
                 )
                 final_msg = final_resp["choices"][0]["message"]
                 final_text = (final_msg.get("content") or "").strip()
@@ -1112,7 +1142,8 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                     )
                     result["forbidden_tool_called"] = final_forbidden
                 forbidden = [
-                    p for p in sc.get("forbid_final_phrases", [])
+                    p
+                    for p in sc.get("forbid_final_phrases", [])
                     if p.lower() in final_text.lower()
                 ]
                 if forbidden:

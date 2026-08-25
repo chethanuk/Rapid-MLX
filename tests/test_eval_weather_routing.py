@@ -45,7 +45,11 @@ def _tc():
 
 
 def _call(name):
-    return {"id": "c", "type": "function", "function": {"name": name, "arguments": "{}"}}
+    return {
+        "id": "c",
+        "type": "function",
+        "function": {"name": name, "arguments": "{}"},
+    }
 
 
 class TestForbiddenToolRejection:
@@ -64,9 +68,12 @@ class TestForbiddenToolRejection:
     def test_unrelated_extra_tool_not_forbidden(self, re):
         sc = _tc()
         # forbid_tools only bans web_search; an unrelated extra is a separate concern.
-        assert re._forbidden_tool_names(
-            [_call("weather"), _call("exec")], sc["forbid_tools"]
-        ) == []
+        assert (
+            re._forbidden_tool_names(
+                [_call("weather"), _call("exec")], sc["forbid_tools"]
+            )
+            == []
+        )
 
     def test_empty_or_none_calls_no_forbidden(self, re):
         sc = _tc()
@@ -78,9 +85,9 @@ class TestForbiddenToolRejection:
         # completion calls web_search. Must be rejected.
         sc = _tc()
         final_calls = [_call("weather"), _call("web_search")]
-        assert re._forbidden_tool_names(
-            final_calls, sc["forbid_tools"]
-        ) == ["web_search"]
+        assert re._forbidden_tool_names(final_calls, sc["forbid_tools"]) == [
+            "web_search"
+        ]
 
     def test_scenario_forbids_web_search(self, re):
         sc = _tc()
@@ -205,7 +212,10 @@ class TestSuiteEndToEnd:
         # round-5 shape: first turn is a correct weather call, but the final
         # completion ALSO calls web_search while still reporting the result.
         suite_with_mock["set_fake"](
-            ["weather"], "", ["weather", "web_search"], "Partly cloudy, 18°C, humidity 62%"
+            ["weather"],
+            "",
+            ["weather", "web_search"],
+            "Partly cloudy, 18°C, humidity 62%",
         )
         out = suite_with_mock["run"]()
         d = out["details"][0]
