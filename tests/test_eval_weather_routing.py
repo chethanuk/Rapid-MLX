@@ -9,6 +9,8 @@ configuration. They prove the NEGATIVE paths that guard the #2222 contract
   * a response that calls weather AND web_search must be rejected,
   * a final completion that calls web_search must be rejected even when its text
     carries a result marker,
+  * a final completion that calls ANY tool (even weather) is not a final answer,
+  * an empty string argument must not match an expected argument,
   * a weather-only response must pass,
   * a malformed tools config must fail fast.
 """
@@ -120,6 +122,27 @@ class TestResolveTools:
     def test_malformed_tools_fails_fast(self, re, bad):
         with pytest.raises(ValueError, match="malformed tools"):
             re._resolve_tools({"id": "x", "tools": bad})
+
+
+class TestFuzzyArgMatching:
+    def test_nonempty_substring_matches(self, re):
+        # A real, usable value still matches the expected location.
+        assert (
+            re.fuzzy_match_args({"location": "tokyo"}, {"location": "Tokyo, Japan"})
+            == 1.0
+        )
+
+    @pytest.mark.parametrize("empty", ["", "   ", None])
+    def test_empty_actual_does_not_match(self, re, empty):
+        # `"" in "tokyo"` is true, so an empty location would score a perfect
+        # match and let tc31 pass without a usable weather request (the real
+        # tool rejects an empty location). Fail closed on unset/blank.
+        assert (
+            re.fuzzy_match_args({"location": "tokyo"}, {"location": empty or ""}) == 0.0
+        )
+
+    def test_missing_key_does_not_match(self, re):
+        assert re.fuzzy_match_args({"location": "tokyo"}, {}) == 0.0
 
 
 def _tool_call(name, args='{"location": "Tokyo"}'):
@@ -238,3 +261,23 @@ class TestSuiteEndToEnd:
         assert out["passed"] == 0
         assert d["fully_correct"] is False
         assert "reflect the supplied tool result" in d.get("final_text_error", "")
+
+    def test_final_completion_calling_any_tool_fails(self, suite_with_mock):
+        # round-9 finding: a final completion that calls WEATHER again (a
+        # non-forbidden tool) while its text carries the result marker is still
+        # NOT a final answer — it signs a looping/retry model. `forbid_tools`
+        # only bans web_search, so the forbid check alone would let it pass;
+        # the final turn must call NO tool.
+        suite_with_mock["set_fake"](
+            ["weather"], "", ["weather"], "Partly cloudy, 18°C, humidity 62%"
+        )
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["passed"] == 0
+        assert d["fully_correct"] is False
+        assert "called a tool rather than answering" in d.get("final_text_error", "")
+        # weather is not forbidden, so no forbidden-tool marker — the replay
+        # fails on the any-tool final-turn rule, not on the forbid list.
+        assert (
+            "forbidden_tool_called" not in d or d.get("forbidden_tool_called") is None
+        )

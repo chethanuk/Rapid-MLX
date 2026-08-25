@@ -608,7 +608,13 @@ def fuzzy_match_args(expected: dict, actual: dict) -> float:
         if isinstance(exp_val, str) and isinstance(act_val, str):
             exp_lower = exp_val.lower()
             act_lower = act_val.lower()
-            # Exact substring match
+            # Exact substring match. A non-empty actual value is required: the
+            # empty string substring-matches ANY expectation (`"" in "tokyo"`),
+            # so an empty location would otherwise score a perfect match and let
+            # tc31 pass without a usable weather request (the real tool rejects
+            # an empty location). Fail closed on an unset/blank value.
+            if not act_lower:
+                continue
             if exp_lower in act_lower or act_lower in exp_lower:
                 matches += 1
             else:
@@ -1126,10 +1132,14 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 reasons = []
                 if not final_ok:
                     reasons.append("empty final content after tool result")
-                # The final completion may itself call a tool (e.g. weather then a
-                # web_search fallback in the SAME verified turn). Inspect its
-                # tool_calls against forbid_tools too, so forbidden tools cannot
-                # hide in the final response's tool_calls.
+                # A final turn is only a final answer if it calls NO tool. A
+                # completion that issues any tool call here (a repeat `weather`
+                # to retry, or a `web_search` fallback) means the model is still
+                # looping rather than reporting the result — so ANY `final_calls`,
+                # not just a forbidden one, fails the final-text check. Requiring
+                # an empty set prevents a weather-then-weather repeat (which the
+                # forbid_tools-only check above would otherwise let pass) from
+                # being counted as a final answer.
                 final_calls = final_msg.get("tool_calls") or []
                 final_forbidden = _forbidden_tool_names(
                     final_calls, sc.get("forbid_tools", [])
@@ -1141,6 +1151,14 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                         + ", ".join(final_forbidden)
                     )
                     result["forbidden_tool_called"] = final_forbidden
+                if final_calls and not final_forbidden:
+                    final_ok = False
+                    reasons.append(
+                        "final turn called a tool rather than answering: "
+                        + ", ".join(
+                            t.get("function", {}).get("name", "?") for t in final_calls
+                        )
+                    )
                 forbidden = [
                     p
                     for p in sc.get("forbid_final_phrases", [])
