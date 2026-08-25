@@ -113,3 +113,118 @@ class TestResolveTools:
     def test_malformed_tools_fails_fast(self, re, bad):
         with pytest.raises(ValueError, match="malformed tools"):
             re._resolve_tools({"id": "x", "tools": bad})
+
+
+def _tool_call(name, args='{"location": "Tokyo"}'):
+    return {
+        "id": "call_eval",
+        "type": "function",
+        "function": {"name": name, "arguments": args},
+    }
+
+
+def _nons(a, *names):
+    """A non-streaming chat_request response: text ``a`` plus the named tools."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": a,
+                    "tool_calls": [_tool_call(n) for n in names] or None,
+                }
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def suite_with_mock(re, monkeypatch, tmp_path):
+    """Drive the REAL run_tool_calling_suite over a single tc31-shaped scenario,
+    with chat_request stubbed so no model/network is needed. The suite reads
+    PROMPTS_DIR/tool_calling.json at call time, so we point it at a temp prompts
+    dir containing only that one scenario; the returned details[0] corresponds to
+    it 1:1.
+    """
+    import copy
+
+    sc = copy.deepcopy(_tc())
+    scenario_file = tmp_path / "tool_calling.json"
+    scenario_file.write_text(json.dumps([sc]))
+
+    calls = []
+
+    def make_fake(first_names, first_text, final_names, final_text):
+        def fake(host, port, messages, **kwargs):
+            calls.append(kwargs)
+            # verify_final_text runs a second completion after the tool result.
+            if any(m.get("role") == "tool" for m in messages):
+                return _nons(final_text, *final_names)
+            return _nons(first_text, *first_names)
+
+        return fake
+
+    monkeypatch.setattr(re, "PROMPTS_DIR", tmp_path)
+    # default fake: correct weather, then a clean final report.
+    monkeypatch.setattr(re, "chat_request", make_fake(["weather"], "", [], None))
+    return {
+        "sc": sc,
+        "calls": calls,
+        "set_fake": lambda fn, ft, gn, gt: monkeypatch.setattr(
+            re, "chat_request", make_fake(fn, ft, gn, gt)
+        ),
+        "run": lambda: re.run_tool_calling_suite("localhost", 1),
+    }
+
+
+class TestSuiteEndToEnd:
+    def test_successful_weather_only_flow_passes(self, suite_with_mock):
+        # correct first-turn weather; final report reflects the tool result and
+        # calls no forbidden tool -> fully_correct True.
+        suite_with_mock["set_fake"](
+            ["weather"], "", [], "Partly cloudy, 18°C, humidity 62%"
+        )
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["total"] == 1 and out["passed"] == 1
+        assert d["fully_correct"] is True
+
+    def test_first_turn_weather_plus_web_search_fails(self, suite_with_mock):
+        # _check_tool_call passes (weather is tool_calls[0]) but the forbidden
+        # web_search in the SAME turn must still fail the scenario.
+        suite_with_mock["set_fake"](
+            ["weather", "web_search"], "", [], "Partly cloudy, 18°C, humidity 62%"
+        )
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["passed"] == 0
+        assert d["fully_correct"] is False
+        assert d["forbidden_tool_called"] == ["web_search"]
+
+    def test_final_completion_weather_plus_web_search_fails(self, suite_with_mock):
+        # round-5 shape: first turn is a correct weather call, but the final
+        # completion ALSO calls web_search while still reporting the result.
+        suite_with_mock["set_fake"](
+            ["weather"], "", ["weather", "web_search"], "Partly cloudy, 18°C, humidity 62%"
+        )
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["passed"] == 0
+        assert d["fully_correct"] is False
+        assert d["forbidden_tool_called"] == ["web_search"]
+
+    def test_first_turn_no_tool_fails(self, suite_with_mock):
+        # no tool at all -> nothing to route; must not pass via absence of forbid.
+        suite_with_mock["set_fake"]([], "", [], "no tool here")
+        out = suite_with_mock["run"]()
+        assert out["passed"] == 0
+        assert out["details"][0]["fully_correct"] is False
+
+    def test_verifies_final_terms_are_required(self, suite_with_mock):
+        # clean final text that does NOT reflect the tool result must fail.
+        suite_with_mock["set_fake"](["weather"], "", [], "I cannot help with that.")
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["passed"] == 0
+        assert d["fully_correct"] is False
+        assert "reflect the supplied tool result" in d.get("final_text_error", "")
