@@ -1081,6 +1081,23 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 reasons = []
                 if not final_ok:
                     reasons.append("empty final content after tool result")
+                # The final completion may itself call a tool (e.g. weather then a
+                # web_search fallback in the SAME verified turn). Inspect its
+                # tool_calls against forbid_tools too, so forbidden tools cannot
+                # hide in the final response's tool_calls.
+                final_calls = final_msg.get("tool_calls") or []
+                final_forbidden = [
+                    t.get("function", {}).get("name")
+                    for t in final_calls
+                    if t.get("function", {}).get("name") in sc.get("forbid_tools", [])
+                ]
+                if final_forbidden:
+                    final_ok = False
+                    reasons.append(
+                        "final turn also called forbidden tool(s): "
+                        + ", ".join(final_forbidden)
+                    )
+                    result["forbidden_tool_called"] = final_forbidden
                 forbidden = [
                     p for p in sc.get("forbid_final_phrases", [])
                     if p.lower() in final_text.lower()
