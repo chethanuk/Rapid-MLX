@@ -31,7 +31,6 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       release_sha: ${{ steps.identity.outputs.release_sha }}
       open_ids: ${{ steps.blockers.outputs.open_ids }}
-      have_pat: ${{ steps.identity.outputs.have_pat }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -104,7 +103,6 @@ jobs:
           {
             echo "version=$VERSION"
             echo "release_sha=$RELEASE_SHA"
-            echo "have_pat=$HAVE_PAT"
           } >> "$GITHUB_OUTPUT"
           {
             echo "VERSION=$VERSION"
@@ -217,11 +215,14 @@ jobs:
           VERSION: ${{ needs.verify-published-desktop.outputs.version }}
           RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
           EXPECTED_OPEN_IDS: ${{ needs.verify-published-desktop.outputs.open_ids }}
-          HAVE_PAT: ${{ needs.verify-published-desktop.outputs.have_pat }}
+          # Re-evaluate the secret after protected approval. A pre-approval
+          # boolean can become stale while the job waits; publishing with the
+          # GITHUB_TOKEN fallback would suppress downstream release events.
+          LIVE_HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "$HAVE_PAT" != "true" ]; then
+          if [ "$LIVE_HAVE_PAT" != "true" ]; then
             echo "::error::RELEASE_PAT disappeared after pre-approval evidence" >&2
             exit 1
           fi

@@ -38,6 +38,8 @@ else
   bad "protected approval/recheck/publication ordering"
 fi
 contains "$RECOVER" 'scripts/check_release_environment.py' "live environment protection is re-read after approval"
+contains "$RECOVER" "LIVE_HAVE_PAT: \${{ secrets.RELEASE_PAT != '' }}" "PAT presence is re-evaluated inside the protected job"
+lacks "$RECOVER" 'needs.verify-published-desktop.outputs.have_pat' "protected job never trusts a stale pre-approval PAT output"
 contains "$RECOVER" 'scripts/check_desktop_publish.py' "Desktop publication is re-verified after approval"
 contains "$RECOVER" 'grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt' "downloaded evidence is bound to the approved SHA"
 contains "$RECOVER" '--expected-open-ids "$EXPECTED_OPEN_IDS"' "blocker set drift fails closed"
