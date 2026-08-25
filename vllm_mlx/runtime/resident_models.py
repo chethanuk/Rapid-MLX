@@ -138,6 +138,14 @@ def resolve_resident_performance(
     )
 
 
+def _carry_served_identity(entry: ModelEntry, prior: ModelEntry) -> ModelEntry:
+    """Attach the exact pre-reload routing identity to a rebuilt engine."""
+    entry.model_name = prior.model_name
+    entry.model_path = prior.model_path
+    entry.aliases = set(prior.aliases)
+    return entry
+
+
 @dataclass
 class ResidencyRecord:
     """Mutable lifecycle metadata kept outside the route-facing registry entry."""
@@ -620,7 +628,10 @@ class ResidentModelManager:
 
         before = self._read_memory()
         try:
-            entry = await self.loader(model_name, model_path, performance)
+            entry = _carry_served_identity(
+                await self.loader(model_name, model_path, performance),
+                record.entry,
+            )
         except BaseException as reload_error:
             # The old engine has already released its Metal allocations so the
             # replacement can fit under the same budget. Best-effort restore
@@ -679,10 +690,13 @@ class ResidentModelManager:
 
         restored_entry = None
         try:
-            restored_entry = await self.loader(
-                record.model_id,
-                record.entry.model_path,
-                record.performance,
+            restored_entry = _carry_served_identity(
+                await self.loader(
+                    record.model_id,
+                    record.entry.model_path,
+                    record.performance,
+                ),
+                record.entry,
             )
             restored = ResidencyRecord(
                 entry=restored_entry,
