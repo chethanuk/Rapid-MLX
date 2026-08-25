@@ -7,6 +7,7 @@ from vllm_mlx/api/utils.py. No MLX dependency.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -1023,6 +1024,50 @@ class TestMllmBackboneIsHybrid:
         assert server._model_alias is None
         assert server._engine.kwargs["model_name"] == repo
         assert server._engine.kwargs["force_text"] is True
+
+    def test_unreferenced_snapshot_resolution_fails_closed(self, monkeypatch, tmp_path):
+        """Ambiguous, partial, and malformed cache shapes must stay offline-safe."""
+        import huggingface_hub
+
+        from vllm_mlx import model_metadata
+
+        repo = "publisher/model"
+        repo_root = tmp_path / "models--publisher--model"
+        snapshots = repo_root / "snapshots"
+        snapshot = snapshots / "immutable-revision"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "qwen3_5"}), encoding="utf-8"
+        )
+        (snapshot / "model.safetensors").write_bytes(b"complete")
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path))
+
+        refs = repo_root / "refs"
+        refs.mkdir()
+        (refs / "main").write_text("missing-revision", encoding="utf-8")
+        assert model_metadata.resolve_unreferenced_cached_snapshot(repo) is None
+        (refs / "main").unlink()
+
+        second = snapshots / "second-revision"
+        second.mkdir()
+        assert model_metadata.resolve_unreferenced_cached_snapshot(repo) is None
+        second.rmdir()
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                "vllm_mlx.model_aliases.checkpoint_prefix", lambda _name: "nested/"
+            )
+            assert model_metadata.resolve_unreferenced_cached_snapshot(repo) is None
+
+        (snapshot / "model.safetensors").unlink()
+        assert model_metadata.resolve_unreferenced_cached_snapshot(repo) is None
+
+        def fail_to_list(_path):
+            raise OSError("stale cache mount")
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(Path, "iterdir", fail_to_list)
+            assert model_metadata.resolve_unreferenced_cached_snapshot(repo) is None
 
     def test_sliding_and_full_attention_is_not_hybrid(self, monkeypatch):
         from vllm_mlx.api.utils import mllm_backbone_is_hybrid
