@@ -210,6 +210,11 @@ enum ServerState: Equatable {
 @MainActor
 @Observable
 final class ServerManager {
+    struct PendingModelSwitch: Identifiable, Equatable, Sendable {
+        let id: UUID
+        let risk: ModelSwitchRisk
+    }
+
     // MARK: - Public state (read by SwiftUI)
 
     /// Current lifecycle phase. Drives all UI state controls.
@@ -218,6 +223,18 @@ final class ServerManager {
     /// Models currently held by the one sidecar process, plus total process
     /// memory against its configured ceiling.
     private(set) var residency: ModelResidencySnapshot = .empty
+
+    /// Alias replacements wait here only when the latest residency snapshot
+    /// reports in-flight requests for the current model. This is presentation
+    /// state for the existing lifecycle choke point, not another lifecycle
+    /// source of truth.
+    private(set) var pendingModelSwitch: PendingModelSwitch?
+
+    @ObservationIgnored
+    private var queuedModelSwitches: [PendingModelSwitch] = []
+
+    @ObservationIgnored
+    private var modelSwitchDecisions: [UUID: Bool] = [:]
 
     @ObservationIgnored
     private var residencyClient = ServerResidencyClient()
@@ -367,6 +384,70 @@ final class ServerManager {
             bearer: activeBearer
         ) else { return }
         residency = snapshot
+    }
+
+    func confirmPendingModelSwitch(_ request: PendingModelSwitch) {
+        resolvePendingModelSwitch(request, approved: true)
+    }
+
+    func cancelPendingModelSwitch(_ request: PendingModelSwitch) {
+        resolvePendingModelSwitch(request, approved: false)
+    }
+
+    private func resolvePendingModelSwitch(
+        _ request: PendingModelSwitch,
+        approved: Bool
+    ) {
+        guard pendingModelSwitch?.id == request.id else { return }
+        modelSwitchDecisions[request.id] = approved
+        pendingModelSwitch = queuedModelSwitches.isEmpty
+            ? nil
+            : queuedModelSwitches.removeFirst()
+    }
+
+    private func abandonModelSwitchWaiter(_ requestID: UUID) {
+        modelSwitchDecisions.removeValue(forKey: requestID)
+        if pendingModelSwitch?.id == requestID {
+            pendingModelSwitch = queuedModelSwitches.isEmpty
+                ? nil
+                : queuedModelSwitches.removeFirst()
+        } else {
+            queuedModelSwitches.removeAll { $0.id == requestID }
+        }
+    }
+
+    /// Refreshing `/v1/models/residency` is a cheap local request and gives the
+    /// decision the freshest available active-request count. A failed refresh
+    /// preserves the latest successful snapshot. The server offers no atomic
+    /// check-and-switch operation, so this is an advisory guard, not a drain
+    /// policy.
+    private func approveModelSwitchIfNeeded(
+        from currentAlias: String,
+        to targetAlias: String
+    ) async -> Bool {
+        await refreshResidency()
+        guard let risk = ModelSwitchRisk.evaluate(
+            currentAlias: currentAlias,
+            targetAlias: targetAlias,
+            residency: residency
+        ) else { return true }
+
+        let request = PendingModelSwitch(id: UUID(), risk: risk)
+        if pendingModelSwitch == nil {
+            pendingModelSwitch = request
+        } else {
+            queuedModelSwitches.append(request)
+        }
+
+        while modelSwitchDecisions[request.id] == nil {
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+            } catch {
+                abandonModelSwitchWaiter(request.id)
+                return false
+            }
+        }
+        return modelSwitchDecisions.removeValue(forKey: request.id) ?? false
     }
 
     /// Alias of the child that currently owns the runtime — for BOTH
@@ -1115,6 +1196,21 @@ final class ServerManager {
             return true
         }
 
+        // A replacement-group load can switch the assistant inside the live
+        // process without reaching the legacy stop/start fallback below. Ask
+        // before either destructive route so picker activation and every
+        // other `ensureServing` caller share one guard.
+        var modelSwitchApproved = false
+        if replacementGroup != nil,
+           let currentAlias = launchedChildAlias,
+           currentAlias != trimmed {
+            guard await approveModelSwitchIfNeeded(
+                from: currentAlias,
+                to: trimmed
+            ) else { return false }
+            modelSwitchApproved = true
+        }
+
         // Any fresh load attempt — resident, cold start, or the legacy
         // stop/start fallback — supersedes a stale rejection for THIS alias so
         // the surface stops showing last round's result while this load is in
@@ -1230,6 +1326,14 @@ final class ServerManager {
         // the idle/stopped/missing cases just fall through to
         // ``start(alias:)``.
         if child != nil {
+            if !modelSwitchApproved,
+               let currentAlias = launchedChildAlias,
+               currentAlias != trimmed {
+                guard await approveModelSwitchIfNeeded(
+                    from: currentAlias,
+                    to: trimmed
+                ) else { return false }
+            }
             await stop(preservingLastServedAlias: true)
         }
         let memoryRequestID = UUID()

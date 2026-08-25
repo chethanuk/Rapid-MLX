@@ -136,6 +136,37 @@ struct ModelResidencySnapshot: Codable, Sendable, Equatable {
     }
 }
 
+/// User-visible risk carried by an alias-replacing model activation.
+/// Missing residency data deliberately means zero active requests so an older
+/// sidecar or failed refresh cannot invent a busy state.
+struct ModelSwitchRisk: Equatable, Sendable {
+    let currentAlias: String
+    let targetAlias: String
+    let activeRequests: Int
+
+    static func evaluate(
+        currentAlias: String,
+        targetAlias: String,
+        residency: ModelResidencySnapshot?
+    ) -> ModelSwitchRisk? {
+        guard currentAlias != targetAlias else { return nil }
+        let activeRequests = residency?.models.first {
+            $0.matches(currentAlias) && $0.state != "evicting"
+        }?.activeRequests ?? 0
+        guard activeRequests > 0 else { return nil }
+        return ModelSwitchRisk(
+            currentAlias: currentAlias,
+            targetAlias: targetAlias,
+            activeRequests: activeRequests
+        )
+    }
+
+    var title: String {
+        let noun = activeRequests == 1 ? "request" : "requests"
+        return "Model \(currentAlias) is serving \(activeRequests) active \(noun). Switch anyway?"
+    }
+}
+
 enum ResidentModelLoadResult: Sendable, Equatable {
     case loaded(ResidentModelStatus)
     case unsupported
