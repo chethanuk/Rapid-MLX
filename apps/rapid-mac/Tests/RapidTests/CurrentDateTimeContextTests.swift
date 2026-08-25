@@ -112,14 +112,41 @@ struct CurrentDateTimeContextTests {
     }
 }
 
-/// Wire-side capture mirroring ``CustomInstructionsCaptureProtocol`` so the
-/// production `send` path is exercised with the real `ChatViewModel` and the
-/// date context is asserted to actually reach the request body's single system
-/// row (not just a helper in isolation).
-private final class DateContextWireCaptureProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var lastRequestBody: Data?
+/// Wire-side capture so the production `send` path is exercised with the real
+/// `ChatViewModel` and the date context is asserted to actually reach the
+/// request body's single system row (not just a helper in isolation).
+///
+/// The stored body is written on the `URLProtocol` loading thread and read from
+/// the main actor after the stream completes, so it is guarded by an ``NSLock``
+/// (the pattern other test captures here use) rather than an unsynchronized
+/// static — the write/read happen on different threads.
+/// Lock-guarded body store. `URLProtocol` writes on its loading thread and the
+/// main actor reads afterward, so the pair is boxed behind ``@unchecked
+/// Sendable`` (Swift 6 rejects a bare lock-protected mutable global); all access
+/// funnels through the lock.
+private final class BodyStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var body: Data?
 
-    static func reset() { lastRequestBody = nil }
+    func get() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return body
+    }
+
+    func set(_ value: Data?) {
+        lock.lock()
+        defer { lock.unlock() }
+        body = value
+    }
+}
+
+private final class DateContextWireCaptureProtocol: URLProtocol, @unchecked Sendable {
+    private static let store = BodyStore()
+
+    static var lastRequestBody: Data? { store.get() }
+
+    static func reset() { store.set(nil) }
 
     static func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -131,7 +158,7 @@ private final class DateContextWireCaptureProtocol: URLProtocol, @unchecked Send
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        Self.lastRequestBody = Self.bodyData(from: request)
+        Self.store.set(Self.bodyData(from: request))
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,
