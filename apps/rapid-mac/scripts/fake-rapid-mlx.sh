@@ -700,7 +700,13 @@ class Handler(BaseHTTPRequestHandler):
         count = raw_count if isinstance(raw_count, int) and raw_count > 0 else 1
         total = max(1, int(_setting("FAKE_IMAGE_STEPS", 8)))
         step_ms = max(0, int(_setting("FAKE_IMAGE_STEP_MS", 300)))
+        step_ms_sequence = []
+        for raw_delay in _setting("FAKE_IMAGE_STEP_MS_SEQUENCE", "").split(","):
+            raw_delay = raw_delay.strip()
+            if raw_delay:
+                step_ms_sequence.append(max(0, int(raw_delay)))
         first_warmup_ack = _setting("FAKE_IMAGE_FIRST_WARMUP_ACK")
+        step_hold_ack = _setting("FAKE_IMAGE_STEP_HOLD_ACK")
         index = RENDERS.begin(total, bool(first_warmup_ack))
         if index is None:
             # A render is already in flight. The real server runs one model in
@@ -740,11 +746,22 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(0.05)
             RENDERS.finish_warmup()
         cancelled = False
-        for _ in range(total):
-            time.sleep(step_ms / 1000)
+        for step_index in range(total):
+            delay_ms = (step_ms_sequence[step_index]
+                        if step_index < len(step_ms_sequence) else step_ms)
+            time.sleep(delay_ms / 1000)
             if RENDERS.advance():
                 cancelled = True
                 break
+            if step_hold_ack and step_index + 1 == 2:
+                deadline = time.monotonic() + 300
+                while not os.path.exists(step_hold_ack):
+                    if time.monotonic() >= deadline:
+                        RENDERS.end()
+                        _event("image_step_hold_timeout", step=2)
+                        self._json(500, {"error": {"code": "fixture_step_hold_timeout"}})
+                        return
+                    time.sleep(0.05)
         # Real image engines still perform VAE decode / PNG encoding after the
         # last denoise step. Keep that tail observable for GUI phase coverage.
         finish_ms = max(0, int(_setting("FAKE_IMAGE_FINISH_MS", 0)))

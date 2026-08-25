@@ -378,6 +378,7 @@ struct ImagesView: View {
                                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                                 .foregroundStyle(RapidTheme.bandInkSecondary)
                                 .monospacedDigit()
+                                .accessibilityIdentifier("Images.Progress.Step")
                         }
                         Button { viewModel.cancel() } label: {
                             Image(systemName: "xmark")
@@ -413,6 +414,7 @@ struct ImagesView: View {
                                 : "First run — only happens once"))
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(RapidTheme.bandInkSecondary)
+                            .accessibilityIdentifier("Images.Progress.ETA")
                     }
                 }
                 .padding(18)
