@@ -92,6 +92,7 @@ async def test_dynamic_resident_auto_detected_hybrid_gets_bounded_prefix_reuse(
     assert scheduler.enable_prefix_cache is True
     assert scheduler.hybrid_cache_entries == 8
     assert scheduler.non_trimmable_exact_prefix_reuse is True
+    await residency_activity_contract()
 
 
 @pytest.mark.asyncio
@@ -425,6 +426,44 @@ def residency_activity_contract():
     chat = next(item for item in manager.snapshot()["models"] if item["id"] == "chat")
     assert chat["active_requests"] == 2
 
+    async def exercise_reload_identity() -> None:
+        reload_registry = ModelRegistry()
+        reload_primary = entry("reload-chat")
+        reload_primary.aliases.add("reload-alias")
+        reload_registry.add(reload_primary, is_default=True)
+
+        async def loader(name: str, path: str | None, performance=None):
+            if performance == ResidentPerformanceConfig(kv_cache_dtype="int4"):
+                raise RuntimeError("new config failed")
+            return entry(name)
+
+        reload_manager = ResidentModelManager(
+            reload_registry,
+            loader,
+            memory_reader=lambda: 0,
+        )
+        reload_manager.register_primary(reload_primary, estimated_bytes=1 * GIB)
+        replacement = await reload_manager.load(
+            "reload-alias",
+            performance=ResidentPerformanceConfig(kv_cache_dtype="int8"),
+            reload_if_changed=True,
+        )
+        assert replacement.entry.aliases == {"reload-alias"}
+
+        try:
+            await reload_manager.load(
+                "reload-alias",
+                performance=ResidentPerformanceConfig(kv_cache_dtype="int4"),
+                reload_if_changed=True,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "new config failed"
+        else:
+            raise AssertionError("failed reload must surface its loader error")
+        assert reload_registry.get_entry("reload-alias").aliases == {"reload-alias"}
+
+    return exercise_reload_identity
+
 
 @pytest.mark.asyncio
 async def test_accounting_reserves_lazy_model_estimates_and_tracks_larger_actual_usage():
@@ -678,10 +717,77 @@ async def test_per_model_performance_reload_replaces_only_the_target_engine():
     }
 
 
+def test_performance_reload_preserves_alias_in_routing_and_models_list(monkeypatch):
+    from vllm_mlx.config import get_config, reset_config
+    from vllm_mlx.routes import models as models_route
+    from vllm_mlx.routes import residency as residency_route
+
+    repo = "mlx-community/Qwen3-0.6B-4bit"
+    alias = "qwen3-0.6b-4bit"
+    registry = ModelRegistry()
+    primary = ModelEntry(
+        engine=FakeEngine(),
+        model_name=repo,
+        model_path=repo,
+        aliases={alias},
+    )
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        return ModelEntry(
+            engine=FakeEngine(),
+            model_name=name,
+            model_path=path or name,
+        )
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=1 * GIB)
+
+    reset_config()
+    cfg = get_config()
+    cfg.model_registry = registry
+    cfg.residency_manager = manager
+    cfg.api_key = None
+    cfg.embedding_model_locked = None
+    app = FastAPI()
+    app.include_router(residency_route.router)
+    app.include_router(models_route.router)
+    monkeypatch.setattr(
+        residency_route,
+        "resolve_resident_performance",
+        lambda performance, **_kwargs: performance,
+    )
+    try:
+        with TestClient(app) as client:
+            reload_response = client.post(
+                "/v1/models/load",
+                json={
+                    "model": alias,
+                    "model_path": repo,
+                    "reload_if_changed": True,
+                    "performance": {"kv_cache_dtype": "int8"},
+                },
+            )
+            assert reload_response.status_code == 200
+            replacement = registry.get_entry(alias)
+            assert replacement.model_name == repo
+            assert replacement.model_path == repo
+            assert replacement.aliases == {alias}
+            registry.validate_model_name(alias)
+            assert registry.get_engine(alias) is replacement.engine
+            response = client.get("/v1/models")
+        assert response.status_code == 200
+        ids = {item["id"] for item in response.json()["data"]}
+        assert {repo, alias}.issubset(ids)
+    finally:
+        reset_config()
+
+
 @pytest.mark.asyncio
 async def test_failed_performance_reload_restores_the_last_known_good_engine():
     registry = ModelRegistry()
     primary = entry("chat")
+    primary.aliases.add("chat-alias")
     registry.add(primary, is_default=True)
     calls: list[ResidentPerformanceConfig | None] = []
 
@@ -703,6 +809,8 @@ async def test_failed_performance_reload_restores_the_last_known_good_engine():
 
     assert calls == [ResidentPerformanceConfig(kv_cache_dtype="int4"), None]
     assert "chat" in registry
+    assert registry.get_engine("chat-alias") is registry.get_engine("chat")
+    assert registry.get_entry("chat").aliases == {"chat-alias"}
     assert registry.get_engine("chat") is not primary.engine
     assert manager.snapshot()["models"][0]["performance"] is None
 
