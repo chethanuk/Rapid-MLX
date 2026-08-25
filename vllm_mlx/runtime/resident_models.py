@@ -272,28 +272,42 @@ def estimate_model_bytes(model_name: str) -> int:
     return int((largest * bytes_per_param + 1.2 + kv_gib) * _GIB)
 
 
-def _engine_is_idle(engine: object) -> bool:
-    """Best-effort idle check shared by explicit, LRU, and TTL eviction."""
+def _engine_active_requests(engine: object) -> int | None:
+    """Return the engine's running plus queued request count.
+
+    ``ResidencyRecord.active_requests`` covers manager leases, but the primary
+    startup engine is reached directly through the model registry. Its live
+    text/VLM requests therefore exist only in the engine scheduler. Return
+    ``None`` when an exposed activity probe fails so destructive lifecycle
+    guards keep their existing fail-closed behavior.
+    """
+
+    active = 0
 
     progress = getattr(engine, "progress_snapshot", None)
     if callable(progress):
         try:
             if bool(progress().get("running", False)):
-                return False
+                active = 1
         except Exception:
-            return False
+            return None
 
     get_stats = getattr(engine, "get_stats", None)
     if callable(get_stats):
         try:
             stats = get_stats() or {}
-            if int(stats.get("num_running", 0) or 0) > 0:
-                return False
-            if int(stats.get("num_waiting", 0) or 0) > 0:
-                return False
+            running = max(0, int(stats.get("num_running", 0) or 0))
+            waiting = max(0, int(stats.get("num_waiting", 0) or 0))
+            active = max(active, running + waiting)
         except Exception:
-            return False
-    return True
+            return None
+    return active
+
+
+def _engine_is_idle(engine: object) -> bool:
+    """Best-effort idle check shared by explicit, LRU, and TTL eviction."""
+
+    return _engine_active_requests(engine) == 0
 
 
 def _release_allocator_cache() -> None:
@@ -841,6 +855,7 @@ class ResidentModelManager:
         for record in sorted(self._records.values(), key=lambda item: item.loaded_at):
             engine = record.entry.engine
             resident = not hasattr(engine, "is_resident") or bool(engine.is_resident)
+            engine_active = _engine_active_requests(engine)
             models.append(
                 {
                     "id": record.model_id,
@@ -850,7 +865,14 @@ class ResidentModelManager:
                     "state": record.state if resident else "registered",
                     "pinned": record.pinned,
                     "primary": record.primary,
-                    "active_requests": record.active_requests,
+                    # A manager lease and a scheduler request describe
+                    # overlapping lifetimes for dynamic engines, so use the
+                    # larger count rather than double-counting. Primary traffic
+                    # has no manager lease and is supplied by the scheduler.
+                    "active_requests": max(
+                        record.active_requests,
+                        engine_active if engine_active is not None else 0,
+                    ),
                     "estimated_bytes": record.estimated_bytes,
                     "measured_bytes": record.measured_bytes or None,
                     "idle_seconds": max(0.0, now - record.last_used_at),
