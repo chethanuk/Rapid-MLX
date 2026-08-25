@@ -223,11 +223,18 @@ struct SystemKeychain: KeychainStoring {
         // authority display name, the extension is a machine-readable signing
         // contract and distinguishes release identities from Apple Development.
         let developerIDApplicationOID = "1.2.840.113635.100.6.1.13" as CFString
-        return SecCertificateCopyValues(
+        guard let values = SecCertificateCopyValues(
             certificate,
             [developerIDApplicationOID] as CFArray,
             nil
-        ) != nil
+        ) as? [String: Any] else {
+            return false
+        }
+        return hasDeveloperIDApplicationExtension(in: values)
+    }
+
+    static func hasDeveloperIDApplicationExtension(in certificateValues: [String: Any]) -> Bool {
+        certificateValues["1.2.840.113635.100.6.1.13"] != nil
     }
 }
 

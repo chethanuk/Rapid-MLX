@@ -89,6 +89,17 @@ struct SettingsWebSearchKeyDraftTests {
         #expect(release != development)
     }
 
+    @Test("Certificate parsing succeeds only when Developer ID Application OID is present")
+    func developerIDExtensionMustBePresent() {
+        #expect(!SystemKeychain.hasDeveloperIDApplicationExtension(in: [:]))
+        #expect(!SystemKeychain.hasDeveloperIDApplicationExtension(in: [
+            "1.2.840.113635.100.6.1.12": ["label": "Apple Development"]
+        ]))
+        #expect(SystemKeychain.hasDeveloperIDApplicationExtension(in: [
+            "1.2.840.113635.100.6.1.13": ["label": "Developer ID Application"]
+        ]))
+    }
+
     @Test("Explicit save recovers from an inaccessible current-identity item")
     func inaccessibleCurrentSlotUsesRecoverySlot() {
         let account = "rapid.web-search.parallel"
