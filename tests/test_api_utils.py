@@ -996,14 +996,14 @@ class TestMllmBackboneIsHybrid:
         # requested short name is exposed separately as its alias.
         assert server._model_name == repo
         assert server._model_alias == alias
-        assert server._engine.kwargs["model_name"] == repo
+        assert server._engine.kwargs["model_name"] == str(snapshot)
         assert server._engine.kwargs["force_text"] is True
 
         # CLI startup arrives with the canonical repo plus a matching saved
         # alias. That same-source identity remains valid and keeps its profile.
         server.load_model(repo)
         assert server._model_alias == alias
-        assert server._engine.kwargs["model_name"] == repo
+        assert server._engine.kwargs["model_name"] == str(snapshot)
         assert server._engine.kwargs["force_text"] is True
 
         # A removed/corrupt prior identity is stale process state, not a reason
@@ -1022,7 +1022,7 @@ class TestMllmBackboneIsHybrid:
         server._model_alias = "removed-prior-alias"
         server.load_model(repo)
         assert server._model_alias is None
-        assert server._engine.kwargs["model_name"] == repo
+        assert server._engine.kwargs["model_name"] == str(snapshot)
         assert server._engine.kwargs["force_text"] is True
 
     def test_unreferenced_snapshot_resolution_fails_closed(self, monkeypatch, tmp_path):
