@@ -101,6 +101,15 @@ struct DownloadManagerTests {
         let mgr = DownloadManager(binaryPath: stale, binaryLocator: { fresh })
         let started = mgr.startDownload(alias: "fake-alias")
         #expect(started)
+        // Reap the spawned child on EVERY exit path — success, an assertion
+        // failure, or the throwing ``#require`` below. `defer` registered
+        // right after the download spawns guarantees the subprocess (and its
+        // pipes / queued termination handler) cannot outlive this test into
+        // parallel siblings. ``cancelDownload`` SIGTERMs the child and marks
+        // the job ``.cancelled`` SYNCHRONOUSLY, so ``isDownloading`` flips to
+        // false with no wall-clock wait, while the 2 s grace → SIGKILL check
+        // guarantees reaping.
+        defer { mgr.cancelDownload(alias: "fake-alias") }
 
         // The behavior under test is that ``startDownload`` re-resolves to the
         // fresh binary and invokes `pull fake-alias`. The DETERMINISTIC signal
@@ -133,17 +142,6 @@ struct DownloadManagerTests {
         let written = try #require(invocation, "invoked but the marker contents were not captured")
         #expect(written.contains(fresh.path))
         #expect(written.contains("pull fake-alias"))
-
-        // The marker proves invocation, but the spawned child may still be
-        // alive (its natural exit + ``terminationHandler`` is the load-starved
-        // hop we deliberately stopped waiting on). An orphaned subprocess that
-        // outlives this test can leak `rapid-mlx`, its pipes, or the queued
-        // termination handler into parallel siblings. So explicitly SIGTERM the
-        // child and reap it before returning: ``cancelDownload`` marks the job
-        // ``.cancelled`` SYNCHRONOUSLY, so ``isDownloading`` flips to false
-        // without any wall-clock wait, while the 2 s grace → SIGKILL check
-        // guarantees the child is reaped.
-        mgr.cancelDownload(alias: "fake-alias")
         #expect(!mgr.isDownloading("fake-alias"))
     }
 
