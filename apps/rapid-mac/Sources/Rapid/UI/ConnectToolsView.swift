@@ -308,7 +308,11 @@ struct ConnectToolsView: View {
                 composerStyle: true
             )
             ReadinessBanner(readiness: readiness, onAction: onReadinessAction)
-            Text("When the model is running, the key and model rows below fill in and the Copy buttons wake up.")
+            // The base-URL and (already-resolved) Model rows are real values
+            // and stay copyable while stopped; it is the API key row and the
+            // per-tool integration commands that are gated until the model
+            // serves. Say exactly that, not "the Copy buttons" broadly.
+            Text("When the model is running, the API key and integration commands below fill in and their Copy buttons wake up.")
                 .font(RapidFont.caption)
                 .foregroundStyle(.secondary)
         }
@@ -388,6 +392,14 @@ struct ConnectToolsView: View {
             VStack(spacing: 0) {
                 ForEach(Array(displayedTools.enumerated()), id: \.element.id) { index, tool in
                     if index > 0 { rowDivider }
+                    // The per-tool Copy/Launch is gated on ``configReady``,
+                    // which delegates to the pure ``configIsReady`` decision
+                    // that ``ConnectToolsConfigGateTests`` pins — so the unit
+                    // test of the gate is the test of this row's enabled state.
+                    // In the #2297 stopped state the model is not serving, so
+                    // ``isReady`` is false and every integration Copy button is
+                    // disabled; a future change that stops threading this gate
+                    // into the rows is a change to the tested decision itself.
                     ConnectToolRow(tool: tool, isReady: configReady)
                 }
             }

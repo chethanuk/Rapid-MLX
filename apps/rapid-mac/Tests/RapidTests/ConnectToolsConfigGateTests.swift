@@ -24,11 +24,22 @@ struct ConnectToolsConfigGateTests {
 
     /// The #2297 stopped state: the page supplies a readiness value and the
     /// model is NOT serving (`modelServing == false`). Even with every static
-    /// value present (real port, minted bearer, resolved model), the config
-    /// must NOT be copyable — otherwise a user could paste a command that
-    /// points at a placeholder. This is the regression guard for "Copy on a
-    /// placeholder".
-    @Test("Stopped state: picker + endpoint render but Copy stays disabled even when values fill in")
+    /// value present (real port, minted bearer, resolved model), the gate
+    /// under test must say NOT ready — otherwise a user could paste an
+    /// integration command or key that points at a placeholder. This is the
+    /// regression guard for "Copy on a placeholder".
+    ///
+    /// Scope (deliberately narrower than "every Copy button stays disabled"):
+    /// this pins the gate that disables the runtime-only Copy controls — the
+    /// API-key row (placeholder disables Copy) and every integration
+    /// command's ``Launch.Integration.Copy.*`` button, which ``toolsSection``
+    /// feeds ``configReady`` (== this boolean) into ``ConnectToolRow.isReady``
+    /// → ``.disabled(!isReady)``. The base-URL and already-resolved Model rows
+    /// are real values and correctly stay copyable while stopped; this test
+    /// does not claim otherwise. The rendering-level "integration rows
+    /// present-but-disabled while stopped" is asserted by the
+    /// ``launch-integrations`` AX golden + native journey.
+    @Test("Stopped state: gate NOT ready, so API-key and integration Copy stay disabled even when values fill in")
     func stoppedStateNeverCopyable() {
         #expect(!ConnectToolsView.configIsReady(
             hasPort: true,
