@@ -159,6 +159,7 @@ class ResidencyRecord:
 
 Loader = Callable[..., Awaitable[ModelEntry]]
 PrimaryChanged = Callable[[ModelEntry], None]
+PrimaryHandoff = Callable[[ModelEntry], None]
 
 
 def _modality(entry: ModelEntry) -> str:
@@ -315,6 +316,7 @@ class ResidentModelManager:
         idle_ttl_seconds: float = 0,
         clock: Callable[[], float] = time.monotonic,
         memory_reader: Callable[[], int] = get_phys_footprint,
+        on_primary_handoff: PrimaryHandoff | None = None,
         on_primary_changed: PrimaryChanged | None = None,
     ) -> None:
         self.registry = registry
@@ -323,6 +325,7 @@ class ResidentModelManager:
         self.idle_ttl_seconds = max(0.0, float(idle_ttl_seconds))
         self._clock = clock
         self._memory_reader = memory_reader
+        self._on_primary_handoff = on_primary_handoff
         self._on_primary_changed = on_primary_changed
         self._records: dict[str, ResidencyRecord] = {}
         self._index: dict[str, str] = {}
@@ -664,6 +667,13 @@ class ResidentModelManager:
 
         old_primary = next((record for record in candidates if record.primary), None)
         if old_primary is not None:
+            # The hook owns the serving-layer handoff and may reject it
+            # while auxiliary work still leases the old primary worker. Run
+            # it before mutating residency/registry truth so a rejected
+            # handoff leaves the old primary intact and the caller can roll
+            # back the newly loaded target safely.
+            if self._on_primary_handoff is not None:
+                self._on_primary_handoff(target.entry)
             old_primary.primary = False
             old_primary.pinned = False
             target.primary = True

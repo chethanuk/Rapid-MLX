@@ -126,7 +126,11 @@ from .engine import (
     BatchedEngine,
 )
 from .runtime.model_registry import ModelEntry, ModelRegistry
-from .runtime.resident_models import ResidentModelManager, estimate_model_bytes
+from .runtime.resident_models import (
+    ResidentModelBusyError,
+    ResidentModelManager,
+    estimate_model_bytes,
+)
 from .service.helpers import (  # noqa: F401 — re-export for backward compat
     _FALLBACK_TEMPERATURE,
     _FALLBACK_TOP_P,
@@ -2328,10 +2332,28 @@ def configure_model_residency(
         _load_dynamic_resident_model,
         memory_limit_bytes=_resident_memory_limit_bytes,
         idle_ttl_seconds=_resident_idle_ttl_seconds,
+        on_primary_handoff=_handoff_resident_primary_audio_worker,
         on_primary_changed=_set_resident_primary,
     )
     get_config().residency_manager = _residency_manager
     return _residency_manager
+
+
+def _handoff_resident_primary_audio_worker(entry: ModelEntry) -> None:
+    """Atomically transfer audio ownership before primary replacement."""
+
+    # Transfer auxiliary MLX ownership before publishing the new primary.
+    # ``bind`` is the audio lifecycle's atomic handoff gate: it refuses to
+    # detach an old worker with active work, allowing residency to roll back
+    # the replacement without changing primary or registry truth.
+    from .runtime.audio_worker import AudioWorkerBusyError
+
+    try:
+        _bind_audio_worker_for_engine(entry.engine)
+    except AudioWorkerBusyError as exc:
+        raise ResidentModelBusyError(
+            "primary model is serving active audio work"
+        ) from exc
 
 
 def _set_resident_primary(entry: ModelEntry) -> None:

@@ -25,6 +25,10 @@ class ModelWorker(Protocol):
     ) -> _T: ...
 
 
+class AudioWorkerBusyError(RuntimeError):
+    """The owning model worker cannot change while audio work is active."""
+
+
 @dataclass
 class AudioLaneState:
     model: str | None = None
@@ -52,6 +56,12 @@ class AudioWorkerDispatcher:
             raise TypeError("engine does not expose the model-worker contract")
         fallback = None
         with self._lock:
+            if worker is not self._worker and any(
+                state.active_requests > 0 for state in self._lanes.values()
+            ):
+                raise AudioWorkerBusyError(
+                    "cannot replace the model worker while audio work is active"
+                )
             self._worker = worker
             fallback = self._fallback
             self._fallback = None
