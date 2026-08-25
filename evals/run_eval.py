@@ -1020,12 +1020,16 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
 
             # Optional final-text check (opt-in; NOT inherited from the
             # un-enforced legacy `expect_final_text` flag). After the tool result
-            # is fed back, run one more non-streaming completion and require
-            # non-empty final content, so a schema-contract case also proves the
-            # model reports the tool result rather than closing with a
-            # contradictory or empty turn. Applied only to scenarios that set
-            # `verify_final_text`, leaving every other scenario's behavior
-            # unchanged.
+            # is fed back, run one more non-streaming completion and require that
+            # the final turn is non-empty AND does not deny the tool it just used
+            # (issue #2222's exact failure: calling weather then claiming "Weather
+            # tool is unavailable; use web search"). Scenarios may additionally
+            # require the reply to reflect a term drawn from the supplied tool
+            # result (`require_final_terms`, any-match) to prove it reported the
+            # result rather than a canned refusal. Applied only to scenarios that
+            # set `verify_final_text`, leaving every other scenario's behavior
+            # unchanged. Matches are simple `in` substring checks against
+            # scenario-declared phrases — never regex over arbitrary model text.
             if sc.get("verify_final_text"):
                 final_resp = chat_request(
                     host, port, messages, tools=_resolve_tools(sc),
@@ -1034,13 +1038,33 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 final_msg = final_resp["choices"][0]["message"]
                 final_text = (final_msg.get("content") or "").strip()
                 final_ok = bool(final_text)
+                reasons = []
+                if not final_ok:
+                    reasons.append("empty final content after tool result")
+                forbidden = [
+                    p for p in sc.get("forbid_final_phrases", [])
+                    if p.lower() in final_text.lower()
+                ]
+                if forbidden:
+                    final_ok = False
+                    reasons.append(
+                        "final text denies a just-used tool: " + ", ".join(forbidden)
+                    )
+                required = sc.get("require_final_terms", [])
+                if required and not any(
+                    t.lower() in final_text.lower() for t in required
+                ):
+                    final_ok = False
+                    reasons.append(
+                        "final text does not reflect the supplied tool result "
+                        f"(none of {required})"
+                    )
                 steps_passed.append(final_ok)
                 if final_ok:
                     result["final_text"] = final_text[:200]
                 else:
-                    result["final_text_error"] = (
-                        "empty final content after tool result"
-                    )
+                    result["final_text_error"] = "; ".join(reasons)
+                    result["final_text"] = final_text[:200]
 
             fully_correct = all(steps_passed)
             result["fully_correct"] = fully_correct

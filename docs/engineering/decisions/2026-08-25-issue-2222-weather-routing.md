@@ -109,10 +109,13 @@ The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in
   WebSearchTool, including the "do not use web_search for current weather" guard) so it
   models the real Desktop two-schema contract, not a synthetic setup.
 - `verify_final_text` (opt-in) runs one more non-streaming completion after the tool
-  result and requires non-empty final content; tc31 sets it. Verified end-to-end:
-  the first call routes to **`weather`**, and after feeding the weather result the final
-  completion yields a clean, non-contradictory narrative report (no "web_search
-  unavailable" claim).
+  result and checks it is non-empty, does not deny the just-used tool (`forbid_final_phrases`),
+  and reflects the supplied result (`require_final_terms`, any-match); tc31 sets all
+  three. Verified end-to-end: the first call routes to **`weather`**, and after feeding
+  the weather result the final completion yields a clean, non-contradictory report that
+  reflects the result ("Partly cloudy" / "18°C" / "62%") with no "web_search
+  unavailable" claim. A reply that claims the weather tool is unavailable or suggests
+  web search fails the check.
 - `_resolve_tools` now supports name refs OR inline schema dicts and **fails fast** on an
   unknown tool name / malformed entry (rather than silently dropping, which could let a
   routing case pass by omitting web_search). Scenarios without `tools` keep the shared
