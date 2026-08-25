@@ -47,7 +47,11 @@ def test_resident_performance_maps_to_the_scheduler_contract():
     ],
 )
 async def test_dynamic_resident_auto_detected_hybrid_gets_bounded_prefix_reuse(
-    monkeypatch, scheduler_config_stub, model_name, model_path
+    monkeypatch,
+    scheduler_config_stub,
+    residency_activity_contract,
+    model_name,
+    model_path,
 ):
     """Runtime residency must consume the same architecture truth as serve."""
     from vllm_mlx import server
@@ -226,6 +230,37 @@ def manager_fixture(*, limit_gib=10, ttl=0):
     )
     manager.register_primary(primary, estimated_bytes=4 * GIB)
     return manager, registry, loaded, clock
+
+
+@pytest.fixture
+def residency_activity_contract():
+    """Exercise the activity SSOT from the MLX-free Linux fixed selector."""
+    from vllm_mlx.runtime.resident_models import _engine_active_requests
+
+    class ProgressEngine:
+        def progress_snapshot(self):
+            return {"running": True}
+
+    assert _engine_active_requests(ProgressEngine()) == 1
+
+    class BrokenProgressEngine:
+        def progress_snapshot(self):
+            raise RuntimeError("progress unavailable")
+
+    assert _engine_active_requests(BrokenProgressEngine()) is None
+
+    class BrokenStatsEngine:
+        def get_stats(self):
+            raise RuntimeError("stats unavailable")
+
+    assert _engine_active_requests(BrokenStatsEngine()) is None
+
+    manager, registry, _, _ = manager_fixture(limit_gib=12)
+    primary = registry.get_engine("chat")
+    primary.running = 1
+    primary.waiting = 1
+    chat = next(item for item in manager.snapshot()["models"] if item["id"] == "chat")
+    assert chat["active_requests"] == 2
 
 
 @pytest.mark.asyncio
