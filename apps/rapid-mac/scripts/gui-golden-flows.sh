@@ -4106,12 +4106,25 @@ flow_image_generation() {
         || die "the deterministic unchanged-step fixture advanced unexpectedly ($eta_step_a -> $eta_step_b)"
     [[ "$eta_value_b" == "$eta_value_a" ]] \
         || die "ETA changed while completed progress stayed at $eta_step_a ($eta_value_a -> $eta_value_b)"
-    : > "$OUT/ig-eta-hold-ack"
-
-    press "$OUT/ig-eta-sample-b.json" Images.Cancel "$OUT/ig-eta-cancel-press.json" \
-        || die "Images.Cancel is not pressable after numeric ETA appears"
+    press "$OUT/ig-eta-sample-b.json" Images.Generate "$OUT/ig-eta-cancel-press.json" \
+        || die "the primary Stop control is not pressable after numeric ETA appears"
+    local cancel_requested=0
+    for ((i=0; i<40; i++)); do
+        see_main "$OUT/ig-eta-cancel-requested.json"
+        if jq -e 'any(.data.ui_elements[]?;
+                      .identifier == "Images.Generate" and .enabled == false)
+                  and any(.data.ui_elements[]?;
+                          .identifier == "Images.Cancel" and .enabled == false)' \
+               "$OUT/ig-eta-cancel-requested.json" >/dev/null; then
+            cancel_requested=1; break
+        fi
+        sleep 0.05
+    done
+    [[ "$cancel_requested" == 1 ]] \
+        || die "the primary Stop control did not enter the cancelling state"
     wait_fake_event '.event == "image_cancel"' \
         "the ETA-bearing render did not receive cancellation"
+    : > "$OUT/ig-eta-hold-ack"
     local eta_cleared=0
     for ((i=0; i<120; i++)); do
         see_main "$OUT/ig-eta-cancelled.json"

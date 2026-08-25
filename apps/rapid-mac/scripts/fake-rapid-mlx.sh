@@ -45,6 +45,7 @@ import time
 import wave
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 
 if sys.argv[1:] == ["launch", "list", "--json"]:
@@ -765,7 +766,11 @@ class Handler(BaseHTTPRequestHandler):
         # Real image engines still perform VAE decode / PNG encoding after the
         # last denoise step. Keep that tail observable for GUI phase coverage.
         finish_ms = max(0, int(_setting("FAKE_IMAGE_FINISH_MS", 0)))
-        time.sleep(finish_ms / 1000)
+        # Cancellation exits denoising without entering the successful
+        # decode/encode tail. Keeping that tail after RENDERS.cancel() would
+        # make the fixture report a stopped render as if it were finalizing.
+        if not cancelled:
+            time.sleep(finish_ms / 1000)
         RENDERS.end()
         png = _one_pixel_png(((index * 70) % 256, (index * 130) % 256, (index * 190) % 256))
         encoded = base64.b64encode(png).decode("ascii")
@@ -786,18 +791,19 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
-        if self.path == "/v1/models/load":
+        path = urlsplit(self.path).path
+        if path == "/v1/models/load":
             self._models_load()
             return
-        if self.path == "/v1/images/generations":
+        if path == "/v1/images/generations":
             self._images_generate()
             return
-        if self.path == "/v1/images/cancel":
+        if path == "/v1/images/cancel":
             RENDERS.cancel()
             _event("image_cancel")
             self._json(200, {"cancelled": True})
             return
-        if self.path == "/v1/images/edits":
+        if path == "/v1/images/edits":
             self._images_generate(editing=True)
             return
         if self.path == "/v1/audio/speech":
