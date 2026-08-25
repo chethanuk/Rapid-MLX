@@ -223,30 +223,34 @@ struct SystemKeychain: KeychainStoring {
             return SigningIdentity(teamIdentifier: nil, isDeveloperIDApplication: false)
         }
         let team = info[kSecCodeInfoTeamIdentifier as String] as? String
-        let certificate = (info[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
         return SigningIdentity(
             teamIdentifier: team,
-            isDeveloperIDApplication: certificate.map { isDeveloperIDApplication($0) } ?? false
+            isDeveloperIDApplication: isDeveloperIDApplication(code)
         )
     }
 
-    private static func isDeveloperIDApplication(_ certificate: SecCertificate) -> Bool {
-        // Apple's Developer ID Application certificate extension. Unlike an
-        // authority display name, the extension is a machine-readable signing
-        // contract and distinguishes release identities from Apple Development.
-        let developerIDApplicationOID = "1.2.840.113635.100.6.1.13" as CFString
-        guard let values = SecCertificateCopyValues(
-            certificate,
-            [developerIDApplicationOID] as CFArray,
-            nil
-        ) as? [String: Any] else {
-            return false
+    private static let developerIDApplicationRequirement =
+        "anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+
+    private static func developerIDApplicationCodeRequirement() -> SecRequirement? {
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(
+            developerIDApplicationRequirement as CFString,
+            [],
+            &requirement
+        ) == errSecSuccess else {
+            return nil
         }
-        return hasDeveloperIDApplicationExtension(in: values)
+        return requirement
     }
 
-    static func hasDeveloperIDApplicationExtension(in certificateValues: [String: Any]) -> Bool {
-        certificateValues["1.2.840.113635.100.6.1.13"] != nil
+    private static func isDeveloperIDApplication(_ code: SecStaticCode) -> Bool {
+        guard let requirement = developerIDApplicationCodeRequirement() else { return false }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    static func developerIDApplicationRequirementCompiles() -> Bool {
+        developerIDApplicationCodeRequirement() != nil
     }
 }
 
