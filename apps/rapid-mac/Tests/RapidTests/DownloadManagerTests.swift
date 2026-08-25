@@ -133,6 +133,18 @@ struct DownloadManagerTests {
         let written = try #require(invocation, "invoked but the marker contents were not captured")
         #expect(written.contains(fresh.path))
         #expect(written.contains("pull fake-alias"))
+
+        // The marker proves invocation, but the spawned child may still be
+        // alive (its natural exit + ``terminationHandler`` is the load-starved
+        // hop we deliberately stopped waiting on). An orphaned subprocess that
+        // outlives this test can leak `rapid-mlx`, its pipes, or the queued
+        // termination handler into parallel siblings. So explicitly SIGTERM the
+        // child and reap it before returning: ``cancelDownload`` marks the job
+        // ``.cancelled`` SYNCHRONOUSLY, so ``isDownloading`` flips to false
+        // without any wall-clock wait, while the 2 s grace → SIGKILL check
+        // guarantees the child is reaped.
+        mgr.cancelDownload(alias: "fake-alias")
+        #expect(!mgr.isDownloading("fake-alias"))
     }
 
     @Test("Seeded running job → completed exit transitions cleanly")
