@@ -53,6 +53,7 @@ class _ReplacementWorker:
         self.worker_active = False
         self.stopped_during_audio = False
         self.async_calls = 0
+        self.stop_calls = 0
 
     def get_stats(self):
         return {"num_running": 0, "num_waiting": 0}
@@ -73,6 +74,7 @@ class _ReplacementWorker:
         return func(*args, **kwargs)
 
     async def stop(self) -> None:
+        self.stop_calls += 1
         self.stopped_during_audio = self.worker_active
         if self.fail_stop:
             raise RuntimeError("old stop failed")
@@ -182,6 +184,58 @@ def test_audio_worker_handoff_gates_requests_and_supports_rollback():
     handoff.commit(new_worker)
     assert dispatcher.execute_sync("stt", "whisper", "infer", lambda: "new") == ("new")
     assert len(new_worker.sync_calls) == 1
+
+
+def test_audio_worker_handoff_defensive_contracts():
+    from vllm_mlx.runtime.audio_worker import AudioWorkerBusyError
+
+    dispatcher = AudioWorkerDispatcher()
+    assert dispatcher.execute_sync("stt", "whisper", "infer", lambda: "fallback") == (
+        "fallback"
+    )
+    assert dispatcher._fallback is not None
+
+    handoff = dispatcher.begin_handoff()
+    with pytest.raises(AudioWorkerBusyError, match="handoff is in progress"):
+        dispatcher.bind(_RecordingWorker())
+    with pytest.raises(AudioWorkerBusyError, match="handoff is in progress"):
+        dispatcher.begin_handoff()
+    with pytest.raises(RuntimeError, match="lease is not active"):
+        dispatcher._finish_handoff(object(), None)
+
+    handoff.commit(_RecordingWorker())
+    assert dispatcher._fallback is None
+    handoff.rollback()
+    with pytest.raises(RuntimeError, match="already complete"):
+        handoff.commit(None)
+
+
+@pytest.mark.asyncio
+async def test_bind_rejects_worker_change_during_active_audio():
+    from vllm_mlx.runtime.audio_worker import AudioWorkerBusyError
+
+    dispatcher = AudioWorkerDispatcher()
+    old_worker = _ReplacementWorker("chat-old")
+    started = threading.Event()
+    release = threading.Event()
+
+    def active_audio() -> str:
+        started.set()
+        assert release.wait(timeout=5)
+        return "done"
+
+    dispatcher.bind(old_worker)
+    task = asyncio.create_task(
+        dispatcher.execute("stt", "whisper", "infer", active_audio)
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        with pytest.raises(AudioWorkerBusyError, match="audio work is active"):
+            dispatcher.bind(_ReplacementWorker("chat-new"))
+    finally:
+        release.set()
+        assert await task == "done"
+        dispatcher.bind(None)
 
 
 def test_server_selects_isolated_fallback_for_non_batched_engine():
@@ -899,6 +953,166 @@ async def test_primary_reload_restores_old_config_after_publication_failure(
         )
         assert rejected.async_calls == 0
         assert restored.async_calls == 1
+    finally:
+        bind_audio_worker(None)
+
+
+@pytest.mark.asyncio
+async def test_primary_reload_rolls_back_handoff_when_old_stop_fails(monkeypatch):
+    import vllm_mlx.server as server
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker, run_audio_mlx
+    from vllm_mlx.runtime.resident_models import ResidentPerformanceConfig
+
+    old_worker = _ReplacementWorker("chat-old", fail_stop=True)
+    _configure_server_primary(monkeypatch, server, old_worker)
+    manager, registry, loaded = _replacement_manager(server, old_worker)
+    bind_audio_worker(old_worker)
+    try:
+        with pytest.raises(RuntimeError, match="old stop failed"):
+            await manager.load(
+                "chat-old",
+                performance=ResidentPerformanceConfig(prefix_cache_enabled=True),
+                reload_if_changed=True,
+            )
+
+        assert old_worker.stop_calls == 1
+        assert old_worker.stopped is False
+        assert loaded == {}
+        assert registry.default_name == "chat-old"
+        assert registry.get_entry("chat-old").engine is old_worker
+        assert server._engine is old_worker
+        assert await run_audio_mlx("stt", "whisper", "infer", lambda: "after") == (
+            "after"
+        )
+    finally:
+        bind_audio_worker(None)
+
+
+@pytest.mark.asyncio
+async def test_primary_reload_restores_old_config_when_new_load_fails(monkeypatch):
+    import vllm_mlx.server as server
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker, run_audio_mlx
+    from vllm_mlx.runtime.model_registry import ModelEntry, ModelRegistry
+    from vllm_mlx.runtime.resident_models import (
+        ResidentModelManager,
+        ResidentPerformanceConfig,
+    )
+
+    old_worker = _ReplacementWorker("chat-old")
+    _configure_server_primary(monkeypatch, server, old_worker)
+    registry = ModelRegistry()
+    primary = ModelEntry(
+        engine=old_worker,
+        model_name="chat-old",
+        model_path="repo/chat-old",
+    )
+    registry.add(primary, is_default=True)
+    restored_workers: list[_ReplacementWorker] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        if performance is not None:
+            raise RuntimeError("new config failed")
+        restored = _ReplacementWorker("chat-old-restored")
+        restored_workers.append(restored)
+        return ModelEntry(
+            engine=restored,
+            model_name=name,
+            model_path=path or f"repo/{name}",
+        )
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_handoff=server._handoff_resident_primary_audio_worker,
+        on_primary_changed=server._set_resident_primary,
+    )
+    manager.register_primary(primary, estimated_bytes=1)
+    bind_audio_worker(old_worker)
+    try:
+        with pytest.raises(RuntimeError, match="new config failed"):
+            await manager.load(
+                "chat-old",
+                performance=ResidentPerformanceConfig(prefix_cache_enabled=True),
+                reload_if_changed=True,
+            )
+
+        restored = restored_workers[0]
+        assert old_worker.stopped is True
+        assert registry.get_entry("chat-old").engine is restored
+        assert server._engine is restored
+        assert await run_audio_mlx("stt", "whisper", "infer", lambda: "after") == (
+            "after"
+        )
+        assert restored.async_calls == 1
+    finally:
+        bind_audio_worker(None)
+
+
+@pytest.mark.asyncio
+async def test_primary_reload_releases_handoff_when_cleanup_and_restore_fail(
+    monkeypatch, caplog
+):
+    import vllm_mlx.server as server
+    from vllm_mlx.runtime.audio_worker import bind_audio_worker, run_audio_mlx
+    from vllm_mlx.runtime.model_registry import ModelEntry, ModelRegistry
+    from vllm_mlx.runtime.resident_models import (
+        ResidentModelManager,
+        ResidentPerformanceConfig,
+    )
+
+    old_worker = _ReplacementWorker("chat-old")
+    _configure_server_primary(monkeypatch, server, old_worker)
+    registry = ModelRegistry()
+    primary = ModelEntry(
+        engine=old_worker,
+        model_name="chat-old",
+        model_path="repo/chat-old",
+    )
+    registry.add(primary, is_default=True)
+    rejected_workers: list[_ReplacementWorker] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        if rejected_workers:
+            raise RuntimeError("restore failed")
+        rejected = _ReplacementWorker("chat-old-rejected", fail_stop=True)
+        rejected_workers.append(rejected)
+        return ModelEntry(
+            engine=rejected,
+            model_name=name,
+            model_path=path or f"repo/{name}",
+        )
+
+    def reject_publication(entry: ModelEntry) -> None:
+        server._set_resident_primary(entry)
+        raise RuntimeError("primary publication failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_handoff=server._handoff_resident_primary_audio_worker,
+        on_primary_changed=reject_publication,
+    )
+    manager.register_primary(primary, estimated_bytes=1)
+    bind_audio_worker(old_worker)
+    try:
+        with pytest.raises(RuntimeError, match="primary publication failed"):
+            await manager.load(
+                "chat-old",
+                performance=ResidentPerformanceConfig(prefix_cache_enabled=True),
+                reload_if_changed=True,
+            )
+
+        rejected = rejected_workers[0]
+        assert rejected.stop_calls == 1
+        assert rejected.stopped is False
+        assert registry.list_entries() == []
+        assert "Failed to stop rejected resident model" in caplog.text
+        assert "Failed to restore resident model" in caplog.text
+        assert await run_audio_mlx("stt", "whisper", "infer", lambda: "fallback") == (
+            "fallback"
+        )
     finally:
         bind_audio_worker(None)
 
