@@ -303,13 +303,20 @@ struct LaunchOnboardingOrderingTests {
     /// single re-run of the launch hook, not a permanent suppression.
     @Test("Answering consent releases the deferred auto-start")
     func consentAnsweredReleasesAutoStart() {
-        let decision = launchDecision(
+        let deferred = launchDecision(
+            lastServedAlias: "qwen3.5-4b-4bit",
+            cachedAliases: ["qwen3.5-4b-4bit"],
+            done: true,
+            consentPending: true
+        )
+        let released = launchDecision(
             lastServedAlias: "qwen3.5-4b-4bit",
             cachedAliases: ["qwen3.5-4b-4bit"],
             done: true,
             consentPending: false
         )
-        #expect(decision == .start(alias: "qwen3.5-4b-4bit"))
+        #expect(deferred == .skip(reason: .firstRunDecisionPending))
+        #expect(released == .start(alias: "qwen3.5-4b-4bit"))
     }
 
     // MARK: - Precedence ladder
