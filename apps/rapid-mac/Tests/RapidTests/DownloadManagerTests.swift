@@ -112,14 +112,27 @@ struct DownloadManagerTests {
         // parallel suite can exceed any wall-clock bound and flake without the
         // re-resolve contract being wrong (#2237). The real process → ``.completed``
         // lifecycle is covered deterministically in DownloadManagerIntegrationTests.
+        //
+        // Poll on the marker's COMPLETE contents, not merely its existence:
+        // the fake script's `>` truncates/creates the file before the payload
+        // is written, so `fileExists` alone can race a partial read. Reading
+        // the contents each poll and waiting until both tokens are present is
+        // the write barrier — once both appear the line is fully on disk, and
+        // asserting that same captured content avoids a second racy read.
+        var invocation: String? = nil
         let invoked = await waitUntil(deadline: Date().addingTimeInterval(10)) {
-            FileManager.default.fileExists(atPath: marker.path)
+            guard let data = try? Data(contentsOf: marker),
+                  let text = String(data: data, encoding: .utf8) else { return false }
+            if text.contains(fresh.path), text.contains("pull fake-alias") {
+                invocation = text
+                return true
+            }
+            return false
         }
         #expect(invoked, "the fresh binary was never invoked — startDownload did not re-resolve and run `pull fake-alias`")
-
-        let invocation = try String(contentsOf: marker, encoding: .utf8)
-        #expect(invocation.contains(fresh.path))
-        #expect(invocation.contains("pull fake-alias"))
+        let written = try #require(invocation, "invoked but the marker contents were not captured")
+        #expect(written.contains(fresh.path))
+        #expect(written.contains("pull fake-alias"))
     }
 
     @Test("Seeded running job → completed exit transitions cleanly")
