@@ -102,13 +102,20 @@ struct DownloadManagerTests {
         let started = mgr.startDownload(alias: "fake-alias")
         #expect(started)
 
-        let done = await waitUntil(deadline: Date().addingTimeInterval(5)) {
-            guard let job = mgr.job(for: "fake-alias") else { return false }
-            if case .running = job.status { return false }
-            return true
+        // The behavior under test is that ``startDownload`` re-resolves to the
+        // fresh binary and invokes `pull fake-alias`. The DETERMINISTIC signal
+        // for that is the marker file the fake binary writes as its first act:
+        // it only exists if the fresh ``binaryLocator`` result actually ran.
+        // Do NOT gate on the job reaching ``.completed``: that requires the
+        // subprocess to exit AND the load-starved ``@MainActor``
+        // ``terminationHandler`` hop to run, which under the 28-worker full
+        // parallel suite can exceed any wall-clock bound and flake without the
+        // re-resolve contract being wrong (#2237). The real process → ``.completed``
+        // lifecycle is covered deterministically in DownloadManagerIntegrationTests.
+        let invoked = await waitUntil(deadline: Date().addingTimeInterval(10)) {
+            FileManager.default.fileExists(atPath: marker.path)
         }
-        #expect(done)
-        #expect(mgr.job(for: "fake-alias")?.status == .completed)
+        #expect(invoked, "the fresh binary was never invoked — startDownload did not re-resolve and run `pull fake-alias`")
 
         let invocation = try String(contentsOf: marker, encoding: .utf8)
         #expect(invocation.contains(fresh.path))
