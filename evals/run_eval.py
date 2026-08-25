@@ -328,12 +328,19 @@ def _resolve_tools(scenario: dict) -> list:
     ``_TOOL_REGISTRY``) or a list of full tool schema dicts (used verbatim). An
     unknown tool NAME fails fast with a clear error rather than silently dropping it —
     silently weakening the advertised set is exactly the bug that would let a
-    weather-routing case pass by omitting web_search. A scenario without ``tools``
-    uses the shared ``TOOLS`` list (existing behavior unchanged).
+    weather-routing case pass by omitting web_search. A MALFORMED ``tools`` value
+    (a non-list, an empty list, or a bad entry) also fails fast instead of silently
+    broadening to the global set. Only the ABSENCE of ``tools`` (None) defaults to the
+    shared ``TOOLS`` list (existing behavior unchanged).
     """
+    if "tools" not in scenario or scenario.get("tools") is None:
+        return TOOLS
     spec = scenario.get("tools")
     if not isinstance(spec, list) or not spec:
-        return TOOLS
+        raise ValueError(
+            f"scenario {scenario.get('id', '<unknown>')} has a malformed tools value "
+            f"{spec!r} (expected a non-empty list of tool name strings or schema dicts)"
+        )
     resolved = []
     for entry in spec:
         if isinstance(entry, str):
@@ -769,7 +776,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Irrelevance / Missing Params: expect NO tool call ──
             if sc_type in ("irrelevance", "missing_params"):
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=TOOLS, max_tokens=512, temperature=0.0
+                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
                 )
                 no_tool = not tool_calls
                 has_content = bool(content and content.strip())
@@ -797,7 +804,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Parallel: expect multiple tool calls in one response ──
             if sc_type == "parallel":
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=TOOLS, max_tokens=512, temperature=0.0
+                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
                 )
                 grade = _check_parallel_calls(tool_calls, sc)
                 ok = (
@@ -821,7 +828,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # ── Error Recovery: feed error result, check model adapts ──
             if sc_type == "error_recovery":
                 content, tool_calls, ttft, elapsed = stream_chat(
-                    host, port, messages, tools=TOOLS, max_tokens=512, temperature=0.0
+                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
                 )
                 grade = _check_tool_call(tool_calls, sc)
                 first_ok = grade["tool_detected"] and grade["correct_name"]
@@ -896,9 +903,25 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 continue
 
             # ── Standard / Sequential: existing logic ──
-            content, tool_calls, ttft, elapsed = stream_chat(
-                host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
-            )
+            # Default sends the first call through stream_chat (SSE) to match
+            # every legacy scenario. A scenario may set `first_call_stream: false`
+            # to use the non-streaming completion instead, so the tool call is
+            # captured as structured `tool_calls` for models that emit the call as
+            # streamed content text (issue #2222 weather-routing case) — otherwise
+            # the tool result would never be fed back and the check would no-op.
+            if sc.get("first_call_stream", True):
+                content, tool_calls, ttft, elapsed = stream_chat(
+                    host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
+                )
+            else:
+                nonstream = chat_request(
+                    host, port, messages, tools=_resolve_tools(sc),
+                    max_tokens=512, temperature=0.0, stream=False,
+                )
+                first_msg = nonstream["choices"][0]["message"]
+                content = first_msg.get("content") or ""
+                tool_calls = first_msg.get("tool_calls") or []
+                ttft = elapsed = 0.0
 
             grade = _check_tool_call(tool_calls, sc)
             first_ok = (

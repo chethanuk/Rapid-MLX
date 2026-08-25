@@ -116,12 +116,20 @@ The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in
   reflects the result ("Partly cloudy" / "18°C" / "62%") with no "web_search
   unavailable" claim. A reply that claims the weather tool is unavailable or suggests
   web search fails the check.
-- `_resolve_tools` now supports name refs OR inline schema dicts and **fails fast** on an
-  unknown tool name / malformed entry (rather than silently dropping, which could let a
-  routing case pass by omitting web_search). Scenarios without `tools` keep the shared
-  `TOOLS` list unchanged.
+- `_resolve_tools` now supports name refs OR inline schema dicts and **fails fast** on
+  an unknown tool name, a non-empty-but-malformed `tools` value (`[]`, a dict, a
+  scalar), or a malformed entry — rather than silently dropping or broadening to the
+  global set, either of which could let a routing case pass while omitting web_search.
+  Only the absence of `tools` keeps the shared `TOOLS` list unchanged. Per-scenario
+  tools are applied consistently across the standard, parallel, irrelevance /
+  missing-params, and error-recovery branches (default is still the shared list).
+- tc31 sets `first_call_stream: false`, so its first tool-detection uses the
+  non-streaming completion and captures the structured `weather` call (this model
+  family emits the call as streamed text under SSE). That ensures the tool result is
+  fed back and the `verify_final_text` check actually runs through the real suite path.
 - Unit checks: JSON valid; `run_eval.py` parses; resolver resolves `[weather,
-  web_search]`, keeps default behavior, raises on `weather`+`web_seach` typo.
+  web_search]`, keeps default behavior, raises on `weather`+`web_seach` and on `[]` /
+  dict / scalar `tools`.
 - Caveat: the eval suite's `stream_chat` auto-grades only structured
   `delta.tool_calls` in SSE. This model family emits the tool call as streamed content
   text, so the streaming auto-grade reports "no tool call" for every tool-detection
