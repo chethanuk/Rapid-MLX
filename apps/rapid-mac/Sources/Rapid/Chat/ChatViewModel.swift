@@ -2293,6 +2293,24 @@ final class ChatViewModel {
         return result
     }
 
+    /// Read-only preview of the Desktop-authored system prompt shared by
+    /// Settings and the per-conversation editor. It deliberately uses the
+    /// same assembly function as the wire path so displayed precedence and
+    /// automatic context cannot drift from what Rapid sends.
+    nonisolated static func effectiveSystemPrompt(
+        dateContext: String? = nil,
+        global: String,
+        conversation: String
+    ) -> String {
+        addingInstructionLayers(
+            to: [],
+            ambientPreamble: nil,
+            dateContext: dateContext ?? currentDateTimeContext(),
+            global: global,
+            conversation: conversation
+        ).first?.content ?? ""
+    }
+
     /// Request-time current-date context for the leading system row, so a small
     /// model does not guess "today" from training memory (issue #2330, where
     /// `qwen3.5-4b-4bit` answered "Friday, May 24, 2024" and then insisted it

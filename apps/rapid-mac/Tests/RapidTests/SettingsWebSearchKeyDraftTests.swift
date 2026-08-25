@@ -1,9 +1,74 @@
+import Foundation
 import Testing
 @testable import Rapid
+
+private final class SettingsKeychainProbe: KeychainStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    var result: KeychainReadResult = .missing
+
+    var readCount: Int { lock.withLock { reads } }
+
+    func read(account: String) -> String? { nil }
+    func readWithoutUserInteraction(account: String) -> KeychainReadResult {
+        lock.withLock { reads += 1 }
+        return result
+    }
+    func write(account: String, secret: String) -> Bool { true }
+    func delete(account: String) -> Bool { true }
+}
 
 @MainActor
 @Suite("Settings web-search key draft commit")
 struct SettingsWebSearchKeyDraftTests {
+    private static var packageRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    @Test("Constructing the Tools configuration never reads Keychain")
+    func constructionIsKeychainLazy() {
+        let keychain = SettingsKeychainProbe()
+        _ = WebSearchConfig(defaults: .standard, keychain: keychain)
+        #expect(keychain.readCount == 0)
+    }
+
+    @Test("An explicit lazy probe preserves the denied state for inline recovery")
+    func deniedProbeBecomesInlineState() async {
+        let keychain = SettingsKeychainProbe()
+        keychain.result = .unavailable
+        let config = WebSearchConfig(defaults: .standard, keychain: keychain)
+
+        #expect(config.cachedKeyState(for: .parallel) == .unknown)
+        await config.prefetchAPIKey(for: .parallel)
+
+        #expect(keychain.readCount == 1)
+        #expect(config.cachedKeyState(for: .parallel) == .unavailable)
+        #expect(config.apiKey(for: .parallel) == nil)
+        #expect(keychain.readCount == 1, "the denied result is cached instead of repeatedly consulting Security.framework")
+    }
+
+    @Test("Tools page has no appearance-time Keychain read and wires only user-driven probes")
+    func toolsPageUsesLazyReadTriggers() throws {
+        let panel = try String(
+            contentsOf: Self.packageRoot.appendingPathComponent("Sources/Rapid/UI/SettingsToolsPanel.swift"),
+            encoding: .utf8
+        )
+        #expect(!panel.contains("prefetchAllAPIKeys"))
+        #expect(panel.contains("guard provider.requiresKey else { return }"))
+        #expect(panel.contains("focusedKeyProvider"))
+        #expect(panel.contains("prefetchAPIKey(for: provider)"))
+
+        let store = try String(
+            contentsOf: Self.packageRoot.appendingPathComponent("Sources/Rapid/Tools/KeychainStore.swift"),
+            encoding: .utf8
+        )
+        #expect(store.contains("kSecUseAuthenticationUISkip"))
+        #expect(store.contains("legacyService).development"))
+    }
+
     @Test("Untouched empty SecureField does not clear an existing stored key")
     func untouchedDraftIsUnchanged() {
         #expect(SettingsView.webSearchKeyCommitAction(draft: "", wasEdited: false) == .unchanged)

@@ -96,6 +96,44 @@ struct CustomInstructionsTests {
         #expect(result.last?.id == user.id)
     }
 
+    @Test("Effective prompt preview uses the wire assembly and includes automatic context")
+    func effectivePromptPreviewUsesWireAssembly() {
+        let preview = ChatViewModel.effectiveSystemPrompt(
+            dateContext: "[CURRENT DATE AND TIME]\nToday is Tuesday, August 25, 2026.",
+            global: "Reply in plain language.",
+            conversation: "Use bullet points."
+        )
+
+        #expect(preview.hasPrefix("[CURRENT DATE AND TIME]"))
+        #expect(preview.contains("[GLOBAL USER INSTRUCTIONS]"))
+        #expect(preview.contains("Reply in plain language."))
+        #expect(preview.contains("[CONVERSATION INSTRUCTIONS - HIGHEST USER PRIORITY]"))
+        #expect(preview.contains("Use bullet points."))
+        #expect(preview.range(of: "Reply in plain language.")!.lowerBound
+            < preview.range(of: "Use bullet points.")!.lowerBound)
+    }
+
+    @Test("System prompt UI names global and conversation precedence explicitly")
+    func systemPromptTerminologyAndPreviewWiring() throws {
+        let settings = try Self.source("Sources/Rapid/UI/SettingsView.swift")
+        #expect(settings.contains("case .instructions: return \"System Prompt\""))
+        #expect(settings.contains("\"Global default\""))
+        #expect(settings.contains("Conversation prompts can override it."))
+        #expect(settings.contains("Settings.SystemPrompt.EffectivePreview"))
+
+        let editor = try Self.source("Sources/Rapid/UI/InstructionTextEditor.swift")
+        #expect(editor.contains("Text(\"Conversation System Prompt\")"))
+        #expect(editor.contains("this prompt wins."))
+        #expect(editor.contains("DisclosureGroup(\"Effective System Prompt\""))
+        #expect(editor.contains("Tool and attachment context may be added when you send."))
+        #expect(editor.contains("ChatViewModel.effectiveSystemPrompt"))
+        #expect(editor.contains("ChatView.SystemPrompt.EffectivePreview"))
+
+        let chat = try Self.source("Sources/Rapid/UI/ChatView.swift")
+        #expect(chat.contains(".accessibilityLabel(\"Conversation system prompt\")"))
+        #expect(chat.contains("global: viewModel.customInstructions.global"))
+    }
+
     @Test("Conversation instructions explicitly override conflicting global preferences")
     func conversationLayerHasExplicitPrecedence() {
         let result = ChatViewModel.addingInstructionLayers(
