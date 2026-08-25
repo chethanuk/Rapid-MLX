@@ -150,8 +150,53 @@ struct SidecarBuildScriptTests {
                 "Only model-family directories outside Qwen3 TTS may be removed.")
         #expect(!script.contains(#"rm -rf "$STAGE/site-packages/mlx_audio/tts/models""#),
                 "The trim must never remove the complete TTS model directory.")
-        #expect(script.contains(#"MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-174}""#),
-                "The signing baseline must match the measured post-audio bundle.")
+        #expect(script.contains(#"MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-172}""#),
+                "The signing baseline must match the measured post-audio bundle, less the orphaned libpython dylib dropped in step 3.")
+    }
+
+    /// The interpreter strip must stay ABOVE the signing loop.
+    ///
+    /// `strip` rewrites the Mach-O, which invalidates any signature already
+    /// attached to it. Sinking the strip below step 5 would still produce a
+    /// bundle locally — the breakage only surfaces as a `codesign --verify`
+    /// failure on the user's Mac (and a notarisation reject in CI), so pin
+    /// the relative order here rather than trusting a comment.
+    @Test("The interpreter is stripped before the Mach-O signing pass")
+    func stripsInterpreterBeforeSigning() throws {
+        let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
+
+        guard let strip = script.range(of: #"strip -x "$STAGE/python/bin/python3.12""#) else {
+            Issue.record("The interpreter strip step is missing; the bundle regains ~1.6 MB of symbol table.")
+            return
+        }
+        guard let signing = script.range(of: "step 5: count + sign Mach-Os") else {
+            Issue.record("Could not locate the Mach-O signing step to order against.")
+            return
+        }
+        #expect(strip.lowerBound < signing.lowerBound,
+                "strip invalidates signatures, so it must run before the Mach-Os are signed.")
+    }
+
+    /// `strip -x` keeps external symbols; a bare `strip` does not.
+    ///
+    /// The distinction matters beyond size: native wheels resolve Python's
+    /// exported symbols out of the interpreter at dlopen time, so a full
+    /// strip breaks `import mlx.core` at runtime rather than at build time.
+    @Test("The interpreter strip keeps external symbols")
+    func stripsInterpreterNonDestructively() throws {
+        let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
+
+        #expect(!script.contains(#"strip "$STAGE/python/bin/python3.12""#),
+                "A bare strip removes exported symbols the native wheels dlopen against; -x is required.")
+    }
+
+    /// The orphaned embedder dylib must stay out of the bundle.
+    @Test("The unreferenced libpython dylib is dropped")
+    func dropsOrphanedLibpython() throws {
+        let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
+
+        #expect(script.contains(#"rm -f "$STAGE/python/lib/libpython3.12.dylib""#),
+                "python-build-standalone ships a statically-linked interpreter, so its separate libpython dylib is 18 MB nothing links against.")
     }
 
     private static var scriptURL: URL {

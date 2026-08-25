@@ -93,7 +93,19 @@ COMPILEALL_JOBS="${COMPILEALL_JOBS:-0}"
 # STT and Qwen3-TTS smoke imports passing. The non-Qwen TTS implementations
 # and SciPy subpackages outside the signal closure have already been removed
 # before this count is taken.
-MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-174}"
+#
+# Re-locked at 172 on 2026-08-25 (bundle slim-down): step 3 now also drops the
+# orphaned libpython3.12.dylib — exactly one Mach-O, and one we used to sign
+# rather than a new one, so no signing-safety spike re-run is needed. The
+# console-script and sysconfig trims in the same pass are shell/pure-Python
+# and Mach-O-neutral, and the step 4.5 `strip -x` rewrites the interpreter
+# without changing the count.
+#
+# NOTE: the 174 above was itself stale — a pre-change bundle measures 173, so
+# the committed baseline had drifted by one and was being masked by
+# MACHO_TOLERANCE. 172 is the directly measured post-trim count (173 - 1),
+# not 174 - 1.
+MACHO_BASELINE_COUNT="${MACHO_BASELINE_COUNT:-172}"
 # Allow modest drift without blocking — wheel updates sometimes shift
 # 1-2 .so files. Bigger drift means a new dependency, needs review.
 # Kept at 5 across the 51 → 77 baseline rebase to give Pillow and
@@ -500,6 +512,41 @@ rm -rf \
     "$STAGE/python/lib/"thread* \
     "$STAGE/python/lib/"itcl* \
     "$STAGE/python/lib/python3.12/lib-dynload/"_tkinter*.so
+# Drop the orphaned libpython dylib. python-build-standalone ships BOTH a
+# statically-linked interpreter (python/bin/python3.12, __TEXT ~13 MB with
+# CPython compiled in) and the same runtime again as a standalone
+# libpython3.12.dylib for embedders. Nothing in this bundle embeds CPython:
+# an `otool -L` sweep over every .so / .dylib / the interpreter itself finds
+# zero references to it (lib-dynload extensions and every site-packages
+# native module resolve their Python symbols from the host process). 18 MB
+# and one Mach-O of pure dead weight; MACHO_BASELINE_COUNT is set to the
+# post-trim count. Verified by moving it aside and re-running the full
+# import closure (vllm_mlx, mlx_lm, transformers, scipy.signal, mlx_vlm,
+# mflux, mlx.core) plus `bin/rapid-mlx --help`.
+rm -f "$STAGE/python/lib/libpython3.12.dylib"
+# Console scripts for modules step 3 just deleted. python-build-standalone's
+# bin/ ships launchers for pip, idlelib, 2to3, pydoc and the build-time
+# sysconfig helpers; with those packages gone each one is a shell stub that
+# execs the interpreter straight into `ModuleNotFoundError` (verified: pip →
+# "No module named 'pip'", idle3.12 → "No module named 'idlelib'"). Only the
+# interpreter and its python / python3 symlinks are reachable from
+# sidecar-shim.sh. Tiny on disk, but they are signed and sealed like
+# everything else, so a user who finds one and runs it gets a traceback out
+# of an otherwise-working install.
+rm -f \
+    "$STAGE/python/bin/"pip "$STAGE/python/bin/"pip3 "$STAGE/python/bin/"pip3.12 \
+    "$STAGE/python/bin/"idle3 "$STAGE/python/bin/"idle3.12 \
+    "$STAGE/python/bin/"2to3 "$STAGE/python/bin/"2to3-3.12 \
+    "$STAGE/python/bin/"pydoc3 "$STAGE/python/bin/"pydoc3.12 \
+    "$STAGE/python/bin/"python3-config "$STAGE/python/bin/"python3.12-config
+# Build-time-only sysconfig data: pkgconfig/ and config-3.12-darwin/ exist to
+# compile C extensions against this interpreter (the latter also carries a
+# static libpython*.a), and pydoc_data backs the pydoc launcher removed just
+# above. The bundle never compiles anything at runtime.
+rm -rf \
+    "$STAGE/python/lib/pkgconfig" \
+    "$STAGE/python/lib/python3.12/config-3.12-darwin" \
+    "$STAGE/python/lib/python3.12/pydoc_data"
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ----- step 3.5: aggressive trim (post-strip, pre-compileall) ----------
@@ -765,6 +812,23 @@ fi
 
 cp "${REPO_ROOT}/scripts/sidecar-shim.sh" "$STAGE/bin/rapid-mlx"
 chmod +x "$STAGE/bin/rapid-mlx"
+
+# ----- step 4.5: strip the interpreter's symbol table -------------------
+#
+# python-build-standalone ships python3.12 unstripped (~42.7k symbols,
+# 18.0 MB). `strip -x` drops local symbols while keeping the exported ones
+# that lib-dynload extensions and every native wheel resolve against at
+# dlopen time — removing those would break `import mlx.core`. Saves ~1.6 MB.
+#
+# ORDER IS LOAD-BEARING: this must run BEFORE step 5 signs the Mach-Os.
+# strip rewrites the binary and invalidates any existing signature, so
+# stripping after signing would ship a bundle that fails `codesign --verify`
+# (and, post-notarisation, Gatekeeper). Keep this step above step 5.
+#
+# The interpreter is the only unstripped Mach-O worth touching: the wheel
+# .so / .dylib files arrive pre-stripped from PyPI.
+echo "==> stripping interpreter symbol table"
+strip -x "$STAGE/python/bin/python3.12"
 
 # ----- step 5: count + sign Mach-Os ------------------------------------
 
