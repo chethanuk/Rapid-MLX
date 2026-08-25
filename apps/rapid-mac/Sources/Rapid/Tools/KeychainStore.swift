@@ -41,19 +41,25 @@ protocol KeychainItemAccessing: Sendable {
 /// explain, never permission for SecurityAgent to interrupt the user.
 struct SecurityKeychainItems: KeychainItemAccessing {
     func query(account: String, service: String) -> KeychainReadResult {
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            kSecUseAuthenticationContext as String: authenticationContext,
         ]
         var item: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
+        return Self.readResult(status: status, data: item as? Data)
+    }
+
+    static func readResult(status: OSStatus, data: Data?) -> KeychainReadResult {
         if status == errSecItemNotFound { return .missing }
         guard status == errSecSuccess,
-              let data = item as? Data,
+              let data,
               let value = String(data: data, encoding: .utf8) else {
             return .unavailable
         }

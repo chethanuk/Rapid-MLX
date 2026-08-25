@@ -115,6 +115,37 @@ struct SettingsWebSearchKeyDraftTests {
         #expect(store.readWithoutUserInteraction(account: account) == .found("replacement-key"))
     }
 
+    @Test("Security status distinguishes a missing item from denied non-interactive access")
+    func securityReadStatusMapping() {
+        #expect(SecurityKeychainItems.readResult(status: errSecItemNotFound, data: nil) == .missing)
+        #expect(SecurityKeychainItems.readResult(status: errSecInteractionNotAllowed, data: nil) == .unavailable)
+        #expect(SecurityKeychainItems.readResult(
+            status: errSecSuccess,
+            data: Data("saved-key".utf8)
+        ) == .found("saved-key"))
+    }
+
+    @Test("An inaccessible current item never falls back to a stale legacy credential")
+    func inaccessibleCurrentSlotStopsLegacyFallback() {
+        let account = "rapid.web-search.parallel"
+        let primary = "test.release"
+        let legacy = "test.legacy"
+        let items = SettingsKeychainItems(
+            states: [
+                "\(primary)|\(account)": .unavailable,
+                "\(legacy)|\(account)": .found("stale-key"),
+            ],
+            rejectedServices: []
+        )
+        let store = SystemKeychain(
+            items: items,
+            primaryService: primary,
+            legacyMigrationService: legacy
+        )
+
+        #expect(store.readWithoutUserInteraction(account: account) == .unavailable)
+    }
+
     @Test("Tools page has no appearance-time Keychain read and wires only user-driven probes")
     func toolsPageUsesLazyReadTriggers() throws {
         let panel = try String(
@@ -131,9 +162,9 @@ struct SettingsWebSearchKeyDraftTests {
             contentsOf: Self.packageRoot.appendingPathComponent("Sources/Rapid/Tools/KeychainStore.swift"),
             encoding: .utf8
         )
-        #expect(store.contains("kSecUseAuthenticationUISkip"))
         #expect(store.contains("kSecUseAuthenticationContext"))
         #expect(store.contains("interactionNotAllowed = true"))
+        #expect(!store.contains("kSecUseAuthenticationUISkip"))
         #expect(store.contains("legacyService).development"))
     }
 
