@@ -34,6 +34,7 @@ extension KeychainStoring {
 protocol KeychainItemAccessing: Sendable {
     func query(account: String, service: String) -> KeychainReadResult
     func upsert(account: String, service: String, secret: String) -> Bool
+    func remove(account: String, service: String) -> Bool
 }
 
 /// Security.framework adapter. Every lookup/update explicitly suppresses
@@ -92,6 +93,19 @@ struct SecurityKeychainItems: KeychainItemAccessing {
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    func remove(account: String, service: String) -> Bool {
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecUseAuthenticationContext as String: authenticationContext,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 }
 
@@ -197,10 +211,17 @@ struct SystemKeychain: KeychainStoring {
 
     @discardableResult
     func delete(account: String) -> Bool {
-        // Store an empty current-identity item instead of deleting outright.
-        // It is a non-secret tombstone that prevents a legacy or ACL-mismatched
-        // value from resurfacing on the next launch.
-        write(account: account, secret: "")
+        let services = [recoveryService, primaryService, legacyMigrationService].compactMap { $0 }
+        let removedEverywhere = services
+            .map { items.remove(account: account, service: $0) }
+            .allSatisfy { $0 }
+        if removedEverywhere { return true }
+
+        // A mismatched ACL can make an old item impossible to remove without a
+        // system prompt. Mask it for this app with a non-secret tombstone, but
+        // report failure so Settings never claims the stored secret was erased.
+        _ = write(account: account, secret: "")
+        return false
     }
 
     private struct SigningIdentity {

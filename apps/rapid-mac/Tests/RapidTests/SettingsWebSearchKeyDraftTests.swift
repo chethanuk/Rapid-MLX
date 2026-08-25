@@ -39,6 +39,14 @@ private final class SettingsKeychainItems: KeychainItemAccessing, @unchecked Sen
             return true
         }
     }
+
+    func remove(account: String, service: String) -> Bool {
+        lock.withLock {
+            guard !rejectedServices.contains(service) else { return false }
+            states.removeValue(forKey: "\(service)|\(account)")
+            return true
+        }
+    }
 }
 
 @MainActor
@@ -138,6 +146,47 @@ struct SettingsWebSearchKeyDraftTests {
         )
 
         #expect(store.readWithoutUserInteraction(account: account) == .unavailable)
+    }
+
+    @Test("Clearing removes migrated legacy and recovery credentials")
+    func clearDeletesEveryAccessibleCredentialSlot() {
+        let account = "rapid.web-search.parallel"
+        let primary = "test.release"
+        let legacy = "test.legacy"
+        let items = SettingsKeychainItems(
+            states: [
+                "\(primary).recovery|\(account)": .found("replacement-key"),
+                "\(legacy)|\(account)": .found("migrated-key"),
+            ],
+            rejectedServices: []
+        )
+        let store = SystemKeychain(
+            items: items,
+            primaryService: primary,
+            legacyMigrationService: legacy
+        )
+
+        #expect(store.delete(account: account))
+        #expect(store.readWithoutUserInteraction(account: account) == .missing)
+    }
+
+    @Test("A denied removal is masked but never reported as erased")
+    func deniedClearUsesTombstoneAndReportsFailure() {
+        let account = "rapid.web-search.parallel"
+        let primary = "test.release"
+        let legacy = "test.legacy"
+        let items = SettingsKeychainItems(
+            states: ["\(legacy)|\(account)": .found("inaccessible-key")],
+            rejectedServices: [legacy]
+        )
+        let store = SystemKeychain(
+            items: items,
+            primaryService: primary,
+            legacyMigrationService: legacy
+        )
+
+        #expect(!store.delete(account: account))
+        #expect(store.read(account: account) == nil)
     }
 
     @Test("Tools page has no appearance-time Keychain read and wires only user-driven probes")
