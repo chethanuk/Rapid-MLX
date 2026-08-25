@@ -908,8 +908,6 @@ class TestMllmBackboneIsHybrid:
         repo_root = tmp_path / "hub" / "models--mlx-community--Qwen3.5-2B-MLX-4bit"
         snapshot = repo_root / "snapshots" / revision
         snapshot.mkdir(parents=True)
-        (repo_root / "refs").mkdir()
-        (repo_root / "refs" / "main").write_text(revision)
         (snapshot / "config.json").write_text(
             json.dumps(
                 {
@@ -947,6 +945,16 @@ class TestMllmBackboneIsHybrid:
         monkeypatch.setattr(
             huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub")
         )
+        from vllm_mlx import cli
+
+        def fail_on_network(_name):
+            raise AssertionError("complete singleton snapshot must stay offline")
+
+        monkeypatch.setattr(
+            cli,
+            "_ensure_model_downloaded",
+            fail_on_network,
+        )
 
         class StubEngine:
             is_mllm = False
@@ -970,6 +978,14 @@ class TestMllmBackboneIsHybrid:
         # Simulate a Desktop residency replacement after an image model. The
         # old process-global alias must not lend its image profile to Qwen.
         monkeypatch.setattr(server, "_model_alias", "z-image-turbo", raising=False)
+
+        from vllm_mlx.model_metadata import read_model_metadata
+        from vllm_mlx.utils.tokenizer import _local_snapshot_if_cached
+
+        metadata = read_model_metadata(repo)
+        assert metadata is not None
+        assert metadata.snapshot_dir == snapshot
+        assert _local_snapshot_if_cached(repo) == str(snapshot)
 
         server.load_model(alias)
 
