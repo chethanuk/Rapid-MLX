@@ -94,16 +94,23 @@ handling) and their committed regression tests.
 7. No full-ci until Atlas clears RC2 lanes: respected.
 
 ## Repro commands (reproducible)
+
+The server command is exact and reproducible. The client scripts
+(`/tmp/issue2222-evidence/repro.py`, `multisample.py`) were throwaway local
+diagnostics for the baseline reproduction and are NOT part of this change; the
+committed, reproducible regression coverage is the `tc31-weather-explicit` eval
+scenario + its harness tests in `evals/` (see "Verification"). If you need to
+repro the baseline prompt routing, send the exact Desktop request shape via any
+OpenAI-compatible client with both schemas + `tool_choice:auto`.
+
 ```
 python3.12 -m vllm_mlx.cli serve ornith-1.5-9b-bf16 --port 8899 \
   --tool-call-parser hermes --reasoning-parser qwen3 --log-level DEBUG
-python3.12 /tmp/issue2222-evidence/repro.py     # both prompts + diagnostics
-python3.12 /tmp/issue2222-evidence/multisample.py 5
 # control
 python3.12 -m vllm_mlx.cli serve qwen3.5-9b-4bit --port 8898 \
   --tool-call-parser hermes --reasoning-parser qwen3
 ```
-Raw evidence: `/tmp/issue2222-evidence/{results.json,control_results.txt,multisample output}`.
+Baseline evidence captured during investigation: local `/tmp` dumps (not committed).
 
 ## Verification of the eval-coverage change (2026-08-25)
 The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in

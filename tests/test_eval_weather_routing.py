@@ -304,3 +304,27 @@ class TestSuiteEndToEnd:
         assert (
             "forbidden_tool_called" not in d or d.get("forbidden_tool_called") is None
         )
+
+    @pytest.mark.parametrize(
+        "denial_text",
+        [
+            # Each carries a required result term AND a weather-unavailable denial
+            # that lives outside the original short phrase list, so a pure
+            # substring check on the required terms alone would pass it. The
+            # denial must make the final turn fail.
+            "18°C, but the weather tool is unavailable, so I searched instead",
+            "Partly cloudy here, but Weather is unavailable for Tokyo",
+            "The temperature is 18°C, however weather is unavailable",
+            "I can't use the weather function, though it is 62% humidity",
+            "62% humidity, but there's no access to weather",
+        ],
+    )
+    def test_contradictory_denials_fail(self, suite_with_mock, denial_text):
+        # round-11 pr_validate finding: a final text that reflects the result
+        # WHILE denying the just-used tool must fail, across realistic phrasing.
+        suite_with_mock["set_fake"](["weather"], "", [], denial_text)
+        out = suite_with_mock["run"]()
+        d = out["details"][0]
+        assert out["passed"] == 0
+        assert d["fully_correct"] is False
+        assert "denies" in d.get("final_text_error", "")

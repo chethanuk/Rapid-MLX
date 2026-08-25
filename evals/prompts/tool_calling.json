@@ -737,7 +737,14 @@
       "can't use the weather",
       "cannot use the weather",
       "cannot use the temperature tool",
-      "no access to weather"
+      "no access to weather",
+      "weather is unavailable",
+      "weather is not available",
+      "weather unavailable",
+      "cannot provide weather",
+      "can't provide the weather",
+      "unable to fetch weather",
+      "weather function unavailable"
     ],
     "require_final_terms": [
       "Partly cloudy",

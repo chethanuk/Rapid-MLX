@@ -315,6 +315,13 @@ WEB_SEARCH_TOOL = {
 # list. A scenario may also carry full tool schema dicts inline (see _resolve_tools);
 # inline dicts let a case advertise the exact Desktop pair (WEATHER_TOOL +
 # WEB_SEARCH_TOOL) without conflating the generic shared web_search name.
+#
+# Intentional override: the Desktop WEB_SEARCH_TOOL is registered under the same
+# "web_search" name as the generic shared schema in TOOLS, so a scenario that opts
+# into the Desktop pair BY NAME (e.g. tools: ["weather", "web_search"]) gets the
+# Desktop-authentic schema, not the generic one. Today only tc31 references these
+# names, and it passes inline dicts, so the named path is unused — but the override
+# is deliberate so a future named reference resolves to the Desktop contract.
 _TOOL_REGISTRY = {t["function"]["name"]: t for t in TOOLS}
 _TOOL_REGISTRY.update(
     {t["function"]["name"]: t for t in (WEATHER_TOOL, WEB_SEARCH_TOOL)}
