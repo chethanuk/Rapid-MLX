@@ -249,6 +249,59 @@ TOOLS = [
     },
 ]
 
+# The shipped Rapid Desktop WeatherTool schema (apps/rapid-mac/.../WeatherTool.swift).
+# Shared across tool-choice eval scenarios that exercise weather-vs-web_search
+# disambiguation, so the eval stays model-agnostic and matches what the Desktop
+# actually advertises. Issue #2222: an explicit current-weather request must select
+# `weather`, never `web_search`, when both schemas are present.
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "weather",
+        "description": "Get current weather or current temperature for a city or place. Use this tool—not web_search—for current conditions. Pass the location from the user's request, preserving country or state/province qualifiers. This tool does not provide future forecasts, and ambiguous places are not guessed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City or place name in the user's language, optionally followed by region/country, e.g. '西安', 'Springfield, Illinois', or 'Paris, France'.",
+                },
+                "country": {
+                    "type": "string",
+                    "description": "Optional country name or two-letter country code used to disambiguate the place.",
+                },
+                "admin1": {
+                    "type": "string",
+                    "description": "Optional state, province, or first-level administrative region used to disambiguate the place.",
+                },
+                "units": {
+                    "type": "string",
+                    "description": "Either 'metric' (Celsius, km/h) or 'imperial' (Fahrenheit, mph). Defaults to metric.",
+                    "enum": ["metric", "imperial"],
+                },
+            },
+            "required": ["location"],
+        },
+    },
+}
+
+# Named tool registry a scenario may reference via ``tools`` (a list of tool names)
+# to override the shared TOOLS set for a specific case (e.g. weather-vs-web_search
+# disambiguation, which the shared set cannot exercise because it has no weather tool).
+_TOOL_REGISTRY = {t["function"]["name"]: t for t in TOOLS}
+_TOOL_REGISTRY[WEATHER_TOOL["function"]["name"]] = WEATHER_TOOL
+
+
+def _resolve_tools(scenario: dict) -> list:
+    """Return the tool list for a scenario: the scenario's named ``tools`` subset if
+    present, else the shared ``TOOLS`` list. Missing/unknown names fall back per-name
+    so a typo degrades to the shared set rather than silently dropping a tool."""
+    names = scenario.get("tools")
+    if not isinstance(names, list) or not names:
+        return TOOLS
+    resolved = [_TOOL_REGISTRY[n] for n in names if n in _TOOL_REGISTRY]
+    return resolved or TOOLS
+
 
 # =============================================================================
 # Helpers
@@ -758,7 +811,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                         host,
                         port,
                         messages,
-                        tools=TOOLS,
+                        tools=_resolve_tools(sc),
                         max_tokens=512,
                         temperature=0.0,
                     )
@@ -794,7 +847,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
 
             # ── Standard / Sequential: existing logic ──
             content, tool_calls, ttft, elapsed = stream_chat(
-                host, port, messages, tools=TOOLS, max_tokens=512, temperature=0.0
+                host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
             )
 
             grade = _check_tool_call(tool_calls, sc)
@@ -849,7 +902,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                         host,
                         port,
                         messages,
-                        tools=TOOLS,
+                        tools=_resolve_tools(sc),
                         max_tokens=512,
                         temperature=0.0,
                     )
