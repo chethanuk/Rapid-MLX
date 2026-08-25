@@ -1355,6 +1355,16 @@ final class ServerManager {
                 guard decision != .cancelled else { return false }
                 validatedStopAlias = currentAlias
             }
+            if let currentAlias = launchedChildAlias,
+               !ModelSwitchDecision.requiresStop(
+                   liveAlias: currentAlias,
+                   targetAlias: trimmed
+               ) {
+                if case .starting(let alias) = state, alias == trimmed {
+                    await awaitStartupSettled(alias: trimmed)
+                }
+                return isServing(trimmed)
+            }
             await stop(preservingLastServedAlias: true)
         }
         let memoryRequestID = UUID()

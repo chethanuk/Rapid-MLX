@@ -146,6 +146,14 @@ struct ModelResidencyTests {
             validatedAlias: nil,
             liveAlias: "qwen3.5-4b-4bit"
         ))
+        #expect(!ModelSwitchDecision.requiresStop(
+            liveAlias: "gemma-4-12b-4bit",
+            targetAlias: "gemma-4-12b-4bit"
+        ))
+        #expect(ModelSwitchDecision.requiresStop(
+            liveAlias: "qwen3.5-4b-4bit",
+            targetAlias: "gemma-4-12b-4bit"
+        ))
     }
 
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")

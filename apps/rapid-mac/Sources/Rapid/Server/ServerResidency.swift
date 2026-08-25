@@ -186,6 +186,12 @@ enum ModelSwitchDecision: Equatable, Sendable {
     ) -> Bool {
         validatedAlias != liveAlias
     }
+
+    /// A concurrent switch may finish while this request is waiting on its
+    /// prompt. The newly live target is success, never a child to tear down.
+    static func requiresStop(liveAlias: String, targetAlias: String) -> Bool {
+        liveAlias != targetAlias
+    }
 }
 
 enum ResidentModelLoadResult: Sendable, Equatable {
