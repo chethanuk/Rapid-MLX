@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 /// Minimal Keychain wrapper for storing per-provider API keys.
@@ -71,7 +72,12 @@ struct SecurityKeychainItems: KeychainItemAccessing {
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
         var updateQuery = baseQuery
-        updateQuery[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        // `Skip` is a match-only option. For update, Security.framework's
+        // current contract is an LAContext that forbids interaction; this is
+        // the non-deprecated equivalent of kSecUseAuthenticationUIFail.
+        let authenticationContext = LAContext()
+        authenticationContext.interactionNotAllowed = true
+        updateQuery[kSecUseAuthenticationContext as String] = authenticationContext
         let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         if updateStatus == errSecSuccess { return true }
         if updateStatus != errSecItemNotFound { return false }

@@ -132,6 +132,8 @@ struct SettingsWebSearchKeyDraftTests {
             encoding: .utf8
         )
         #expect(store.contains("kSecUseAuthenticationUISkip"))
+        #expect(store.contains("kSecUseAuthenticationContext"))
+        #expect(store.contains("interactionNotAllowed = true"))
         #expect(store.contains("legacyService).development"))
     }
 
