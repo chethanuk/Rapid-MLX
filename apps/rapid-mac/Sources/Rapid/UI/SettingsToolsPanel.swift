@@ -356,6 +356,11 @@ struct SettingsToolsPanel: View {
                     .accessibilityIdentifier(
                         "Settings.Tools.WebSearch.KeyUnavailable.\(provider.id)"
                     )
+            } else if webSearch.cachedKeyState(for: provider) == .unknown {
+                Text("Saved key status hasn’t been checked. Select this backend or focus the field to check it.")
+                    .font(RapidFont.caption)
+                    .foregroundStyle(RapidTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if webSearch.cachedKeyState(for: provider).hasKey {
                 Text("A key is stored for \(provider.displayName).")
                     .font(RapidFont.caption)

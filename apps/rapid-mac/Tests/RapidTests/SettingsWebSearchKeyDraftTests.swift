@@ -18,6 +18,29 @@ private final class SettingsKeychainProbe: KeychainStoring, @unchecked Sendable 
     func delete(account: String) -> Bool { true }
 }
 
+private final class SettingsKeychainItems: KeychainItemAccessing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [String: KeychainReadResult]
+    private let rejectedServices: Set<String>
+
+    init(states: [String: KeychainReadResult], rejectedServices: Set<String>) {
+        self.states = states
+        self.rejectedServices = rejectedServices
+    }
+
+    func query(account: String, service: String) -> KeychainReadResult {
+        lock.withLock { states["\(service)|\(account)"] ?? .missing }
+    }
+
+    func upsert(account: String, service: String, secret: String) -> Bool {
+        lock.withLock {
+            guard !rejectedServices.contains(service) else { return false }
+            states["\(service)|\(account)"] = .found(secret)
+            return true
+        }
+    }
+}
+
 @MainActor
 @Suite("Settings web-search key draft commit")
 struct SettingsWebSearchKeyDraftTests {
@@ -50,6 +73,37 @@ struct SettingsWebSearchKeyDraftTests {
         #expect(keychain.readCount == 1, "the denied result is cached instead of repeatedly consulting Security.framework")
     }
 
+    @Test("Developer ID releases and development builds use different services")
+    func codeIdentityNamespacesAreSeparated() {
+        let release = SystemKeychain.serviceNamespace(
+            teamIdentifier: "TEAM123",
+            isDeveloperIDApplication: true
+        )
+        let development = SystemKeychain.serviceNamespace(
+            teamIdentifier: "TEAM123",
+            isDeveloperIDApplication: false
+        )
+
+        #expect(release == "com.rapidmlx.rapid.api-keys.release.TEAM123")
+        #expect(development == "com.rapidmlx.rapid.api-keys.development")
+        #expect(release != development)
+    }
+
+    @Test("Explicit save recovers from an inaccessible current-identity item")
+    func inaccessibleCurrentSlotUsesRecoverySlot() {
+        let account = "rapid.web-search.parallel"
+        let primary = "test.release"
+        let items = SettingsKeychainItems(
+            states: ["\(primary)|\(account)": .unavailable],
+            rejectedServices: [primary]
+        )
+        let store = SystemKeychain(items: items, primaryService: primary)
+
+        #expect(store.readWithoutUserInteraction(account: account) == .unavailable)
+        #expect(store.write(account: account, secret: "replacement-key"))
+        #expect(store.readWithoutUserInteraction(account: account) == .found("replacement-key"))
+    }
+
     @Test("Tools page has no appearance-time Keychain read and wires only user-driven probes")
     func toolsPageUsesLazyReadTriggers() throws {
         let panel = try String(
@@ -60,6 +114,7 @@ struct SettingsWebSearchKeyDraftTests {
         #expect(panel.contains("guard provider.requiresKey else { return }"))
         #expect(panel.contains("focusedKeyProvider"))
         #expect(panel.contains("prefetchAPIKey(for: provider)"))
+        #expect(panel.contains("Saved key status hasn’t been checked."))
 
         let store = try String(
             contentsOf: Self.packageRoot.appendingPathComponent("Sources/Rapid/Tools/KeychainStore.swift"),

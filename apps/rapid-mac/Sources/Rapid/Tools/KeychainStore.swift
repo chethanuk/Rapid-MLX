@@ -30,10 +30,63 @@ extension KeychainStoring {
     }
 }
 
+protocol KeychainItemAccessing: Sendable {
+    func query(account: String, service: String) -> KeychainReadResult
+    func upsert(account: String, service: String, secret: String) -> Bool
+}
+
+/// Security.framework adapter. Every lookup/update explicitly suppresses
+/// authentication UI; an authorization failure is state for the app to
+/// explain, never permission for SecurityAgent to interrupt the user.
+struct SecurityKeychainItems: KeychainItemAccessing {
+    func query(account: String, service: String) -> KeychainReadResult {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        var item: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let value = String(data: data, encoding: .utf8) else {
+            return .unavailable
+        }
+        return .found(value)
+    }
+
+    func upsert(account: String, service: String, secret: String) -> Bool {
+        guard let data = secret.data(using: .utf8) else { return false }
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        var updateQuery = baseQuery
+        updateQuery[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+        if updateStatus == errSecSuccess { return true }
+        if updateStatus != errSecItemNotFound { return false }
+
+        var addQuery = baseQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+    }
+}
+
 /// Real-system implementation. Each entry is a ``kSecClassGenericPassword``
-/// keyed by ``service = SystemKeychain.service`` + ``account``. We
-/// use the generic-password class (not internet-password) because
-/// Brave/Tavily keys are static credentials, not per-URL secrets.
+/// keyed by a code-identity-scoped service + provider account. We use the
+/// generic-password class (not internet-password) because provider keys are
+/// static credentials, not per-URL secrets.
 ///
 /// Codex audit batch 6 finding (KeychainStore.swift:63, P2):
 /// access policy is ``kSecAttrAccessibleWhenUnlockedThisDeviceOnly``.
@@ -51,18 +104,36 @@ struct SystemKeychain: KeychainStoring {
     /// they created could carry an ACL that did not trust the release binary.
     private static let legacyService = "com.rapidmlx.rapid.api-keys"
 
-    /// Namespace new items by the signing team. Notarized builds from the same
-    /// team keep a stable service across releases; ad-hoc developer builds use
-    /// an isolated namespace and can no longer create an item that later asks
-    /// the release app for the login-keychain password.
-    private static let teamIdentifier = currentTeamIdentifier()
+    private static let signingIdentity = currentSigningIdentity()
+    static let service = serviceNamespace(
+        teamIdentifier: signingIdentity.teamIdentifier,
+        isDeveloperIDApplication: signingIdentity.isDeveloperIDApplication
+    )
 
-    static let service: String = {
-        if let teamIdentifier {
-            return "\(legacyService).\(teamIdentifier)"
-        }
-        return "\(legacyService).development"
-    }()
+    private let items: any KeychainItemAccessing
+    private let primaryService: String
+    private let legacyMigrationService: String?
+    private var recoveryService: String { "\(primaryService).recovery" }
+
+    init() {
+        items = SecurityKeychainItems()
+        primaryService = Self.service
+        // Apple Development and ad-hoc builds must never inspect production's
+        // historical namespace, even when they carry the same Team ID.
+        legacyMigrationService = Self.signingIdentity.isDeveloperIDApplication
+            ? Self.legacyService
+            : nil
+    }
+
+    init(
+        items: any KeychainItemAccessing,
+        primaryService: String,
+        legacyMigrationService: String? = nil
+    ) {
+        self.items = items
+        self.primaryService = primaryService
+        self.legacyMigrationService = legacyMigrationService
+    }
 
     func read(account: String) -> String? {
         guard case .found(let value) = readWithoutUserInteraction(account: account) else {
@@ -72,98 +143,91 @@ struct SystemKeychain: KeychainStoring {
     }
 
     func readWithoutUserInteraction(account: String) -> KeychainReadResult {
-        let current = query(account: account, service: Self.service)
-        switch current {
-        case .found:
-            // An empty current-team item is a tombstone created by delete().
-            // It deliberately masks a legacy value that this identity may not
-            // be able to remove without showing a system authorization dialog.
-            return current
-        case .unavailable:
-            return .unavailable
-        case .missing:
-            // Only a signed release identity may inspect the historical
-            // shared namespace. Development builds must never touch it.
-            guard Self.teamIdentifier != nil else { return .missing }
-            return query(account: account, service: Self.legacyService)
-        }
+        let recovery = items.query(account: account, service: recoveryService)
+        if recovery != .missing { return recovery }
+
+        let current = items.query(account: account, service: primaryService)
+        if current != .missing { return current }
+
+        guard let legacyMigrationService else { return .missing }
+        return items.query(account: account, service: legacyMigrationService)
     }
 
-    private func query(account: String, service: String) -> KeychainReadResult {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            // A credential lookup must never summon a system password dialog.
-            // Settings presents an inline recovery state instead.
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
-        ]
-        var item: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return .missing }
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            return .unavailable
+    static func serviceNamespace(
+        teamIdentifier: String?,
+        isDeveloperIDApplication: Bool
+    ) -> String {
+        guard isDeveloperIDApplication,
+              let teamIdentifier,
+              !teamIdentifier.isEmpty else {
+            return "\(legacyService).development"
         }
-        return .found(value)
+        return "\(legacyService).release.\(teamIdentifier)"
     }
 
     @discardableResult
     func write(account: String, secret: String) -> Bool {
-        guard let data = secret.data(using: .utf8) else { return false }
-        let baseQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: account,
-        ]
-        // Try update first; if there's no existing item, fall
-        // through to add. This is the canonical pattern for
-        // "upsert" against the Keychain API. Update also bumps
-        // the accessibility class so a pre-existing item written
-        // with the prior (weaker) policy migrates forward on the
-        // first write.
-        let updateAttrs: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        ]
-        var updateQuery = baseQuery
-        updateQuery[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
-        let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
-        if updateStatus == errSecSuccess { return true }
-        if updateStatus != errSecItemNotFound { return false }
-
-        var addQuery = baseQuery
-        addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        return addStatus == errSecSuccess
+        // Once a replacement slot exists it remains authoritative. Otherwise
+        // try the normal release-identity slot, then create the replacement
+        // slot if that update is denied by a stale/mismatched ACL.
+        switch items.query(account: account, service: recoveryService) {
+        case .found:
+            return items.upsert(account: account, service: recoveryService, secret: secret)
+        case .unavailable:
+            return false
+        case .missing:
+            if items.upsert(account: account, service: primaryService, secret: secret) {
+                return true
+            }
+            return items.upsert(account: account, service: recoveryService, secret: secret)
+        }
     }
 
     @discardableResult
     func delete(account: String) -> Bool {
-        // Store an empty current-team item instead of deleting outright. It is
-        // a non-secret tombstone that prevents a legacy ACL-mismatched value
-        // from resurfacing on the next launch, and it can be written without
-        // asking the user to authorize access to that legacy item.
+        // Store an empty current-identity item instead of deleting outright.
+        // It is a non-secret tombstone that prevents a legacy or ACL-mismatched
+        // value from resurfacing on the next launch.
         write(account: account, secret: "")
     }
 
-    private static func currentTeamIdentifier() -> String? {
-        guard let executableURL = Bundle.main.executableURL else { return nil }
+    private struct SigningIdentity {
+        let teamIdentifier: String?
+        let isDeveloperIDApplication: Bool
+    }
+
+    private static func currentSigningIdentity() -> SigningIdentity {
+        guard let executableURL = Bundle.main.executableURL else {
+            return SigningIdentity(teamIdentifier: nil, isDeveloperIDApplication: false)
+        }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess,
-              let code else { return nil }
+              let code else {
+            return SigningIdentity(teamIdentifier: nil, isDeveloperIDApplication: false)
+        }
         var signingInfo: CFDictionary?
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &signingInfo) == errSecSuccess,
-              let info = signingInfo as? [String: Any],
-              let team = info[kSecCodeInfoTeamIdentifier as String] as? String,
-              !team.isEmpty else {
-            return nil
+              let info = signingInfo as? [String: Any] else {
+            return SigningIdentity(teamIdentifier: nil, isDeveloperIDApplication: false)
         }
-        return team
+        let team = info[kSecCodeInfoTeamIdentifier as String] as? String
+        let certificate = (info[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
+        return SigningIdentity(
+            teamIdentifier: team,
+            isDeveloperIDApplication: certificate.map { isDeveloperIDApplication($0) } ?? false
+        )
+    }
+
+    private static func isDeveloperIDApplication(_ certificate: SecCertificate) -> Bool {
+        // Apple's Developer ID Application certificate extension. Unlike an
+        // authority display name, the extension is a machine-readable signing
+        // contract and distinguishes release identities from Apple Development.
+        let developerIDApplicationOID = "1.2.840.113635.100.6.1.13" as CFString
+        return SecCertificateCopyValues(
+            certificate,
+            [developerIDApplicationOID] as CFArray,
+            nil
+        ) != nil
     }
 }
 
