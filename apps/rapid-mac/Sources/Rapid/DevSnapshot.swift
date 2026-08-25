@@ -1489,9 +1489,17 @@ private struct LaunchPreviewHost: View {
 /// Dev-snapshot host for the standalone "Connect your agents" card (the
 /// pure-SwiftUI sheet scene). Renders ``ConnectToolsView.cardContent`` on a
 /// fixed frame, owning the same model-alias state the page now binds.
+///
+/// ``readiness`` defaults to the stopped state (model chosen, not serving)
+/// so ``connect-tools.png`` exercises the picker + readiness banner that
+/// #2297 always renders — the same non-`nil` value the real ``ContentView``
+/// supplies. Without it the scene would fall back to
+/// ``ConnectToolsView``'s `nil` path and never capture the stopped-state UI
+/// this DevSnapshot exists to document.
 private struct ConnectToolsCardHost: View {
     @Bindable var server: ServerManager
     @Bindable var downloads: DownloadManager
+    var readiness: ModelReadiness? = .needsStart(alias: "bonsai-1.7b-2bit")
     @State private var alias: String = "bonsai-1.7b-2bit"
 
     var body: some View {
@@ -1502,7 +1510,8 @@ private struct ConnectToolsCardHost: View {
             alias: $alias,
             server: server,
             downloads: downloads,
-            onClose: {}
+            onClose: {},
+            readiness: readiness
         ).cardContent
     }
 }
