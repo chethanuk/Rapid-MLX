@@ -4769,10 +4769,22 @@ flow_dictation() {
     # enabling speech input must reuse the mounted audio lane, never replace
     # the conversation process with a transcription-only server.
     start_model
+    send_prompt "Conversation state before dictation" "dictation-before"
+    local i conversation_id=""
+    for ((i=0; i<40; i++)); do
+        see_main "$OUT/chat-before-dictation.json"
+        conversation_id="$(jq -r '.data.ui_elements[] | (.identifier // "")
+            | select(test("^Sidebar\\.Conversation\\.[0-9A-Fa-f-]{36}$"))' \
+            "$OUT/chat-before-dictation.json" | head -1)"
+        [[ -n "$conversation_id" ]] && break
+        sleep 0.1
+    done
+    [[ -n "$conversation_id" ]] \
+        || die "Dictation precondition produced no conversation row"
     press "$OUT/chat.json" Sidebar.Audio "$OUT/dictation-open.json" \
         || die "Sidebar.Audio is not pressable"
 
-    local i controls_ready=0
+    local controls_ready=0
     for ((i=0; i<80; i++)); do
         see_main "$OUT/dictation.json"
         if jq -e '[.data.ui_elements[]?
@@ -4886,9 +4898,11 @@ flow_dictation() {
         "$OUT/fake-events.jsonl" >/dev/null \
         || die "Dictation did not preserve the active conversation alias"
 
-    press "$OUT/dictation-ready.json" Sidebar.Chat "$OUT/chat-after-dictation.json" \
-        || die "Chat is not reachable after Dictation warmup"
+    press "$OUT/dictation-ready.json" "$conversation_id" "$OUT/chat-after-dictation.json" \
+        || die "The existing conversation is not reachable after Dictation warmup"
     wait_send_idle "$OUT/chat-after-dictation-ready.json"
+    assert_tree_text "$OUT/chat-after-dictation-ready.json" \
+        "Conversation state before dictation"
     send_prompt "Conversation survives dictation" "dictation-chat"
 
     log "  setup controls, privacy toggle, vocabulary, co-loaded warmup, and preserved chat produced effects"
