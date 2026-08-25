@@ -38,23 +38,6 @@ echo "==> assembling Rapid-MLX Desktop.app"
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/Frameworks"
 cp "$ROOT/.build/$CONFIG/Rapid" "$CONTENTS/MacOS/Rapid"
-# SwiftPM emits the release binary with its full symbol table (~212k symbols,
-# 25 MB). `strip -x` removes the local symbols and takes it to ~9.4 MB.
-#
-# Crash telemetry is unaffected. ``CrashReporter``'s exception hook uploads
-# ``NSException.callStackSymbols``, which resolves frames through the dynamic
-# symbol table — and `-x` keeps exactly that, dropping only non-external
-# entries. Verified with an @inline(never) probe: the mangled Swift frame
-# name survives the strip byte-for-byte. A plain `strip` (no -x) WOULD break
-# this, as would stripping any dylib others link against; do not widen it.
-#
-# There is no dSYM to preserve first — SwiftPM's release config emits no
-# DWARF here (`dsymutil` reports "no debug symbols in executable"), so the
-# symbol table is all that ever shipped.
-#
-# ORDER: must precede the codesign pass at the end of this script, since
-# strip rewrites the Mach-O and invalidates any existing signature.
-strip -x "$CONTENTS/MacOS/Rapid"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 
