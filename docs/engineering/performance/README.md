@@ -9,3 +9,4 @@ summary statistics, and limitations.
 - [Gemma 4 12B engine comparison on M2 Pro](2026-08-21-gemma4-12b-engine-comparison.md)
 - [Qwen3.5-9B engine comparison on M2 Pro](2026-08-21-qwen3.5-9b-engine-comparison.md)
 - [Rapid-MLX 0.12.18 performance release gate](2026-08-22-release-0.12.18-perf-gate.md)
+- [Qwen3.8 Whittle-MoE phase-1 evaluation](2026-08-25-qwen3.8-whittle-moe-phase1.md)
