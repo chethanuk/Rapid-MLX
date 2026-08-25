@@ -1202,7 +1202,7 @@ final class ServerManager {
         // process without reaching the legacy stop/start fallback below. Ask
         // before either destructive route so picker activation and every
         // other `ensureServing` caller share one guard.
-        var modelSwitchGuardEvaluated = false
+        var validatedStopAlias: String?
         var destructiveModelSwitchApproved = false
         if replacementGroup != nil,
            let currentAlias = launchedChildAlias,
@@ -1212,8 +1212,10 @@ final class ServerManager {
                 to: trimmed
             )
             guard decision != .cancelled else { return false }
-            modelSwitchGuardEvaluated = true
-            destructiveModelSwitchApproved = decision.requiresProcessRestart
+            validatedStopAlias = currentAlias
+            if decision.requiresProcessRestart {
+                destructiveModelSwitchApproved = true
+            }
         }
 
         // Any fresh load attempt — resident, cold start, or the legacy
@@ -1337,14 +1339,21 @@ final class ServerManager {
         // the idle/stopped/missing cases just fall through to
         // ``start(alias:)``.
         if child != nil {
-            if !modelSwitchGuardEvaluated,
-               let currentAlias = launchedChildAlias,
-               currentAlias != trimmed {
+            // `ensureServing` can re-enter while a dialog or residency refresh
+            // is awaiting. Repeat until the alias we validated is still the
+            // live child; a stale A→C answer must never authorize stopping B.
+            while let currentAlias = launchedChildAlias,
+                  currentAlias != trimmed,
+                  ModelSwitchDecision.requiresRevalidation(
+                      validatedAlias: validatedStopAlias,
+                      liveAlias: currentAlias
+                  ) {
                 let decision = await approveModelSwitchIfNeeded(
                     from: currentAlias,
                     to: trimmed
                 )
                 guard decision != .cancelled else { return false }
+                validatedStopAlias = currentAlias
             }
             await stop(preservingLastServedAlias: true)
         }

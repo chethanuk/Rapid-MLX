@@ -176,6 +176,16 @@ enum ModelSwitchDecision: Equatable, Sendable {
     case cancelled
 
     var requiresProcessRestart: Bool { self == .approved }
+
+    /// A residency decision applies only to the model it inspected.
+    /// `ensureServing` is actor-reentrant while the refresh or dialog is
+    /// awaiting, so a different live alias needs its own fresh decision.
+    static func requiresRevalidation(
+        validatedAlias: String?,
+        liveAlias: String
+    ) -> Bool {
+        validatedAlias != liveAlias
+    }
 }
 
 enum ResidentModelLoadResult: Sendable, Equatable {
