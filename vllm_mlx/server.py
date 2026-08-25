@@ -40,11 +40,14 @@ import gc
 import logging
 import os
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+if TYPE_CHECKING:
+    from .runtime.audio_worker import AudioWorkerHandoff, ModelWorker
 
 # Single source of truth for the OpenAI-shaped 400 / 422 / 500 envelopes
 # (F-161 / F-162 / F-163 / F-094-class). Defined in ``middleware`` so
@@ -236,7 +239,15 @@ _default_frequency_penalty: float | None = None  # Set via --default-frequency-p
 def _bind_audio_worker_for_engine(engine: object | None) -> bool:
     """Bind a compatible primary engine or select the isolated fallback."""
 
-    from .runtime.audio_worker import ModelWorker, bind_audio_worker
+    from .runtime.audio_worker import bind_audio_worker
+
+    worker = _audio_worker_for_engine(engine)
+    bind_audio_worker(worker)
+    return worker is not None
+
+
+def _audio_worker_for_engine(engine: object | None) -> "ModelWorker | None":
+    """Return an engine only when it implements the audio worker contract."""
 
     compatible = engine is not None and all(
         callable(getattr(engine, method, None))
@@ -245,8 +256,7 @@ def _bind_audio_worker_for_engine(engine: object | None) -> bool:
             "execute_on_model_worker_sync",
         )
     )
-    bind_audio_worker(cast(ModelWorker, engine) if compatible else None)
-    return compatible
+    return cast("ModelWorker", engine) if compatible else None
 
 
 # Sampling overlays populated from the model's AliasProfile +
@@ -2339,17 +2349,33 @@ def configure_model_residency(
     return _residency_manager
 
 
-def _handoff_resident_primary_audio_worker(entry: ModelEntry) -> None:
-    """Atomically transfer audio ownership before primary replacement."""
+class _ResidentPrimaryAudioHandoff:
+    """Adapt the audio dispatcher's lease to residency model entries."""
 
-    # Transfer auxiliary MLX ownership before publishing the new primary.
-    # ``bind`` is the audio lifecycle's atomic handoff gate: it refuses to
-    # detach an old worker with active work, allowing residency to roll back
-    # the replacement without changing primary or registry truth.
-    from .runtime.audio_worker import AudioWorkerBusyError
+    def __init__(self, handoff: "AudioWorkerHandoff") -> None:
+        self._handoff = handoff
+
+    def commit(self, entry: ModelEntry | None) -> None:
+        engine = entry.engine if entry is not None else None
+        self._handoff.commit(_audio_worker_for_engine(engine))
+
+    def rollback(self) -> None:
+        self._handoff.rollback()
+
+
+def _handoff_resident_primary_audio_worker(
+    entry: ModelEntry,
+) -> _ResidentPrimaryAudioHandoff:
+    """Reserve audio ownership for a transactional primary replacement."""
+
+    # The entry identifies the primary whose residency transaction owns the
+    # lease. The dispatcher is the worker-ownership SSOT and preserves that
+    # worker until commit or rollback.
+    del entry
+    from .runtime.audio_worker import AudioWorkerBusyError, audio_worker
 
     try:
-        _bind_audio_worker_for_engine(entry.engine)
+        return _ResidentPrimaryAudioHandoff(audio_worker.begin_handoff())
     except AudioWorkerBusyError as exc:
         raise ResidentModelBusyError(
             "primary model is serving active audio work"

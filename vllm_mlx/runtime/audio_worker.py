@@ -29,6 +29,37 @@ class AudioWorkerBusyError(RuntimeError):
     """The owning model worker cannot change while audio work is active."""
 
 
+class AudioWorkerHandoff:
+    """Exclusive lease for changing the model worker without split ownership."""
+
+    def __init__(
+        self,
+        dispatcher: AudioWorkerDispatcher,
+        token: object,
+        original_worker: ModelWorker | None,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._token = token
+        self._original_worker = original_worker
+        self._finished = False
+
+    def commit(self, worker: ModelWorker | None) -> None:
+        """Publish ``worker`` and release the handoff lease."""
+
+        if self._finished:
+            raise RuntimeError("audio worker handoff is already complete")
+        self._dispatcher._finish_handoff(self._token, worker)
+        self._finished = True
+
+    def rollback(self) -> None:
+        """Keep the original worker and release the handoff lease."""
+
+        if self._finished:
+            return
+        self._dispatcher._finish_handoff(self._token, self._original_worker)
+        self._finished = True
+
+
 @dataclass
 class AudioLaneState:
     model: str | None = None
@@ -47,15 +78,22 @@ class AudioWorkerDispatcher:
         self._fallback: concurrent.futures.ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
         self._lanes: dict[str, AudioLaneState] = {}
+        self._handoff_token: object | None = None
 
-    def bind(self, worker: ModelWorker | None) -> None:
+    @staticmethod
+    def _validate_worker(worker: ModelWorker | None) -> None:
         if worker is not None and (
             not callable(getattr(worker, "execute_on_model_worker", None))
             or not callable(getattr(worker, "execute_on_model_worker_sync", None))
         ):
             raise TypeError("engine does not expose the model-worker contract")
+
+    def bind(self, worker: ModelWorker | None) -> None:
+        self._validate_worker(worker)
         fallback = None
         with self._lock:
+            if self._handoff_token is not None:
+                raise AudioWorkerBusyError("model worker handoff is in progress")
             if worker is not self._worker and any(
                 state.active_requests > 0 for state in self._lanes.values()
             ):
@@ -63,6 +101,33 @@ class AudioWorkerDispatcher:
                     "cannot replace the model worker while audio work is active"
                 )
             self._worker = worker
+            fallback = self._fallback
+            self._fallback = None
+        if fallback is not None:
+            fallback.shutdown(wait=True)
+
+    def begin_handoff(self) -> AudioWorkerHandoff:
+        """Reserve worker ownership while the primary lifecycle changes."""
+
+        with self._lock:
+            if self._handoff_token is not None:
+                raise AudioWorkerBusyError("model worker handoff is in progress")
+            if any(state.active_requests > 0 for state in self._lanes.values()):
+                raise AudioWorkerBusyError(
+                    "cannot replace the model worker while audio work is active"
+                )
+            token = object()
+            self._handoff_token = token
+            return AudioWorkerHandoff(self, token, self._worker)
+
+    def _finish_handoff(self, token: object, worker: ModelWorker | None) -> None:
+        self._validate_worker(worker)
+        fallback = None
+        with self._lock:
+            if token is not self._handoff_token:
+                raise RuntimeError("audio worker handoff lease is not active")
+            self._worker = worker
+            self._handoff_token = None
             fallback = self._fallback
             self._fallback = None
         if fallback is not None:
@@ -89,6 +154,8 @@ class AudioWorkerDispatcher:
     def _begin(self, lane: str, model: str, operation: str) -> None:
         now = time.monotonic()
         with self._lock:
+            if self._handoff_token is not None:
+                raise AudioWorkerBusyError("model worker handoff is in progress")
             state = self._lanes.setdefault(lane, AudioLaneState())
             state.model = model
             state.active_requests += 1
