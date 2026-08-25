@@ -424,13 +424,13 @@ final class ServerManager {
     private func approveModelSwitchIfNeeded(
         from currentAlias: String,
         to targetAlias: String
-    ) async -> Bool {
+    ) async -> ModelSwitchDecision {
         await refreshResidency()
         guard let risk = ModelSwitchRisk.evaluate(
             currentAlias: currentAlias,
             targetAlias: targetAlias,
             residency: residency
-        ) else { return true }
+        ) else { return .notNeeded }
 
         let request = PendingModelSwitch(id: UUID(), risk: risk)
         if pendingModelSwitch == nil {
@@ -444,10 +444,12 @@ final class ServerManager {
                 try await Task.sleep(nanoseconds: 200_000_000)
             } catch {
                 abandonModelSwitchWaiter(request.id)
-                return false
+                return .cancelled
             }
         }
-        return modelSwitchDecisions.removeValue(forKey: request.id) ?? false
+        return modelSwitchDecisions.removeValue(forKey: request.id) == true
+            ? .approved
+            : .cancelled
     }
 
     /// Alias of the child that currently owns the runtime — for BOTH
@@ -1200,15 +1202,18 @@ final class ServerManager {
         // process without reaching the legacy stop/start fallback below. Ask
         // before either destructive route so picker activation and every
         // other `ensureServing` caller share one guard.
-        var modelSwitchApproved = false
+        var modelSwitchGuardEvaluated = false
+        var destructiveModelSwitchApproved = false
         if replacementGroup != nil,
            let currentAlias = launchedChildAlias,
            currentAlias != trimmed {
-            guard await approveModelSwitchIfNeeded(
+            let decision = await approveModelSwitchIfNeeded(
                 from: currentAlias,
                 to: trimmed
-            ) else { return false }
-            modelSwitchApproved = true
+            )
+            guard decision != .cancelled else { return false }
+            modelSwitchGuardEvaluated = true
+            destructiveModelSwitchApproved = decision.requiresProcessRestart
         }
 
         // Any fresh load attempt — resident, cold start, or the legacy
@@ -1236,9 +1241,15 @@ final class ServerManager {
         // surface as a hard failure instead of the process swap they actually
         // need — audio runs as its own ``serve <alias>`` (audio-mode) process.
         let readyWithChild: Bool = { if case .ready = state, child != nil { return true }; return false }()
+        // The resident loader deliberately refuses to replace a busy model.
+        // Once the user approves the destructive action, bypass that route and
+        // use the existing process stop/start fallback so "Switch" performs
+        // the interruption it just disclosed instead of returning a busy
+        // rejection.
         if Self.residencyLoadApplies(
             residencyEligible: residencyEligible && !speculativeRequested
-                && !speculativeSettingChanged && !requiresImageLaneRestart,
+                && !speculativeSettingChanged && !requiresImageLaneRestart
+                && !destructiveModelSwitchApproved,
             readyWithChild: readyWithChild
         ) {
             // Publish before crossing the network await so SwiftUI replaces
@@ -1326,13 +1337,14 @@ final class ServerManager {
         // the idle/stopped/missing cases just fall through to
         // ``start(alias:)``.
         if child != nil {
-            if !modelSwitchApproved,
+            if !modelSwitchGuardEvaluated,
                let currentAlias = launchedChildAlias,
                currentAlias != trimmed {
-                guard await approveModelSwitchIfNeeded(
+                let decision = await approveModelSwitchIfNeeded(
                     from: currentAlias,
                     to: trimmed
-                ) else { return false }
+                )
+                guard decision != .cancelled else { return false }
             }
             await stop(preservingLastServedAlias: true)
         }

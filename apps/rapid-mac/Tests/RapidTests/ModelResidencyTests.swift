@@ -131,6 +131,9 @@ struct ModelResidencyTests {
             targetAlias: "qwen3.5-4b-4bit",
             residency: snapshot(activeRequests: 2)
         ) == nil)
+        #expect(ModelSwitchDecision.approved.requiresProcessRestart)
+        #expect(!ModelSwitchDecision.notNeeded.requiresProcessRestart)
+        #expect(!ModelSwitchDecision.cancelled.requiresProcessRestart)
     }
 
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")

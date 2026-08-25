@@ -167,6 +167,17 @@ struct ModelSwitchRisk: Equatable, Sendable {
     }
 }
 
+/// Result of the Desktop's advisory active-request guard. An explicit user
+/// approval must use the existing stop/start path because the resident loader
+/// correctly refuses to evict a model while it is serving a request.
+enum ModelSwitchDecision: Equatable, Sendable {
+    case notNeeded
+    case approved
+    case cancelled
+
+    var requiresProcessRestart: Bool { self == .approved }
+}
+
 enum ResidentModelLoadResult: Sendable, Equatable {
     case loaded(ResidentModelStatus)
     case unsupported
