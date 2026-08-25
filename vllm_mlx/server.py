@@ -1895,7 +1895,7 @@ def load_model(
     _default_max_tokens_is_explicit = max_tokens_is_explicit
     _model_alias = effective_model_alias
     _model_path = model_name
-    _model_name = served_model_name or requested_model_name
+    _model_name = served_model_name or model_name
     _tool_parser_instance = None
 
     # Populate the sampling overlays now that we know which model we're

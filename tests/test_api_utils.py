@@ -974,7 +974,10 @@ class TestMllmBackboneIsHybrid:
         server.load_model(alias)
 
         assert server._model_path == repo
-        assert server._model_name == alias
+        # Only an explicit ``served_model_name`` replaces the primary served
+        # id. The canonical checkpoint remains primary by default, while the
+        # requested short name is exposed separately as its alias.
+        assert server._model_name == repo
         assert server._model_alias == alias
         assert server._engine.kwargs["model_name"] == repo
         assert server._engine.kwargs["force_text"] is True
