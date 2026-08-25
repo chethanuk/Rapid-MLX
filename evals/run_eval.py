@@ -351,6 +351,16 @@ def _resolve_tools(scenario: dict) -> list:
                 )
             resolved.append(_TOOL_REGISTRY[entry])
         elif isinstance(entry, dict):
+            # Validate the OpenAI tool-schema shape so a malformed dictionary
+            # (e.g. {"name": "weather"} instead of {"function": {"name": ...}})
+            # fails fast here rather than silently hitting the request path.
+            fn = entry.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else None
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"scenario {scenario.get('id', '<unknown>')} has a malformed "
+                    f"tools entry {entry!r} (expected a dict with function.name)"
+                )
             resolved.append(entry)
         else:
             raise ValueError(
@@ -969,9 +979,10 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 first_msg = nonstream["choices"][0]["message"]
                 content = first_msg.get("content") or ""
                 tool_calls = first_msg.get("tool_calls") or []
-                # TTFT is not available on the non-streaming path, but the total
-                # wall-clock elapsed time is real; do not report it as 0.
-                ttft = 0.0
+                # TTFT is not defined on the non-streaming path: do not store a
+                # 0.0 placeholder (that would read as instantaneous first-token
+                # latency). Only the total wall-clock `elapsed` is real, and that
+                # is what is reported via result["elapsed_s"] below.
 
             grade = _check_tool_call(tool_calls, sc)
             first_ok = (

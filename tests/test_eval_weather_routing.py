@@ -123,6 +123,29 @@ class TestResolveTools:
         with pytest.raises(ValueError, match="malformed tools"):
             re._resolve_tools({"id": "x", "tools": bad})
 
+    def test_malformed_schema_dict_fails_fast(self, re):
+        # A dict that is not a well-formed OpenAI tool schema (no function.name)
+        # must fail here, not silently reach the request path.
+        with pytest.raises(ValueError, match="function.name"):
+            re._resolve_tools(
+                {
+                    "id": "x",
+                    "tools": [{"function": {"name": "weather"}}, {"name": "oops"}],
+                }
+            )
+        with pytest.raises(ValueError, match="function.name"):
+            re._resolve_tools({"id": "x", "tools": [{"type": "function"}]})
+
+    def test_wellformed_schema_dict_accepted(self, re):
+        # A real OpenAI tool schema dict passes through verbatim.
+        out = re._resolve_tools(
+            {
+                "id": "x",
+                "tools": [{"type": "function", "function": {"name": "weather"}}],
+            }
+        )
+        assert out[0]["function"]["name"] == "weather"
+
 
 class TestFuzzyArgMatching:
     def test_nonempty_substring_matches(self, re):

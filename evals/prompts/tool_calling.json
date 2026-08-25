@@ -731,8 +731,13 @@
       "don't have access to a weather tool",
       "do not have access to a weather tool",
       "cannot access the weather tool",
+      "can't access the weather tool",
       "weather tool is not available",
-      "use web search instead"
+      "use web search instead",
+      "can't use the weather",
+      "cannot use the weather",
+      "cannot use the temperature tool",
+      "no access to weather"
     ],
     "require_final_terms": [
       "Partly cloudy",

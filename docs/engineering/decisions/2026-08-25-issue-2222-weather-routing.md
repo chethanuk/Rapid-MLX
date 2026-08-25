@@ -1,8 +1,9 @@
 # Issue #2222 — Weather routing + strict-format: reproduction + root-cause classification (2026-08-25)
 
-Owner: ds0732 (temporary human-owner exception; RC2 path untouched). Worktree:
-`fix/issue-2222-weather-routing` from `origin/main` `bf2ff335`. No code changed yet —
-this documents baseline reproduction + classification before disposition.
+Owner: ds0732 (temporary human-owner exception; RC2 path untouched). This document
+starts as the baseline reproduction + classification, and is updated to note the
+implemented eval coverage (PR #2327) once it landed. Original worktree base:
+`fix/issue-2222-weather-routing` from `origin/main` `bf2ff335`.
 
 ## Reported symptoms (issue #2222, filed at base `4bbca765`, build 0.12.18)
 1. Explicit Weather prompt routed to `web_search`; the answer claimed no Weather tool
@@ -67,14 +68,17 @@ observation, not a routing or contract defect.
 - Strict format: split/disposition as a separate model-eval format evidence item
   (add a model-agnostic eval case), no product fix.
 
-## Candidates for in-scope, model-agnostic regression coverage (pending Atlas go/no-go)
-The shipped `evals/prompts/tool_calling.json` suite cannot currently exercise
-weather-vs-web_search disambiguation: its global tool list has no `weather` and
-scenarios cannot override the tool subset. A model-agnostic eval case that sends BOTH
-schemas with `tool_choice:auto` and asserts `weather` for an explicit current-weather
-request would lock the corrected contract. This is within allowed scope
-("focused model-agnostic regression/eval coverage"), touches no product routing, and
-is not a full-ci/RC change. Any such change awaits Atlas approval (scope rule).
+## Implemented: model-agnostic regression coverage (PR #2327)
+The shipped `evals/prompts/tool_calling.json` suite could not originally exercise
+weather-vs-web_search disambiguation: its global tool list had no `weather` and
+scenarios could not override the tool subset. PR #2327 adds scenario
+`tc31-weather-explicit` — it advertises the two Desktop-authentic schemas inline,
+sends `tool_choice:auto` (native routing), and asserts `weather` for an explicit
+current-weather request while forbidding `web_search`. This locks the corrected
+contract, touches no product routing, and is a focused model-agnostic eval change
+(approved; non-RC). See the "Verification" section for the harness-correctness
+fixes (timing, forbidden-tool rejection, final-turn no-tool rule, empty-arg
+handling) and their committed regression tests.
 
 ## Acceptance status
 1. Baseline reproduction + root-cause classification documented: DONE (this doc).
@@ -109,24 +113,33 @@ The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in
   WebSearchTool, including the "do not use web_search for current weather" guard) so it
   models the real Desktop two-schema contract, not a synthetic setup.
 - `verify_final_text` (opt-in) runs one more non-streaming completion after the tool
-  result and checks it is non-empty, does not deny the just-used tool (`forbid_final_phrases`),
-  and reflects the supplied result (`require_final_terms`, any-match); tc31 sets all
-  three. Verified end-to-end: the first call routes to **`weather`**, and after feeding
-  the weather result the final completion yields a clean, non-contradictory report that
+  result and requires the final turn to (a) be non-empty, (b) call NO tool (any
+  `tool_calls` — a repeat `weather` or a `web_search` fallback — fails the final turn
+  rather than counting as an answer), (c) contain none of the scenario-declared
+  `forbid_final_phrases` (a bounded phrase list asserting the weather tool is
+  unavailable / use web search instead / can't use weather, etc.), and (d) reflect the
+  supplied result (`require_final_terms`, any-match). This is an intentional bounded
+  contract: it enforces the NAMED denial phrases and required terms, not a general
+  semantic non-contradiction proof (a substring check cannot grade arbitrary
+  contradictory wording). Verified end-to-end: the first call routes to **`weather`**,
+  and after feeding the weather result the final completion yields a clean report that
   reflects the result ("Partly cloudy" / "18°C" / "62%") with no "web_search
-  unavailable" claim. A reply that claims the weather tool is unavailable or suggests
-  web search fails the check.
+  unavailable" claim; a reply denying the weather tool, suggesting web search, or
+  issuing a further tool call fails the check.
 - `_resolve_tools` now supports name refs OR inline schema dicts and **fails fast** on
-  an unknown tool name, a non-empty-but-malformed `tools` value (`[]`, a dict, a
-  scalar), or a malformed entry — rather than silently dropping or broadening to the
-  global set, either of which could let a routing case pass while omitting web_search.
-  Only the absence of `tools` keeps the shared `TOOLS` list unchanged. Per-scenario
-  tools are applied consistently across the standard, parallel, irrelevance /
-  missing-params, and error-recovery branches (default is still the shared list).
+  an unknown tool name, a non-empty-but-malformed `tools` value (`[]`, a non-list, a
+  scalar), a schema dict that is not well-formed (no non-empty `function.name`), or a
+  malformed entry — rather than silently dropping or broadening to the global set,
+  either of which could let a routing case pass while omitting web_search. Only the
+  absence of `tools` keeps the shared `TOOLS` list unchanged. Per-scenario tools are
+  applied consistently across the standard, parallel, irrelevance / missing-params, and
+  error-recovery branches (default is still the shared list).
 - tc31 sets `first_call_stream: false`, so its first tool-detection uses the
   non-streaming completion and captures the structured `weather` call (this model
-  family emits the call as streamed text under SSE). That ensures the tool result is
-  fed back and the `verify_final_text` check actually runs through the real suite path.
+  family emits the call as streamed text under SSE). The non-streaming branch reports
+  real wall-clock `elapsed` and does NOT fabricate a `ttft` (TTFT is undefined off the
+  streaming path). That ensures the tool result is fed back and the `verify_final_text`
+  check actually runs through the real suite path.
 - tc31 sets `forbid_tools: ["web_search"]`: the standard branch checks EVERY tool call
   in the first response and fails if a forbidden tool was also called (a weather-then-
   web_search multi-call response must fail, not just grade on the first call), so
