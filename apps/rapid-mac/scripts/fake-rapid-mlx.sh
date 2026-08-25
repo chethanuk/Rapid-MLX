@@ -748,9 +748,8 @@ class Handler(BaseHTTPRequestHandler):
             RENDERS.finish_warmup()
         cancelled = False
         for step_index in range(total):
-            delay_ms = (step_ms_sequence[step_index]
-                        if step_index < len(step_ms_sequence) else step_ms)
-            time.sleep(delay_ms / 1000)
+            # Production publishes `step = t + 1` when a denoise step starts.
+            # Advance before sleeping so the fixture has the same wire meaning.
             if RENDERS.advance():
                 cancelled = True
                 break
@@ -763,15 +762,20 @@ class Handler(BaseHTTPRequestHandler):
                         self._json(500, {"error": {"code": "fixture_step_hold_timeout"}})
                         return
                     time.sleep(0.05)
+            delay_ms = (step_ms_sequence[step_index]
+                        if step_index < len(step_ms_sequence) else step_ms)
+            time.sleep(delay_ms / 1000)
         # Real image engines still perform VAE decode / PNG encoding after the
         # last denoise step. Keep that tail observable for GUI phase coverage.
         finish_ms = max(0, int(_setting("FAKE_IMAGE_FINISH_MS", 0)))
+        # Production clears `running` when denoising returns, before PNG
+        # encoding. Publish that same finalizing boundary ahead of the tail.
+        RENDERS.end()
         # Cancellation exits denoising without entering the successful
         # decode/encode tail. Keeping that tail after RENDERS.cancel() would
         # make the fixture report a stopped render as if it were finalizing.
         if not cancelled:
             time.sleep(finish_ms / 1000)
-        RENDERS.end()
         png = _one_pixel_png(((index * 70) % 256, (index * 130) % 256, (index * 190) % 256))
         encoded = base64.b64encode(png).decode("ascii")
         # The digest is of the BYTES that go on the wire, so a fixture (or an

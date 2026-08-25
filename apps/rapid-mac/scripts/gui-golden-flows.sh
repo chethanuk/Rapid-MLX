@@ -4075,7 +4075,7 @@ flow_image_generation() {
         || die "exiting edit mode after an import did not restore generation controls"
 
     # 9. ETA evidence across unchanged samples, cancellation, and restart.
-    # The fixture holds one completed step for five seconds. Capture the same
+    # The fixture holds one reported step start. Capture the same
     # structured step twice during that hold: the numeric ETA must remain
     # identical even though the HUD's elapsed clock keeps advancing.
     local cancel_prompt="a cheetah render to cancel after ETA appears"
@@ -4105,7 +4105,7 @@ flow_image_generation() {
     [[ "$eta_step_b" == "$eta_step_a" ]] \
         || die "the deterministic unchanged-step fixture advanced unexpectedly ($eta_step_a -> $eta_step_b)"
     [[ "$eta_value_b" == "$eta_value_a" ]] \
-        || die "ETA changed while completed progress stayed at $eta_step_a ($eta_value_a -> $eta_value_b)"
+        || die "ETA changed while reported progress stayed at $eta_step_a ($eta_value_a -> $eta_value_b)"
     press "$OUT/ig-eta-sample-b.json" Images.Generate "$OUT/ig-eta-cancel-press.json" \
         || die "the primary Stop control is not pressable after numeric ETA appears"
     local cancel_requested=0

@@ -4,8 +4,8 @@ import Testing
 @Suite("Image generation phase semantics")
 @MainActor
 struct ImageGenerationPhaseTests {
-    @Test("ETA waits for a completed step transition and stays frozen between steps")
-    func etaSamplesCompletedStepsOnly() {
+    @Test("ETA waits for a step-start transition and stays frozen within a step")
+    func etaSamplesStepStartsOnly() {
         var eta = ImageDenoiseETA()
         eta.observe(step: 0, total: 4, elapsed: 12)
         #expect(eta.secondsRemaining == nil)
@@ -17,10 +17,10 @@ struct ImageGenerationPhaseTests {
         #expect(eta.secondsRemaining == nil)
 
         eta.observe(step: 2, total: 4, elapsed: 30)
-        #expect(eta.secondsRemaining == 20)
+        #expect(eta.secondsRemaining == 30)
 
         eta.observe(step: 2, total: 4, elapsed: 39)
-        #expect(eta.secondsRemaining == 20)
+        #expect(eta.secondsRemaining == 30)
     }
 
     @Test("ETA reacts to a genuinely slower later step but not polling time")
@@ -28,17 +28,17 @@ struct ImageGenerationPhaseTests {
         var eta = ImageDenoiseETA()
         eta.observe(step: 1, total: 6, elapsed: 1)
         eta.observe(step: 2, total: 6, elapsed: 2)
-        #expect(eta.secondsRemaining == 4)
+        #expect(eta.secondsRemaining == 5)
 
-        // Five seconds of polling at the same completed-work boundary must
+        // Five seconds of polling within the same reported step must
         // not manufacture five seconds of additional remaining time.
         eta.observe(step: 2, total: 6, elapsed: 7)
-        #expect(eta.secondsRemaining == 4)
+        #expect(eta.secondsRemaining == 5)
 
-        // The next completed step really took ten seconds. The EMA moves from
-        // 1.0 to 3.25 seconds/step, so the three remaining steps become 9.75s.
+        // The next step-start transition really took ten seconds. The EMA moves
+        // from 1.0 to 3.25 seconds/step; current step 3 plus steps 4...6 remain.
         eta.observe(step: 3, total: 6, elapsed: 12)
-        #expect(eta.secondsRemaining == 9.75)
+        #expect(eta.secondsRemaining == 13)
     }
 
     @Test("ETA handles skipped progress samples and changing totals")
@@ -46,21 +46,21 @@ struct ImageGenerationPhaseTests {
         var eta = ImageDenoiseETA()
         eta.observe(step: 1, total: 8, elapsed: 40)
         eta.observe(step: 3, total: 8, elapsed: 52)
-        #expect(eta.secondsRemaining == 30)
+        #expect(eta.secondsRemaining == 36)
 
         eta.observe(step: 3, total: 10, elapsed: 60)
-        #expect(eta.secondsRemaining == 42)
+        #expect(eta.secondsRemaining == 48)
     }
 
-    @Test("ETA clears at completion and reset discards the previous run")
-    func etaCompletesAndResets() {
+    @Test("ETA includes the running final step and reset discards the previous run")
+    func etaIncludesFinalStepAndResets() {
         var eta = ImageDenoiseETA()
         eta.observe(step: 1, total: 4, elapsed: 10)
         eta.observe(step: 2, total: 4, elapsed: 15)
-        #expect(eta.secondsRemaining == 10)
+        #expect(eta.secondsRemaining == 15)
 
         eta.observe(step: 4, total: 4, elapsed: 25)
-        #expect(eta.secondsRemaining == nil)
+        #expect(eta.secondsRemaining == 5)
 
         eta.reset()
         eta.observe(step: 1, total: 4, elapsed: 55)
@@ -80,7 +80,7 @@ struct ImageGenerationPhaseTests {
         )
         #expect(
             ImageGenViewModel.nextPhase(from: .denoising, progress: finalStillRunning)
-                == .finalizing
+                == .denoising
         )
     }
 

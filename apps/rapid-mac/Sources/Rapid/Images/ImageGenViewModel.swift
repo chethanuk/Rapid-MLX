@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Estimates denoising time from completed step transitions, not a wall clock.
+/// Estimates denoising time from reported step-start transitions, not a wall clock.
 ///
 /// The HUD redraws many times while one diffusion step is running. Recomputing
 /// from that live clock makes "time left" grow on every redraw until the next
@@ -14,8 +14,8 @@ struct ImageDenoiseETA {
     private var secondsPerStep: TimeInterval?
 
     mutating func observe(step: Int, total: Int, elapsed: TimeInterval) {
-        guard step > 0, total > step else {
-            if step >= total, total > 0 { secondsRemaining = nil }
+        guard step > 0, total >= step else {
+            if step > total, total > 0 { secondsRemaining = nil }
             return
         }
         guard elapsed.isFinite, elapsed >= 0 else { return }
@@ -28,7 +28,7 @@ struct ImageDenoiseETA {
                 lastElapsed = elapsed
             }
             if let secondsPerStep {
-                secondsRemaining = secondsPerStep * Double(total - step)
+                secondsRemaining = secondsPerStep * Double(total - step + 1)
             }
             return
         }
@@ -39,7 +39,9 @@ struct ImageDenoiseETA {
             // A small exponential smoothing window reacts to sustained speed
             // changes without making every slightly noisy step jerk the HUD.
             secondsPerStep = secondsPerStep.map { $0 * 0.75 + interval * 0.25 } ?? interval
-            secondsRemaining = secondsPerStep.map { $0 * Double(total - step) }
+            // The engine reports `step = t + 1` when that step starts. The
+            // current step therefore still belongs in the remaining-work count.
+            secondsRemaining = secondsPerStep.map { $0 * Double(total - step + 1) }
         }
         lastStep = step
         lastElapsed = elapsed
@@ -103,10 +105,10 @@ final class ImageGenViewModel {
     enum Phase: Equatable { case preparing, denoising, finalizing }
 
     static func nextPhase(from current: Phase, progress: ImageClient.ImageProgress) -> Phase {
+        if progress.running { return .denoising }
         if progress.total > 0, progress.step >= progress.total {
             return .finalizing
         }
-        if progress.running { return .denoising }
         return .preparing
     }
 
@@ -183,7 +185,7 @@ final class ImageGenViewModel {
     /// When the current run started — drives a live elapsed clock in the HUD
     /// that keeps moving even during the cold model-load phase.
     private(set) var genStartedAt: Date?
-    /// Frozen between completed denoise steps so the countdown cannot grow
+    /// Frozen between reported denoise-step starts so the countdown cannot grow
     /// merely because the HUD redraw clock advanced.
     private(set) var denoiseETASeconds: TimeInterval?
     private var denoiseETA = ImageDenoiseETA()
