@@ -102,19 +102,28 @@ python3.12 -m vllm_mlx.cli serve qwen3.5-9b-4bit --port 8898 \
 Raw evidence: `/tmp/issue2222-evidence/{results.json,control_results.txt,multisample output}`.
 
 ## Verification of the eval-coverage change (2026-08-25)
-The approved change (WEATHER_TOOL + `_resolve_tools` in `evals/run_eval.py`, scenario
-`tc31-weather-explicit`) was run once against the cached `ornith-1.5-9b-bf16` model:
-- `_resolve_tools` unit behavior verified: `[weather, web_search]` resolves to exactly
-  those two schemas; a scenario without a `tools` override falls back to the shared
-  `TOOLS` list (unchanged → existing scenarios unaffected); an unknown name falls back.
-- tc31, driven through the harness's request path (its system prompt + tools), routes
-  the exact #2222 weather prompt to **`weather`** with valid args
-  (`{"location":"Tokyo, Japan","country":"Japan"}`) — the #2222 acceptance criterion #3.
-- Caveat: the eval suite's `stream_chat` auto-grades only structured `delta.tool_calls` in
-  SSE. This model family emits the tool call as streamed content text, so the streaming
-  auto-grade reports "no tool call" for every tool-detection scenario (tc01–tc17,
-  tc21–tc31) — a PRE-EXISTING harness × model limitation, present on the unmodified
-  harness, not a regression from this change. Models that emit structured streaming
-  tool_calls auto-grade normally. The scenario encodes the corrected contract
-  (weather over web_search) and is model-agnostic by construction.
+The approved change (WEATHER_TOOL + WEB_SEARCH_TOOL + `_resolve_tools` in
+`evals/run_eval.py`, scenario `tc31-weather-explicit`) was run once against the cached
+`ornith-1.5-9b-bf16` model, then updated for Codex round-1 findings:
+- tc31 advertises the two **Desktop-authentic** schemas inline (WeatherTool +
+  WebSearchTool, including the "do not use web_search for current weather" guard) so it
+  models the real Desktop two-schema contract, not a synthetic setup.
+- `verify_final_text` (opt-in) runs one more non-streaming completion after the tool
+  result and requires non-empty final content; tc31 sets it. Verified end-to-end:
+  the first call routes to **`weather`**, and after feeding the weather result the final
+  completion yields a clean, non-contradictory narrative report (no "web_search
+  unavailable" claim).
+- `_resolve_tools` now supports name refs OR inline schema dicts and **fails fast** on an
+  unknown tool name / malformed entry (rather than silently dropping, which could let a
+  routing case pass by omitting web_search). Scenarios without `tools` keep the shared
+  `TOOLS` list unchanged.
+- Unit checks: JSON valid; `run_eval.py` parses; resolver resolves `[weather,
+  web_search]`, keeps default behavior, raises on `weather`+`web_seach` typo.
+- Caveat: the eval suite's `stream_chat` auto-grades only structured
+  `delta.tool_calls` in SSE. This model family emits the tool call as streamed content
+  text, so the streaming auto-grade reports "no tool call" for every tool-detection
+  scenario (tc01–tc17, tc21–tc31) — a PRE-EXISTING harness × model limitation, present
+  on the unmodified harness, not a regression from this change. Models that emit
+  structured streaming tool_calls auto-grade normally. The scenario encodes the
+  corrected contract (weather over web_search) and is model-agnostic by construction.
 

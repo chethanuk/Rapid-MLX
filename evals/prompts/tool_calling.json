@@ -657,8 +657,60 @@
     "level": 1,
     "description": "Explicit Weather request routes to weather, not web_search (both tools advertised) — issue #2222",
     "tools": [
-      "weather",
-      "web_search"
+      {
+        "type": "function",
+        "function": {
+          "name": "weather",
+          "description": "Get current weather or current temperature for a city or place. Use this tool—not web_search—for current conditions. Pass the location from the user's request, preserving country or state/province qualifiers. This tool does not provide future forecasts, and ambiguous places are not guessed.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "City or place name in the user's language, optionally followed by region/country, e.g. '西安', 'Springfield, Illinois', or 'Paris, France'."
+              },
+              "country": {
+                "type": "string",
+                "description": "Optional country name or two-letter country code used to disambiguate the place."
+              },
+              "admin1": {
+                "type": "string",
+                "description": "Optional state, province, or first-level administrative region used to disambiguate the place."
+              },
+              "units": {
+                "type": "string",
+                "description": "Either 'metric' (Celsius, km/h) or 'imperial' (Fahrenheit, mph). Defaults to metric.",
+                "enum": [
+                  "metric",
+                  "imperial"
+                ]
+              }
+            },
+            "required": [
+              "location"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "description": "Search the web and get the top results (title + URL + snippet). Use this for current events, recent news, or facts that may have changed since training. Do not use it for current weather when the weather tool is available.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Search query in natural language."
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      }
     ],
     "messages": [
       {
@@ -672,6 +724,6 @@
     },
     "arg_match_mode": "fuzzy",
     "fake_result": "Tokyo: Partly cloudy, 18°C (64°F), humidity 62%, wind 8 km/h NE.",
-    "expect_final_text": true
+    "verify_final_text": true
   }
 ]

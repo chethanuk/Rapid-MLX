@@ -249,11 +249,15 @@ TOOLS = [
     },
 ]
 
-# The shipped Rapid Desktop WeatherTool schema (apps/rapid-mac/.../WeatherTool.swift).
-# Shared across tool-choice eval scenarios that exercise weather-vs-web_search
+# The shipped Rapid Desktop tool schemas (apps/rapid-mac/.../*Tool.swift). Shared
+# across tool-choice eval scenarios that exercise weather-vs-web_search
 # disambiguation, so the eval stays model-agnostic and matches what the Desktop
 # actually advertises. Issue #2222: an explicit current-weather request must select
-# `weather`, never `web_search`, when both schemas are present.
+# `weather`, never `web_search`, when BOTH Desktop schemas are present. The two
+# schemas deliberately cross-reference each other ("not web_search" / "do not use it
+# for current weather when the weather tool is available") — a weather-routing case
+# must advertise both authentic schemas or it does not model the real Desktop
+# contract.
 WEATHER_TOOL = {
     "type": "function",
     "function": {
@@ -285,22 +289,68 @@ WEATHER_TOOL = {
     },
 }
 
-# Named tool registry a scenario may reference via ``tools`` (a list of tool names)
-# to override the shared TOOLS set for a specific case (e.g. weather-vs-web_search
-# disambiguation, which the shared set cannot exercise because it has no weather tool).
+# The shipped Desktop WebSearchTool schema. Distinct from the generic "Search the
+# web" fixture used by the shared TOOLS list: the Desktop description forbids using
+# web_search for current weather when the weather tool is available, and a routing
+# eval must advertise exactly this to exercise the real two-schema contract.
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web and get the top results (title + URL + snippet). Use this for current events, recent news, or facts that may have changed since training. Do not use it for current weather when the weather tool is available.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query in natural language.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+# Registry of named tool schemas a scenario may reference by name via its ``tools``
+# list. A scenario may also carry full tool schema dicts inline (see _resolve_tools);
+# inline dicts let a case advertise the exact Desktop pair (WEATHER_TOOL +
+# WEB_SEARCH_TOOL) without conflating the generic shared web_search name.
 _TOOL_REGISTRY = {t["function"]["name"]: t for t in TOOLS}
-_TOOL_REGISTRY[WEATHER_TOOL["function"]["name"]] = WEATHER_TOOL
+_TOOL_REGISTRY.update(
+    {t["function"]["name"]: t for t in (WEATHER_TOOL, WEB_SEARCH_TOOL)}
+)
 
 
 def _resolve_tools(scenario: dict) -> list:
-    """Return the tool list for a scenario: the scenario's named ``tools`` subset if
-    present, else the shared ``TOOLS`` list. Missing/unknown names fall back per-name
-    so a typo degrades to the shared set rather than silently dropping a tool."""
-    names = scenario.get("tools")
-    if not isinstance(names, list) or not names:
+    """Return the tool list for a scenario.
+
+    A scenario may set ``tools`` to either a list of tool-name strings (resolved from
+    ``_TOOL_REGISTRY``) or a list of full tool schema dicts (used verbatim). An
+    unknown tool NAME fails fast with a clear error rather than silently dropping it —
+    silently weakening the advertised set is exactly the bug that would let a
+    weather-routing case pass by omitting web_search. A scenario without ``tools``
+    uses the shared ``TOOLS`` list (existing behavior unchanged).
+    """
+    spec = scenario.get("tools")
+    if not isinstance(spec, list) or not spec:
         return TOOLS
-    resolved = [_TOOL_REGISTRY[n] for n in names if n in _TOOL_REGISTRY]
-    return resolved or TOOLS
+    resolved = []
+    for entry in spec:
+        if isinstance(entry, str):
+            if entry not in _TOOL_REGISTRY:
+                raise ValueError(
+                    f"scenario {scenario.get('id', '<unknown>')} references unknown "
+                    f"tool name {entry!r}; known names: {sorted(_TOOL_REGISTRY)}"
+                )
+            resolved.append(_TOOL_REGISTRY[entry])
+        elif isinstance(entry, dict):
+            resolved.append(entry)
+        else:
+            raise ValueError(
+                f"scenario {scenario.get('id', '<unknown>')} has a malformed tools "
+                f"entry {entry!r} (expected a name string or a tool schema dict)"
+            )
+    return resolved
 
 
 # =============================================================================
@@ -967,6 +1017,30 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                         )
                     else:
                         break  # stop if a followup step fails
+
+            # Optional final-text check (opt-in; NOT inherited from the
+            # un-enforced legacy `expect_final_text` flag). After the tool result
+            # is fed back, run one more non-streaming completion and require
+            # non-empty final content, so a schema-contract case also proves the
+            # model reports the tool result rather than closing with a
+            # contradictory or empty turn. Applied only to scenarios that set
+            # `verify_final_text`, leaving every other scenario's behavior
+            # unchanged.
+            if sc.get("verify_final_text"):
+                final_resp = chat_request(
+                    host, port, messages, tools=_resolve_tools(sc),
+                    max_tokens=512, temperature=0.0, stream=False,
+                )
+                final_msg = final_resp["choices"][0]["message"]
+                final_text = (final_msg.get("content") or "").strip()
+                final_ok = bool(final_text)
+                steps_passed.append(final_ok)
+                if final_ok:
+                    result["final_text"] = final_text[:200]
+                else:
+                    result["final_text_error"] = (
+                        "empty final content after tool result"
+                    )
 
             fully_correct = all(steps_passed)
             result["fully_correct"] = fully_correct
