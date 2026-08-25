@@ -623,6 +623,21 @@ def fuzzy_match_args(expected: dict, actual: dict) -> float:
     return matches / total if total > 0 else 0.0
 
 
+def _forbidden_tool_names(tool_calls, forbid: list) -> list:
+    """Return the tool names in ``tool_calls`` that appear in ``forbid``.
+
+    Pure helper so the standard-branch first-turn guard and the final-completion
+    guard share one definition and are directly testable. ``tool_calls`` may be the
+    OpenAI-style list (each with ``function.name``) or None/empty.
+    """
+    forbid_set = set(forbid or [])
+    return [
+        t.get("function", {}).get("name")
+        for t in (tool_calls or [])
+        if t.get("function", {}).get("name") in forbid_set
+    ]
+
+
 def _check_tool_call(tool_calls, scenario, step_prefix="") -> dict:
     """Check a single tool call against expected values. Returns grading dict."""
     expected_key = f"{step_prefix}expected_tool" if step_prefix else "expected_tool"
@@ -914,14 +929,18 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                     host, port, messages, tools=_resolve_tools(sc), max_tokens=512, temperature=0.0
                 )
             else:
+                _start = time.monotonic()
                 nonstream = chat_request(
                     host, port, messages, tools=_resolve_tools(sc),
                     max_tokens=512, temperature=0.0, stream=False,
                 )
+                elapsed = time.monotonic() - _start
                 first_msg = nonstream["choices"][0]["message"]
                 content = first_msg.get("content") or ""
                 tool_calls = first_msg.get("tool_calls") or []
-                ttft = elapsed = 0.0
+                # TTFT is not available on the non-streaming path, but the total
+                # wall-clock elapsed time is real; do not report it as 0.
+                ttft = 0.0
 
             grade = _check_tool_call(tool_calls, sc)
             first_ok = (
@@ -941,11 +960,7 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
             # first-tool metadata is fed back downstream. Check every call in the
             # response's first turn.
             if sc.get("forbid_tools"):
-                forbidden_calls = [
-                    t.get("function", {}).get("name")
-                    for t in (tool_calls or [])
-                    if t.get("function", {}).get("name") in sc["forbid_tools"]
-                ]
+                forbidden_calls = _forbidden_tool_names(tool_calls, sc["forbid_tools"])
                 if forbidden_calls:
                     result["forbidden_tool_called"] = forbidden_calls
                     first_ok = False
@@ -1086,11 +1101,9 @@ def run_tool_calling_suite(host: str, port: int, verbose: bool = False) -> dict:
                 # tool_calls against forbid_tools too, so forbidden tools cannot
                 # hide in the final response's tool_calls.
                 final_calls = final_msg.get("tool_calls") or []
-                final_forbidden = [
-                    t.get("function", {}).get("name")
-                    for t in final_calls
-                    if t.get("function", {}).get("name") in sc.get("forbid_tools", [])
-                ]
+                final_forbidden = _forbidden_tool_names(
+                    final_calls, sc.get("forbid_tools", [])
+                )
                 if final_forbidden:
                     final_ok = False
                     reasons.append(
