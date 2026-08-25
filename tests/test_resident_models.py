@@ -72,6 +72,10 @@ async def test_dynamic_resident_auto_detected_hybrid_gets_bounded_prefix_reuse(
             pass
 
     monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(
+        server, "resolve_serving_lane", lambda _name, **_kwargs: (False, True)
+    )
     monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
     monkeypatch.setattr(
         "vllm_mlx.model_auto_config.detect_model_config",
@@ -112,6 +116,10 @@ async def test_dynamic_resident_prefix_disable_keeps_hybrid_entries_zero(
             pass
 
     monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(
+        server, "resolve_serving_lane", lambda _name, **_kwargs: (False, True)
+    )
     monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
     monkeypatch.setattr(
         "vllm_mlx.model_auto_config.detect_model_config",
@@ -156,6 +164,10 @@ async def test_dynamic_resident_full_attention_stays_unbounded(
             pass
 
     monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(
+        server, "resolve_serving_lane", lambda _name, **_kwargs: (False, False)
+    )
     monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
     monkeypatch.setattr(
         "vllm_mlx.model_auto_config.detect_model_config",
@@ -167,6 +179,157 @@ async def test_dynamic_resident_full_attention_stays_unbounded(
     scheduler = captured["scheduler_config"]
     assert scheduler.hybrid_cache_entries == 0
     assert scheduler.non_trimmable_exact_prefix_reuse is False
+
+
+@pytest.mark.asyncio
+async def test_dynamic_resident_loads_singleton_no_refs_snapshot_offline(
+    monkeypatch, tmp_path, scheduler_config_stub
+):
+    """A commit-pinned catalog snapshot is the runtime load path without main."""
+    import json
+
+    import huggingface_hub
+
+    from vllm_mlx import server
+
+    repo = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    revision = "93760be4f1f69842a46bc13dbdc0f19e291392a3"
+    snapshot = (
+        tmp_path
+        / "hub"
+        / "models--mlx-community--Qwen3.5-2B-MLX-4bit"
+        / "snapshots"
+        / revision
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "model_type": "qwen3_5",
+                "vision_config": {"model_type": "qwen3_5_vision"},
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "layer_types": ["linear_attention", "full_attention"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (snapshot / "model.safetensors").write_bytes(b"complete")
+    (snapshot / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "language_model.layers.0.weight": "model.safetensors",
+                    "vision_tower.blocks.0.weight": "model.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub")
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    def fail_on_network(_name):
+        raise AssertionError("singleton snapshot must never need the network")
+
+    monkeypatch.setattr("vllm_mlx.cli._ensure_model_downloaded", fail_on_network)
+    captured = {}
+
+    class FakeEngine:
+        is_mllm = False
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def start(self):
+            pass
+
+        def generate_warmup(self):
+            pass
+
+    monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
+
+    entry = await server._load_dynamic_resident_model("qwen3.5-2b-4bit", repo)
+
+    assert entry.model_path == repo
+    assert captured["model_name"] == str(snapshot)
+    assert captured["force_text"] is True
+
+
+@pytest.mark.asyncio
+async def test_dynamic_switch_restores_hybrid_text_lane(
+    monkeypatch, tmp_path, scheduler_config_stub
+):
+    """A large hybrid checkpoint keeps its lane after a small-model switch."""
+    import json
+
+    from vllm_mlx import server
+
+    large = tmp_path / "qwen35-9b"
+    small = tmp_path / "qwen3-06b"
+    for path in (large, small):
+        path.mkdir()
+        (path / "model.safetensors").write_bytes(b"complete")
+    (large / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "vision_config": {"model_type": "qwen3_5_vision"},
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "layer_types": ["linear_attention", "full_attention"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (large / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "language_model.layers.0.weight": "model.safetensors",
+                    "vision_tower.blocks.0.weight": "model.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (small / "config.json").write_text(
+        json.dumps({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"}),
+        encoding="utf-8",
+    )
+    constructed = []
+
+    class FakeEngine:
+        is_mllm = False
+
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+        async def start(self):
+            pass
+
+        def generate_warmup(self):
+            pass
+
+    monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
+    monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
+
+    await server._load_dynamic_resident_model("large", str(large))
+    await server._load_dynamic_resident_model("small", str(small))
+    await server._load_dynamic_resident_model("large", str(large))
+
+    assert [item["model_name"] for item in constructed] == [
+        str(large),
+        str(small),
+        str(large),
+    ]
+    assert [item["force_text"] for item in constructed] == [True, False, True]
 
 
 class FakeEngine:
