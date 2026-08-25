@@ -137,14 +137,42 @@ class TestResolveTools:
             re._resolve_tools({"id": "x", "tools": [{"type": "function"}]})
 
     def test_wellformed_schema_dict_accepted(self, re):
-        # A real OpenAI tool schema dict passes through verbatim.
-        out = re._resolve_tools(
-            {
-                "id": "x",
-                "tools": [{"type": "function", "function": {"name": "weather"}}],
-            }
-        )
+        # A real OpenAI function-tool schema (type + name + parameters) passes
+        # through verbatim.
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+        out = re._resolve_tools({"id": "x", "tools": [schema]})
         assert out[0]["function"]["name"] == "weather"
+
+    @pytest.mark.parametrize(
+        "partial",
+        [
+            {"function": {"name": "weather"}},  # no type == function
+            {"type": "function", "function": {"name": "weather"}},  # no parameters
+            {
+                "type": "function",
+                "function": {"name": "weather", "parameters": {}},
+            },  # non-string params.type
+        ],
+    )
+    def test_partial_schema_dict_fails_fast(self, re, partial):
+        with pytest.raises(ValueError, match="function-tool dict"):
+            re._resolve_tools({"id": "x", "tools": [partial]})
+
+    def test_explicit_null_tools_fails_fast(self, re):
+        # "tools": null is an explicit override, not an absent key — broadening
+        # to the shared list silently would violate the fail-fast policy.
+        with pytest.raises(ValueError, match="explicit null"):
+            re._resolve_tools({"id": "x", "tools": None})
 
 
 class TestFuzzyArgMatching:

@@ -337,11 +337,17 @@ def _resolve_tools(scenario: dict) -> list:
     silently weakening the advertised set is exactly the bug that would let a
     weather-routing case pass by omitting web_search. A MALFORMED ``tools`` value
     (a non-list, an empty list, or a bad entry) also fails fast instead of silently
-    broadening to the global set. Only the ABSENCE of ``tools`` (None) defaults to the
-    shared ``TOOLS`` list (existing behavior unchanged).
+    broadening to the global set. Only the ABSENCE of the ``tools`` KEY defaults to
+    the shared ``TOOLS`` list (existing behavior unchanged); an explicitly configured
+    ``"tools": null`` is malformed and fails fast rather than broadening silently.
     """
-    if "tools" not in scenario or scenario.get("tools") is None:
+    if "tools" not in scenario:
         return TOOLS
+    if scenario.get("tools") is None:
+        raise ValueError(
+            f"scenario {scenario.get('id', '<unknown>')} has a malformed tools value "
+            f"None (explicit null is not the same as an absent override)"
+        )
     spec = scenario.get("tools")
     if not isinstance(spec, list) or not spec:
         raise ValueError(
@@ -359,14 +365,27 @@ def _resolve_tools(scenario: dict) -> list:
             resolved.append(_TOOL_REGISTRY[entry])
         elif isinstance(entry, dict):
             # Validate the OpenAI tool-schema shape so a malformed dictionary
-            # (e.g. {"name": "weather"} instead of {"function": {"name": ...}})
-            # fails fast here rather than silently hitting the request path.
+            # (e.g. {"name": "weather"} or {"function": {"name": ...}} without a
+            # type/parameters) fails fast here rather than silently hitting the
+            # request path.
             fn = entry.get("function")
             name = fn.get("name") if isinstance(fn, dict) else None
-            if not isinstance(name, str) or not name:
+            is_type_fn = entry.get("type") == "function"
+            has_params = (
+                isinstance(fn, dict)
+                and isinstance(fn.get("parameters"), dict)
+                and isinstance(fn["parameters"].get("type"), str)
+            )
+            if (
+                not is_type_fn
+                or not isinstance(name, str)
+                or not name
+                or not has_params
+            ):
                 raise ValueError(
                     f"scenario {scenario.get('id', '<unknown>')} has a malformed "
-                    f"tools entry {entry!r} (expected a dict with function.name)"
+                    f"tools entry {entry!r} (expected an OpenAI function-tool dict "
+                    f'with type="function" and a non-empty function.name + parameters)'
                 )
             resolved.append(entry)
         else:
