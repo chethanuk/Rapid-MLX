@@ -124,9 +124,15 @@ async def load_resident_model(request: ModelLoadRequest):
         performance = (
             request.performance.runtime_value() if request.performance else None
         )
-        profile = resolve_profile(request.model) or (
+        model_profile = resolve_profile(request.model)
+        path_profile = (
             resolve_profile(request.model_path) if request.model_path else None
         )
+        # The loader consumes model_path when supplied, so only that
+        # checkpoint's metadata may authorize destructive admission. An
+        # unknown override falls back to keep-then-commit rather than trusting
+        # the request-facing alias for different weights.
+        profile = path_profile if request.model_path else model_profile
         resolved_group = None
         if profile is not None:
             resolved_group = (

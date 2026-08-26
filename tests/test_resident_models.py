@@ -2564,6 +2564,78 @@ def test_residency_control_plane_returns_typed_replacement_capacity_projection(
     assert registry.default_name == "chat"
 
 
+def test_residency_control_plane_uses_model_path_group_for_destructive_admission(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from vllm_mlx.routes.residency import router
+
+    manager, registry, loaded, _ = manager_fixture(limit_gib=6)
+    profiles = {
+        "chat-alias": SimpleNamespace(modality="text"),
+        "repo/image": SimpleNamespace(modality="image-gen"),
+    }
+    monkeypatch.setattr("vllm_mlx.routes.residency.resolve_profile", profiles.get)
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.get_config",
+        lambda: SimpleNamespace(residency_manager=manager),
+    )
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/models/load",
+            json={
+                "model": "chat-alias",
+                "model_path": "repo/image",
+                "estimated_size_gb": 4,
+                "replace_group": "assistant",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "image-gen" in response.json()["detail"]
+    assert loaded == {}
+    assert registry.default_name == "chat"
+    assert registry.get_engine("chat").stopped is False
+
+
+def test_residency_unknown_model_path_falls_back_to_safe_admission(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx.routes.residency import router
+
+    manager, registry, loaded, _ = manager_fixture(limit_gib=6)
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.resolve_profile",
+        lambda name: SimpleNamespace(modality="text") if name == "chat-alias" else None,
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.get_config",
+        lambda: SimpleNamespace(residency_manager=manager),
+    )
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/models/load",
+            json={
+                "model": "chat-alias",
+                "model_path": "/unknown/local/checkpoint",
+                "estimated_size_gb": 4,
+                "replace_group": "assistant",
+            },
+        )
+
+    assert response.status_code == 507
+    assert loaded == {}
+    assert registry.default_name == "chat"
+    assert registry.get_engine("chat").stopped is False
+
+
 def test_residency_control_plane_preserves_generic_capacity_error(monkeypatch):
     from types import SimpleNamespace
 
