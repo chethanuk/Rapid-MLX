@@ -22,8 +22,10 @@ can actually understand.
 ### Added
 
 - **Experimental Qwen3.8-Flash-Next text inference.** The M1 lane supports the
-  mixed 4-bit checkpoint on Macs with at least 128 GB of unified memory. MTP
-  and vision support remain planned for a later release.
+  mixed 4-bit checkpoint through the `qwen3.8-flash-next-4bit` alias on Macs
+  with at least 128 GB of unified memory. This release exposes the experimental
+  text lane through the CLI and API; Desktop, MTP, and vision support remain
+  planned for a later release.
   ([#2433](https://github.com/raullenchai/Rapid-MLX/pull/2433))
 - **Assistant changes are explicit, safe transactions.** API clients can choose
   whether a busy text or vision model switch should reject, wait, or abort
@@ -83,6 +85,19 @@ can actually understand.
 - **Dictation remains available across chat-model switches.** The speech model
   stays resident and is restored after switching chat models.
   ([#2400](https://github.com/raullenchai/Rapid-MLX/pull/2400))
+- **MTP assistants survive loading a second model.** Generation remains bound
+  to its worker, so the original assistant continues answering instead of
+  losing its GPU stream. ([#2441](https://github.com/raullenchai/Rapid-MLX/pull/2441))
+- **Model-switch memory projections credit the assistant being replaced.** The
+  estimate uses the same fit thresholds as the replacement transaction and no
+  longer warns about memory that will be freed before the new model starts.
+  ([#2443](https://github.com/raullenchai/Rapid-MLX/pull/2443),
+  [#2444](https://github.com/raullenchai/Rapid-MLX/pull/2444))
+- **Speech to Text arms itself after model lifecycle changes.** When speech
+  input is enabled, it becomes ready without an extra manual start button.
+  ([#2448](https://github.com/raullenchai/Rapid-MLX/pull/2448))
+<!-- TRAIN-6 PLACEHOLDER: add the Claude Code connection correction only after
+the bisect identifies and validates the exact landed fix. -->
 - **Photo rejection and multimodal reloads recover cleanly.** A rejected image
   cannot poison the next text turn, and a reloaded vision model cannot reuse a
   stale generation worker. ([#2379](https://github.com/raullenchai/Rapid-MLX/pull/2379),
