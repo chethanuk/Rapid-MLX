@@ -2556,6 +2556,7 @@ def _set_resident_primary(entry: ModelEntry | None) -> None:
     cfg.tool_parser_instance = None
     cfg.reasoning_parser = _reasoning_parser
     cfg.reasoning_parser_name = entry.reasoning_parser
+    cfg.ready = True
 
 
 def _sync_config() -> None:

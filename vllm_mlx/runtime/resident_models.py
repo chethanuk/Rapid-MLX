@@ -719,8 +719,27 @@ class ResidentModelManager:
             else None
         )
 
+        if primary and self._on_primary_changed is not None:
+            try:
+                self._on_primary_changed(None)
+            except BaseException:
+                # The old engine is still intact and registered at this point.
+                # Restore its serving-layer publication before releasing the
+                # handoff so a callback failure cannot strand the transaction.
+                try:
+                    self._on_primary_changed(record.entry)
+                finally:
+                    if handoff is not None:
+                        handoff.rollback()
+                raise
         self.registry.remove(model_name)
         self._drop_record(model_name)
+        if primary:
+            # Removing the registry default otherwise promotes an unrelated
+            # secondary while the replacement loader is still in flight.  Make
+            # primary unavailability visible through both routing surfaces
+            # before the first await; publication below restores them together.
+            self.registry.clear_default()
         try:
             stop = getattr(record.entry.engine, "stop", None)
             if callable(stop):
@@ -846,13 +865,6 @@ class ResidentModelManager:
                 restored_entry = None
             if record.primary:
                 self.registry.clear_default()
-                if self._on_primary_changed is not None:
-                    try:
-                        self._on_primary_changed(None)
-                    except BaseException:
-                        logger.exception(
-                            "Failed to clear serving-layer primary after reload failure"
-                        )
         finally:
             if handoff is not None:
                 handoff.commit(restored_entry)
