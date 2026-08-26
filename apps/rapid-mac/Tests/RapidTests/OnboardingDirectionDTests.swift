@@ -74,8 +74,11 @@ struct OnboardingDirectionDTests {
         let baseline = try #require(source.range(of: ".onAppear{coordinator.applyDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])"))
         let policyTask = try #require(source.range(of: ".task(id:StarterSelectionKey("))
         let chooser = try #require(source.range(of: "privatevarchooseModelStep:someView{"))
+        let actionBoundary = try #require(source.range(
+            of: "privatefuncadvanceToModelChoice(){coordinator.settleDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])coordinator.advanceToChooseModel()}"
+        ))
         let skipRefresh = try #require(source.range(
-            of: "Button(\"Skipfornow\"){coordinator.applyDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])onSkip()"
+            of: "privatefuncskipForNow(){coordinator.settleDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])onSkip()}"
         ))
 
         #expect(baseline.lowerBound > body.lowerBound)
@@ -86,6 +89,8 @@ struct OnboardingDirectionDTests {
                 "the policy task must mount with the root view before welcome Skip is actionable")
         #expect(policyTask.lowerBound < chooser.lowerBound,
                 "the policy task must not be owned by Step 2")
+        #expect(actionBoundary.lowerBound < chooser.lowerBound,
+                "Get Started must synchronously consume the latest authoritative snapshot")
         #expect(skipRefresh.lowerBound < chooser.lowerBound,
                 "welcome Skip must synchronously consume the latest authoritative snapshot")
     }

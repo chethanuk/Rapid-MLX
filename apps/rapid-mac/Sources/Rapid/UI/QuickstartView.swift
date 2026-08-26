@@ -1877,7 +1877,7 @@ struct QuickstartView: View {
 
                 OnboardingActionLane {
                     Button {
-                        coordinator.advanceToChooseModel()
+                        advanceToModelChoice()
                     } label: {
                         Text(Self.welcomePrimaryTitle(resuming: coordinator.isResumingIncompleteSetup))
                     }
@@ -1902,15 +1902,7 @@ struct QuickstartView: View {
                     // #1653; it does not any more, because a user asking to
                     // see the catalogue has not asked to leave setup.
                     Button("Skip for now") {
-                        // The catalog can become authoritative one run-loop
-                        // turn before its `.task` executes. Resolve that live
-                        // snapshot synchronously so Skip never outruns an
-                        // eligible cached-model preference.
-                        coordinator.applyDefaultChoice(
-                            hardware: hardware,
-                            catalog: catalogLoaded ? cachedModels : []
-                        )
-                        onSkip()
+                        skipForNow()
                     }
                     .buttonStyle(.onboardingQuiet)
                     .keyboardShortcut(.cancelAction)
@@ -1933,6 +1925,28 @@ struct QuickstartView: View {
     /// the model chooser").
     static func welcomePrimaryTitle(resuming: Bool) -> String {
         resuming ? "Continue setup" : "Get started"
+    }
+
+    /// Resolve the latest hardware/cache policy at the user's action boundary.
+    /// SwiftUI's catalogue task can legitimately settle before or after the
+    /// welcome screen appears; neither ordering may leave the chooser pointing
+    /// at a card it does not render.
+    private func advanceToModelChoice() {
+        coordinator.settleDefaultChoice(
+            hardware: hardware,
+            catalog: catalogLoaded ? cachedModels : []
+        )
+        coordinator.advanceToChooseModel()
+    }
+
+    /// The one genuine onboarding dismissal. Keep the policy settlement and
+    /// callback together so every exit preserves the same starter selection.
+    private func skipForNow() {
+        coordinator.settleDefaultChoice(
+            hardware: hardware,
+            catalog: catalogLoaded ? cachedModels : []
+        )
+        onSkip()
     }
 
     // MARK: - Step 2 · Choose a model
@@ -3267,7 +3281,21 @@ struct QuickstartView: View {
                 ? QuickstartCoordinator.compactDefaultChoice.alias
                 : QuickstartCoordinator.defaultChoice.alias
         } ?? QuickstartCoordinator.defaultChoice.alias
-        let cachedPresentation = quickstartCachedPresentation(catalog, limit: 6)
+        var cachedPresentation = quickstartCachedPresentation(catalog, limit: 6)
+        // A catalog-preferred authored choice can sit just beyond the bounded
+        // cached row. Keep the bound, but swap that selected row into view so
+        // selection and AXSelected always have one visible owner.
+        if choices.contains(where: { $0.alias == selection }),
+           !cachedPresentation.primary.contains(where: { $0.alias == selection }),
+           let selectedEntry = quickstartCachedModels(catalog).first(where: {
+               $0.alias == selection
+           }) {
+            cachedPresentation.alternates.removeAll { $0.alias == selection }
+            if let displaced = cachedPresentation.primary.popLast() {
+                cachedPresentation.alternates.insert(displaced, at: 0)
+            }
+            cachedPresentation.primary.append(selectedEntry)
+        }
         let existing = cachedPresentation.primary
         let existingAliases = Set(existing.map(\.alias))
         // The RAM-aware recommended row: SSOT picks for this Mac, dropped if
