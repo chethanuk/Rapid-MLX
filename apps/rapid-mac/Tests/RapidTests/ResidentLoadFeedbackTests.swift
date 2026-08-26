@@ -483,7 +483,7 @@ struct ResidentLoadFeedbackTests {
     private func makeServer(
         initialAlias: String = "qwen3.5-4b-4bit",
         binaryPath: URL? = nil,
-        sessionDefaults: UserDefaults = .standard
+        sessionDefaults: UserDefaults? = nil
     ) -> ServerManager {
         var client = ServerResidencyClient()
         client.session = ResidentLoadRejectProtocol.session()

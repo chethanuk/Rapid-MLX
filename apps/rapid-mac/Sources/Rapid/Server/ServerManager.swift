@@ -685,7 +685,7 @@ final class ServerManager {
     /// Persistence destination for lane-owned launch state. Production uses
     /// standard defaults; lifecycle tests inject an isolated suite while still
     /// driving the real spawn/health transition.
-    private let sessionDefaults: UserDefaults
+    private let sessionDefaults: UserDefaults?
     /// Catalog provenance supplied by UI start paths. Retained by alias so a
     /// memory-confirmation re-entry does not lose the proof carried by the
     /// original Start action when a later catalog subprocess fails.
@@ -962,13 +962,15 @@ final class ServerManager {
     /// child or relying on whatever ``rapid-mlx`` happens to be on
     /// disk. Not part of any production code path; the underscore
     /// prefix mirrors the Swift Standard Library convention for
-    /// "API kept around for testing only."
+    /// "API kept around for testing only." Session persistence is opt-in:
+    /// parallel fake-sidecar tests must not race through ``.standard`` or
+    /// mutate the app's real last-chat selection.
     internal init(
         testingState: ServerState,
         binaryPath: URL? = nil,
         residency: ModelResidencySnapshot = .empty,
         activeBearer: String? = nil,
-        sessionDefaults: UserDefaults = .standard
+        sessionDefaults: UserDefaults? = nil
     ) {
         self.state = testingState
         self.activeBearer = activeBearer
@@ -1012,6 +1014,7 @@ final class ServerManager {
         alias: String,
         catalogEntry: ModelEntry?
     ) {
+        guard let sessionDefaults else { return }
         SessionModelRestore.persistReadyAlias(
             alias,
             catalogEntry: catalogEntry,
