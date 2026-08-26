@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// Temporary hosted-runner diagnostic for the Swift 6.0 test-process hang.
+/// Hosted-runner guard for a test process that stops making progress.
 ///
 /// This deliberately uses a Foundation thread rather than Swift concurrency:
 /// the failure under investigation strands the cooperative executor and the
@@ -33,7 +33,7 @@ enum CIHangWatchdog {
             lock.unlock()
             guard quietFor >= quietLimit else { continue }
 
-            write("CI hang watchdog: no SamplingConfigTests progress for \(Int(quietFor))s; sampling blocked test process\n")
+            write("CI hang watchdog: no watchdog-checkpoint progress for \(Int(quietFor))s; sampling blocked test process\n")
             let ownPID = getpid()
             sample(pid: ownPID)
             for childPID in childPIDs(of: ownPID) where isSwiftTestProcess(pid: childPID) {

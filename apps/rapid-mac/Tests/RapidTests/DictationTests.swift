@@ -629,6 +629,12 @@ struct DictationTests {
         #expect(controller.phase == .starting)
         #expect(recorderStartCount == 1)
         #expect(server.servingAlias == "qwen3-0.6b-4bit")
+        #expect(controller.testingHasActiveTicker)
+        #expect(!controller.testingHasRecorder)
+
+        controller.disable()
+        #expect(!controller.testingHasActiveTicker)
+        #expect(!controller.testingHasRecorder)
     }
 
     @MainActor
