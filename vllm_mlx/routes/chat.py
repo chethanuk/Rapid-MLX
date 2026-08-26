@@ -119,6 +119,14 @@ from ..service.helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _new_stream_request_id() -> str:
+    """Return an unguessable public identity suitable for scheduler admission."""
+
+    return f"chatcmpl-{uuid.uuid4().hex}"
+
+
 _SAFE_DEEPSEEK_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 router = APIRouter()
@@ -4966,7 +4974,7 @@ async def _create_chat_completion_impl(
         # The cancel endpoint receives only this client-visible id, so a
         # separately generated scheduler UUID would make a live request
         # impossible to address.
-        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        response_id = _new_stream_request_id()
         # Opt-in telemetry (Phase 2.2): the inbound User-Agent for the
         # streaming ``request`` event's ``caller_agent``. Passed RAW (not
         # bucketed) — ``emit.request`` funnels it through
@@ -6236,7 +6244,7 @@ async def stream_chat_completion(
 
     try:
         if response_id is None:
-            response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+            response_id = _new_stream_request_id()
         start_time = time.perf_counter()
         # Opt-in telemetry (Phase 2.2): wall-clock of the FIRST real output
         # token (content / reasoning / tool_call). This is the meaningful
@@ -7605,7 +7613,7 @@ async def stream_chat_completion_guided(
 
     try:
         if response_id is None:
-            response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+            response_id = _new_stream_request_id()
         start_time = time.perf_counter()
 
         include_usage = bool(
@@ -7919,7 +7927,7 @@ async def stream_chat_completion_strict_postgen(
     # — clients group by id, so a fresh uuid here would surface as a
     # second un-associated completion.
     if response_id is None:
-        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        response_id = _new_stream_request_id()
     created = int(time.time())
     model_name = _resolve_model_name(request.model)
 
