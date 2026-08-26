@@ -73,6 +73,9 @@ can actually understand.
   route automatically. ([#2385](https://github.com/raullenchai/Rapid-MLX/pull/2385),
   [#2219](https://github.com/raullenchai/Rapid-MLX/issues/2219),
   [#2388](https://github.com/raullenchai/Rapid-MLX/pull/2388))
+- **8 GB Macs start with a model that fits.** First run recommends
+  `lfm2.5-1b-4bit` on the lowest memory tier, avoiding the RAM warning produced
+  by the previous 2.6B starter. ([#2432](https://github.com/raullenchai/Rapid-MLX/pull/2432))
 - **Dictation remains available across chat-model switches.** The speech model
   stays resident and is restored after switching chat models.
   ([#2400](https://github.com/raullenchai/Rapid-MLX/pull/2400))
