@@ -557,7 +557,9 @@ class TestIsMllmModelWeightsPresenceOverride:
         """Runtime capability, not a stale alias pin, now decides this VLM."""
         from vllm_mlx.model_aliases import resolve_profile
 
-        assert resolve_profile("qwen3.5-4b-4bit").is_text_only is False
+        profile = resolve_profile("qwen3.5-4b-4bit")
+        assert profile.is_text_only is False
+        assert profile.vision_min_memory_gb == 32.0
 
     def test_legacy_weights_probe_wrapper_delegates_to_shared_metadata(self, tmp_path):
         model_dir = self._make_model_dir(
@@ -1157,6 +1159,7 @@ class TestResolveServingLane:
             "mllm_hybrid_runtime_supported",
             lambda: hybrid_runtime_supported,
         )
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 64.0)
 
     def test_hybrid_vlm_auto_downgrades_to_text(self, monkeypatch):
         from vllm_mlx.api.utils import resolve_serving_lane
@@ -1165,6 +1168,32 @@ class TestResolveServingLane:
         # as an AUTOMATIC fallback (Qwen3.6-27B shape).
         self._patch_probes(monkeypatch, is_mllm=True, hybrid=True)
         assert resolve_serving_lane("any/qwen36-27b") == (False, True)
+
+    @pytest.mark.parametrize(
+        ("architecture_unavailable", "cache_mode", "reason"),
+        [
+            (True, None, "vision_architecture_unavailable"),
+            (False, "other", "vision_hybrid_cache_unsupported"),
+        ],
+    )
+    def test_unsupported_vision_contracts_fail_closed(
+        self, monkeypatch, architecture_unavailable, cache_mode, reason
+    ):
+        from vllm_mlx.api import utils as utils_mod
+
+        monkeypatch.setattr(utils_mod, "is_mllm_model", lambda _name: True)
+        monkeypatch.setattr(
+            utils_mod,
+            "mllm_arch_unsupported_but_text_vendored",
+            lambda _name: architecture_unavailable,
+        )
+        monkeypatch.setattr(
+            utils_mod, "mllm_backbone_cache_mode", lambda _name: cache_mode
+        )
+
+        assert utils_mod.resolve_serving_lane_decision(
+            "local/checkpoint"
+        ) == utils_mod.ServingLaneDecision(False, reason, auto_text_fallback=True)
 
     def test_hybrid_vlm_uses_vision_when_runtime_supports_it(self, monkeypatch):
         from vllm_mlx.api.utils import (
@@ -1183,6 +1212,68 @@ class TestResolveServingLane:
             resolve_serving_lane_decision("any/qwen35-9b").reason
             == "vision_hybrid_runtime_supported"
         )
+
+    def test_hybrid_vlm_falls_back_when_measured_vision_floor_does_not_fit(
+        self, monkeypatch
+    ):
+        from vllm_mlx.api import utils as utils_mod
+
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 16.0)
+
+        decision = utils_mod.resolve_serving_lane_decision(
+            "local/qwen35", vision_min_memory_gb=32.0
+        )
+
+        assert decision == utils_mod.ServingLaneDecision(
+            False, "vision_memory_insufficient", auto_text_fallback=True
+        )
+
+    def test_hybrid_vlm_uses_vision_at_measured_memory_floor(self, monkeypatch):
+        from vllm_mlx.api import utils as utils_mod
+
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 32.0)
+
+        assert utils_mod.resolve_serving_lane_decision(
+            "local/qwen35", vision_min_memory_gb=32.0
+        ) == utils_mod.ServingLaneDecision(True, "vision_hybrid_runtime_supported")
+
+    def test_explicit_vision_overrides_measured_memory_floor(self, monkeypatch):
+        from vllm_mlx.api import utils as utils_mod
+
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 16.0)
+
+        assert utils_mod.resolve_serving_lane_decision(
+            "local/qwen35",
+            force_mllm=True,
+            vision_min_memory_gb=32.0,
+        ) == utils_mod.ServingLaneDecision(True, "vision_lane_forced")
+
+    def test_unknown_physical_memory_does_not_invent_a_fallback(self, monkeypatch):
+        from vllm_mlx.api import utils as utils_mod
+
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 0.0)
+
+        assert utils_mod.resolve_serving_lane_decision(
+            "local/qwen35", vision_min_memory_gb=32.0
+        ) == utils_mod.ServingLaneDecision(True, "vision_hybrid_runtime_supported")
 
     @pytest.mark.parametrize(
         ("installed", "supported"),
@@ -1739,6 +1830,62 @@ class TestContentToText:
 
 
 class TestValidateContentBlocksForCapabilities:
+    @pytest.mark.parametrize(
+        "messages",
+        [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_audio", "input_audio": "not-an-object"}
+                    ],
+                }
+            ],
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": "abc", "format": "exe"},
+                        }
+                    ],
+                }
+            ],
+        ],
+    )
+    def test_invalid_input_audio_payload_is_rejected(self, messages):
+        with pytest.raises(ValueError):
+            validate_content_blocks_for_capabilities(
+                messages,
+                model_name="audio-model",
+                allow_image=False,
+                allow_video=False,
+                allow_audio=True,
+            )
+
+    def test_enabled_image_and_video_capabilities_accept_media(self):
+        validate_content_blocks_for_capabilities(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                        },
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "https://example.com/video.mp4"},
+                        },
+                    ],
+                }
+            ],
+            model_name="vision-model",
+            allow_image=True,
+            allow_video=True,
+        )
+
     def test_text_lane_image_error_has_stable_machine_readable_code(self):
         from vllm_mlx.api.utils import UnsupportedContentBlockError
 
@@ -1773,6 +1920,10 @@ class TestValidateContentBlocksForCapabilities:
                 "serving_lane_reason": "vision_hybrid_runtime_unsupported",
             }
         }
+        assert (
+            "serving_lane_reason"
+            not in caught.value.openai_detail(serving_lane_reason=object())["error"]
+        )
 
     def test_chat_route_preserves_typed_text_lane_image_error(self):
         from fastapi import FastAPI

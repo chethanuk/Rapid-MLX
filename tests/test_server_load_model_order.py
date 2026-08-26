@@ -180,6 +180,40 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
     assert server._engine.kwargs.get("force_text") is False
 
 
+def test_materialized_checkpoint_keeps_catalog_vision_memory_floor(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import model_aliases, model_metadata, server
+    from vllm_mlx.api import utils as api_utils
+    from vllm_mlx.model_profile import ModelProfile
+
+    monkeypatch.setattr(model_aliases, "resolve_model", lambda _name: "publisher/model")
+    monkeypatch.setattr(
+        model_aliases,
+        "resolve_profile",
+        lambda _name: ModelProfile(vision_min_memory_gb=32.0),
+    )
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(
+        model_metadata,
+        "read_model_metadata",
+        lambda _name: SimpleNamespace(snapshot_dir="/cache/snapshots/revision"),
+    )
+    monkeypatch.setattr(api_utils, "is_mllm_model", lambda _name: True)
+    monkeypatch.setattr(
+        api_utils, "mllm_arch_unsupported_but_text_vendored", lambda _name: False
+    )
+    monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda _name: "arrays")
+    monkeypatch.setattr(api_utils, "mllm_hybrid_runtime_supported", lambda: True)
+    monkeypatch.setattr(api_utils, "physical_ram_gb", lambda: 16.0)
+
+    resolved = server._resolve_serving_checkpoint("qwen3.5-4b-4bit")
+
+    assert resolved.load_path == "/cache/snapshots/revision"
+    assert resolved.auto_text_fallback is True
+    assert resolved.lane_reason == "vision_memory_insufficient"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("auto_text_fallback", "lane_reason", "expected_force_text"),

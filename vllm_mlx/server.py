@@ -1727,7 +1727,7 @@ def _resolve_serving_checkpoint(
     but no ``refs/main``; metadata resolution can identify that snapshot, and
     the engine must receive that local path rather than retrying the repo id.
     """
-    from .model_aliases import resolve_model
+    from .model_aliases import resolve_model, resolve_profile
 
     model_path = resolve_model(model_name)
     if not force_mllm and not force_text:
@@ -1740,10 +1740,14 @@ def _resolve_serving_checkpoint(
         if metadata is not None and metadata.snapshot_dir is not None
         else model_path
     )
+    profile = resolve_profile(model_path)
     decision = resolve_serving_lane_decision(
         load_path,
         force_mllm=force_mllm,
         force_text=force_text,
+        vision_min_memory_gb=(
+            profile.vision_min_memory_gb if profile is not None else None
+        ),
     )
     return _ServingCheckpoint(
         model_path=model_path,
@@ -2063,6 +2067,9 @@ def load_model(
             ),
             "vision_architecture_unavailable": (
                 "the installed vision runtime does not provide its architecture"
+            ),
+            "vision_memory_insufficient": (
+                "its measured vision footprint exceeds this Mac's physical memory"
             ),
         }.get(
             _serving_lane_reason,

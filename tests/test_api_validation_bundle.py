@@ -486,8 +486,9 @@ class TestChatRejectsImageOnTextOnlyModel:
             },
         )
         assert r.status_code == 400
-        detail = r.json()["detail"]
-        assert "image" in detail.lower() or "video" in detail.lower()
+        error = r.json().get("detail", r.json())["error"]
+        assert error["code"] == "image_input_unsupported"
+        assert "image" in error["message"].lower()
 
     def test_video_on_text_only_engine_400(self, patched_config, monkeypatch):
         client = _build_chat_app(patched_config, monkeypatch)

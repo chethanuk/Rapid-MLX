@@ -19,6 +19,7 @@ from ..model_metadata import (
     read_local_model_metadata,
     read_model_metadata,
 )
+from ..recommendations import physical_ram_gb
 from .models import Message
 
 logger = logging.getLogger(__name__)
@@ -1372,7 +1373,11 @@ class ServingLaneDecision:
 
 
 def resolve_serving_lane_decision(
-    model_name: str, *, force_mllm: bool = False, force_text: bool = False
+    model_name: str,
+    *,
+    force_mllm: bool = False,
+    force_text: bool = False,
+    vision_min_memory_gb: float | None = None,
 ) -> ServingLaneDecision:
     """Resolve one lane contract for startup, residency, and diagnostics."""
     if force_text:
@@ -1393,6 +1398,20 @@ def resolve_serving_lane_decision(
         )
     if cache_mode == "arrays":
         if mllm_hybrid_runtime_supported():
+            if vision_min_memory_gb is None:
+                profile = resolve_profile(model_name)
+                vision_min_memory_gb = (
+                    profile.vision_min_memory_gb if profile is not None else None
+                )
+            available_gb = physical_ram_gb()
+            if (
+                vision_min_memory_gb is not None
+                and available_gb > 0
+                and available_gb < vision_min_memory_gb
+            ):
+                return ServingLaneDecision(
+                    False, "vision_memory_insufficient", auto_text_fallback=True
+                )
             return ServingLaneDecision(True, "vision_hybrid_runtime_supported")
         return ServingLaneDecision(
             False, "vision_hybrid_runtime_unsupported", auto_text_fallback=True
@@ -1590,7 +1609,7 @@ class UnsupportedContentBlockError(ValueError):
             "code": self.code,
             "param": self.param,
         }
-        if serving_lane_reason is not None:
+        if isinstance(serving_lane_reason, str):
             error["serving_lane_reason"] = serving_lane_reason
         return {"error": error}
 
