@@ -182,9 +182,10 @@ def test_moved_main_reported_as_download(
     wrong for a mutable ``main`` — the subsequent mirror/HF call can transfer
     new files while the summary falsely says "nothing to download". The
     summary must reflect the ACTUAL transfer. Here a stale rev_A is fully
-    cached pre-pull, then the mirror populates a NEWER rev_B with real bytes:
-    the pre-pull size (measured against rev_A) and the post-pull size (against
-    the now-resolved rev_B) differ, so the pull is reported as a download.
+    cached pre-pull, then the mirror populates a NEWER rev_B. To prove the
+    label keys on the resolved revision (not byte count), rev_B is the SAME
+    total size as rev_A; the pull is nonetheless reported as a download
+    because the post-pull snapshot resolves to a different directory.
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     stale_rev = "aaaaaa" * 6
@@ -200,10 +201,11 @@ def test_moved_main_reported_as_download(
     _make_fake_snapshot(repo_root / "snapshots" / stale_rev, total_bytes=4096)
 
     def _mirror_fetch(model_name: str) -> bool:
-        # Remote main advanced mid-pull: refs/main now points at a NEWER rev
-        # whose snapshot is populated with more bytes than the stale one.
+        # Remote main advanced mid-pull: refs/main now points at a NEWER rev.
+        # Same total byte count as the stale rev, so only the resolved PATH
+        # (not the size) proves a transfer happened.
         (refs_dir / "main").write_text(head_rev)
-        _make_fake_snapshot(repo_root / "snapshots" / head_rev, total_bytes=8192)
+        _make_fake_snapshot(repo_root / "snapshots" / head_rev, total_bytes=4096)
         return True
 
     args = argparse.Namespace(model=repo_id)
