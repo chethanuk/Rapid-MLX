@@ -436,8 +436,12 @@ def test_blob_identifier_is_a_stable_transfer_seam(tmp_path: Path) -> None:
 
     # A fetched ZERO-byte file (new, empty blob) still changes the inventory
     # -> Download, never a false cache hit (carried from codex round-4 #3).
+    # Compare against the fingerprint captured immediately BEFORE this write,
+    # not the original ``before`` (the ``config`` addition above already made
+    # ``before`` unequal, so that comparison would be tautological).
+    pre_empty = cli._blob_identifier(tmp_path)
     (blobs / "empty").write_bytes(b"")
-    assert cli._blob_identifier(tmp_path) != before
+    assert cli._blob_identifier(tmp_path) != pre_empty
 
     # A REPAIR of an existing blob (mtime/size change) -> Download (the exact
     # case a snapshot-symlink fingerprint would miss). Snapshot the fingerprint
