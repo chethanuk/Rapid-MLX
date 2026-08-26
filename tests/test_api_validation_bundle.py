@@ -285,6 +285,11 @@ def _build_embed_app(patch_cfg, monkeypatch, embed_return):
 
 
 class TestEmbeddingsRoute:
+    def setup_method(self):
+        # Embeddings route + L2-normalize touch mlx tensors; skip on the
+        # no-MLX coverage job rather than crash it (issue #2395 enrollment).
+        pytest.importorskip("mlx")
+
     def test_dimensions_truncates_vector(self, patched_config, monkeypatch):
         """Slice to the requested length, then L2-normalize so the
         result is still a valid embedding (see
@@ -801,6 +806,11 @@ class TestMLLMBatchGeneratorFailsLoud:
         import vllm_mlx
 
         return Path(vllm_mlx.__file__).with_name("mllm_batch_generator.py").read_text()
+
+    def setup_method(self):
+        # MLLM batch-generator error paths touch mlx multimodal preprocessing;
+        # skip on the no-MLX coverage job rather than crash it (#2395).
+        pytest.importorskip("mlx")
 
     def test_image_branch_raises_explicit_client_error(self):
         src = self._source()

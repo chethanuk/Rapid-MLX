@@ -511,6 +511,9 @@ def test_load_model_mtp_kwarg_translates_to_scheduler_config(
 
 
 def test_load_model_mtp_kwarg_rejects_conflicting_spec_decode(scheduler_config_stub):
+    pytest.importorskip(
+        "mlx"
+    )  # scheduler/spec-decode path requires mlx (no-MLX coverage job)
     from vllm_mlx import server
 
     cfg = scheduler_config_stub()
@@ -527,6 +530,9 @@ def test_load_model_mtp_kwarg_rejects_conflicting_spec_decode(scheduler_config_s
 def test_load_model_mtp_kwarg_rejects_conflicting_suffix_config(
     scheduler_config_stub,
 ):
+    pytest.importorskip(
+        "mlx"
+    )  # scheduler/spec-decode path requires mlx (no-MLX coverage job)
     from vllm_mlx import server
 
     with pytest.raises(ValueError, match="enable_suffix_decoding=True"):
@@ -540,6 +546,9 @@ def test_load_model_mtp_kwarg_rejects_conflicting_suffix_config(
 def test_load_model_mtp_kwarg_rejects_conflicting_dflash_config(
     scheduler_config_stub,
 ):
+    pytest.importorskip(
+        "mlx"
+    )  # scheduler/spec-decode path requires mlx (no-MLX coverage job)
     from vllm_mlx import server
 
     with pytest.raises(ValueError, match="dflash_drafter_path"):
@@ -622,6 +631,9 @@ def test_load_model_mtp_kwarg_rejects_legacy_optimistic_config(
     scheduler_config carrying ``mtp_optimistic=True`` must fail because
     the direct mutation of ``spec_decode='mtp'`` below would bypass
     ``__post_init__`` and silently drop the flag under the vendored path."""
+    pytest.importorskip(
+        "mlx"
+    )  # scheduler/spec-decode path requires mlx (no-MLX coverage job)
     from vllm_mlx import server
 
     # SchedulerConfig(mtp_optimistic=True) alone (spec_decode="none") is
