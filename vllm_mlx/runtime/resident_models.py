@@ -229,6 +229,18 @@ class ResidentRoleReservation:
     loaded_at: float
 
 
+@dataclass
+class ResidentRoleAdmission:
+    """Transaction handle for replacing one auxiliary role reservation."""
+
+    record: ResidentRoleReservation
+    previous: ResidentRoleReservation | None = None
+    previous_retired: bool = False
+
+    def retire_previous(self) -> None:
+        self.previous_retired = True
+
+
 Loader = Callable[..., Awaitable[ModelEntry]]
 PrimaryChanged = Callable[[ModelEntry], None]
 
@@ -571,10 +583,14 @@ class ResidentModelManager:
         exclude: set[str],
         *,
         requested_role: str = "assistant",
+        usage_credit_bytes: int = 0,
     ) -> None:
         if self.memory_limit_bytes <= 0:
             return
-        while self._accounted_usage() + incoming_bytes > self.memory_limit_bytes:
+        while (
+            max(0, self._accounted_usage() - usage_credit_bytes) + incoming_bytes
+            > self.memory_limit_bytes
+        ):
             candidates = sorted(
                 (
                     record
@@ -589,7 +605,7 @@ class ResidentModelManager:
                 key=lambda record: record.last_used_at,
             )
             if not candidates:
-                usage = self._accounted_usage()
+                usage = max(0, self._accounted_usage() - usage_credit_bytes)
                 raise ResidentModelCapacityError(
                     reason=f"role_capacity_{requested_role.replace('-', '_')}",
                     requested_bytes=incoming_bytes,
@@ -607,13 +623,16 @@ class ResidentModelManager:
         model_id: str,
         requested_bytes: int | None,
         capacity_source: str,
+        replace_existing: bool = False,
     ):
         """Reserve a protected auxiliary role before its weights load."""
 
         async with self._lock:
-            if role in self._roles:
+            previous = self._roles.get(role)
+            if previous is not None and not replace_existing:
                 raise ResidentModelError(f"role {role!r} is already resident")
-            used = self._accounted_usage()
+            usage_credit = previous.reserved_bytes if previous is not None else 0
+            used = max(0, self._accounted_usage() - usage_credit)
             if self.memory_limit_bytes > 0 and requested_bytes is None:
                 raise ResidentModelCapacityError(
                     reason="role_capacity_unknown",
@@ -627,6 +646,7 @@ class ResidentModelManager:
                 reserved_bytes,
                 exclude=set(),
                 requested_role=role,
+                usage_credit_bytes=usage_credit,
             )
             record = ResidentRoleReservation(
                 role=role,
@@ -637,12 +657,16 @@ class ResidentModelManager:
                 loaded_at=self._clock(),
             )
             self._roles[role] = record
+            admission = ResidentRoleAdmission(record=record, previous=previous)
         try:
-            yield record
+            yield admission
         except BaseException:
             async with self._lock:
                 if self._roles.get(role) is record:
-                    self._roles.pop(role, None)
+                    if previous is not None and not admission.previous_retired:
+                        self._roles[role] = previous
+                    else:
+                        self._roles.pop(role, None)
             raise
         else:
             async with self._lock:

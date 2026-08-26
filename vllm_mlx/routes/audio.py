@@ -160,24 +160,26 @@ _tts_engine = None
 _music_engine: Any = None
 
 
+class _NoopRoleAdmission:
+    def retire_previous(self) -> None:
+        pass
+
+
 def _residency_manager():
     """Return the shared residency manager when this server configured one."""
 
-    try:
-        from ..config import get_config
+    from ..config import get_config
 
-        return get_config().residency_manager
-    except Exception:
-        return None
+    return get_config().residency_manager
 
 
 @asynccontextmanager
-async def _admitting_speech_input(model_name: str):
+async def _admitting_speech_input(model_name: str, *, replace_existing: bool = False):
     """Reserve the speech-input role before constructing its engine weights."""
 
     manager = _residency_manager()
     if manager is None:
-        yield
+        yield _NoopRoleAdmission()
         return
 
     from ..runtime.resident_models import ResidentModelCapacityError
@@ -190,8 +192,9 @@ async def _admitting_speech_input(model_name: str):
             model_id=model_name,
             requested_bytes=capacity.requested_bytes,
             capacity_source=capacity.source,
-        ):
-            yield
+            replace_existing=replace_existing,
+        ) as admission:
+            yield admission
     except ResidentModelCapacityError as exc:
         raise HTTPException(status_code=507, detail=exc.envelope()) from exc
 
@@ -1355,19 +1358,21 @@ async def _run_stt_request(
             if _stt_engine is None or _stt_engine.model_name != model_name:
                 # Symmetric with the alignment path: one STT model resident.
                 await _evict_other_lane("asr")
-                if _stt_engine is not None:
-                    old_stt = _stt_engine
-                    unload = getattr(old_stt, "unload", None)
-                    if callable(unload):
-                        from ..runtime.audio_worker import run_audio_mlx
-
-                        await run_audio_mlx("stt", old_stt.model_name, "unload", unload)
-                    _stt_engine = None
-                    await _release_speech_input_role()
+                old_stt = _stt_engine
                 stt_engine = STTEngine(model_name)
                 from ..runtime.audio_worker import run_audio_mlx
 
-                async with _admitting_speech_input(model_name):
+                async with _admitting_speech_input(
+                    model_name, replace_existing=old_stt is not None
+                ) as admission:
+                    if old_stt is not None:
+                        unload = getattr(old_stt, "unload", None)
+                        if callable(unload):
+                            await run_audio_mlx(
+                                "stt", old_stt.model_name, "unload", unload
+                            )
+                        _stt_engine = None
+                        admission.retire_previous()
                     await run_audio_mlx("stt", model_name, "load", stt_engine.load)
                     _stt_engine = stt_engine
 

@@ -574,6 +574,70 @@ async def test_duplicate_role_admission_is_rejected():
 
 
 @pytest.mark.asyncio
+async def test_rejected_role_replacement_preserves_existing_reservation():
+    manager, _registry, _loaded, _clock = manager_fixture(limit_gib=6)
+
+    async with manager.admit_role(
+        role="speech-input",
+        model_id="repo/working-stt",
+        requested_bytes=1 * GIB,
+        capacity_source="catalog",
+    ):
+        pass
+
+    replacement = manager.admit_role(
+        role="speech-input",
+        model_id="repo/too-large-stt",
+        requested_bytes=3 * GIB,
+        capacity_source="catalog",
+        replace_existing=True,
+    )
+    with pytest.raises(ResidentModelCapacityError) as raised:
+        await replacement.__aenter__()
+
+    assert raised.value.reason == "role_capacity_speech_input"
+    role = manager.snapshot()["roles"][-1]
+    assert role["model"] == "repo/working-stt"
+    assert role["state"] == "resident"
+
+
+@pytest.mark.asyncio
+async def test_role_replacement_rollback_tracks_previous_retirement():
+    manager, _registry, _loaded, _clock = manager_fixture(limit_gib=8)
+
+    async with manager.admit_role(
+        role="speech-input",
+        model_id="repo/working-stt",
+        requested_bytes=1 * GIB,
+        capacity_source="catalog",
+    ):
+        pass
+
+    with pytest.raises(RuntimeError, match="unload failed"):
+        async with manager.admit_role(
+            role="speech-input",
+            model_id="repo/replacement",
+            requested_bytes=2 * GIB,
+            capacity_source="catalog",
+            replace_existing=True,
+        ):
+            raise RuntimeError("unload failed")
+    assert manager.snapshot()["roles"][-1]["model"] == "repo/working-stt"
+
+    with pytest.raises(RuntimeError, match="replacement load failed"):
+        async with manager.admit_role(
+            role="speech-input",
+            model_id="repo/replacement",
+            requested_bytes=2 * GIB,
+            capacity_source="catalog",
+            replace_existing=True,
+        ) as admission:
+            admission.retire_previous()
+            raise RuntimeError("replacement load failed")
+    assert all(role["role"] != "speech-input" for role in manager.snapshot()["roles"])
+
+
+@pytest.mark.asyncio
 async def test_disabled_ceiling_keeps_unknown_role_truth_without_rejection():
     manager, _registry, _loaded, _clock = manager_fixture(limit_gib=0)
 
@@ -589,6 +653,16 @@ async def test_disabled_ceiling_keeps_unknown_role_truth_without_rejection():
     assert role["role"] == "speech-input"
     assert role["reserved_bytes"] == 0
     assert role["capacity_source"] == "unknown"
+
+
+def test_role_accounting_keeps_memory_probe_failure_nonfatal():
+    manager, _registry, _loaded, _clock = manager_fixture(limit_gib=8)
+
+    def failed_probe():
+        raise RuntimeError("memory probe unavailable")
+
+    manager._memory_reader = failed_probe
+    assert manager.snapshot()["memory_used_bytes"] == 4 * GIB
 
 
 @pytest.fixture

@@ -148,6 +148,7 @@ async def test_audio_load_admission_surfaces_typed_507(monkeypatch):
     from vllm_mlx.routes import audio as audio_route
     from vllm_mlx.runtime.model_registry import ModelEntry, ModelRegistry
     from vllm_mlx.runtime.resident_models import ResidentModelManager
+    from vllm_mlx.runtime.role_capacity import speech_input_capacity
 
     gib = 1024**3
     registry = ModelRegistry()
@@ -164,13 +165,25 @@ async def test_audio_load_admission_surfaces_typed_507(monkeypatch):
     manager = ResidentModelManager(
         registry,
         unused_loader,
-        memory_limit_bytes=4 * gib,
+        memory_limit_bytes=5 * gib,
         memory_reader=lambda: 0,
     )
     manager.register_primary(primary, estimated_bytes=4 * gib)
     monkeypatch.setattr(audio_route, "_residency_manager", lambda: manager)
 
-    admission = audio_route._admitting_speech_input("mlx-community/whisper-small-mlx")
+    old_model = "mlx-community/whisper-small-mlx"
+    old_capacity = speech_input_capacity(old_model)
+    async with manager.admit_role(
+        role="speech-input",
+        model_id=old_model,
+        requested_bytes=old_capacity.requested_bytes,
+        capacity_source=old_capacity.source,
+    ):
+        pass
+
+    admission = audio_route._admitting_speech_input(
+        "mlx-community/whisper-large-v3-mlx", replace_existing=True
+    )
     with pytest.raises(HTTPException) as raised:
         await admission.__aenter__()
 
@@ -179,12 +192,13 @@ async def test_audio_load_admission_surfaces_typed_507(monkeypatch):
     assert error["code"] == "insufficient_capacity_error"
     assert error["reason"] == "role_capacity_speech_input"
     assert error["used_bytes"] == 4 * gib
-    assert error["limit_bytes"] == 4 * gib
+    assert error["limit_bytes"] == 5 * gib
     assert error["requested_bytes"] > 0
+    assert manager.snapshot()["roles"][-1]["model"] == old_model
     unused_loader.assert_not_awaited()
 
 
-def test_audio_residency_manager_probe_fails_closed(monkeypatch):
+def test_audio_residency_manager_probe_does_not_disable_capacity(monkeypatch):
     from vllm_mlx import config
     from vllm_mlx.routes import audio as audio_route
 
@@ -192,7 +206,8 @@ def test_audio_residency_manager_probe_fails_closed(monkeypatch):
         raise RuntimeError("config unavailable")
 
     monkeypatch.setattr(config, "get_config", unavailable_config)
-    assert audio_route._residency_manager() is None
+    with pytest.raises(RuntimeError, match="config unavailable"):
+        audio_route._residency_manager()
 
 
 def _replacement_manager(server, old_worker):
