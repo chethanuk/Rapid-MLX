@@ -199,4 +199,23 @@ struct QuickstartStarterPolicyTests {
         )
         #expect(coordinator.selection.alias == explicit.alias)
     }
+
+    @Test("Catalog refresh cannot retarget a model being browsed or reviewed")
+    func navigationFreezesAutomaticSelection() {
+        let newCache = [entry("qwen3.5-9b-4bit", cached: true)]
+
+        let browsing = QuickstartCoordinator()
+        browsing.applyDefaultChoice(hardware: hardware(16), catalog: [])
+        let browsingAlias = browsing.selection.alias
+        browsing.beginBrowsingCatalog()
+        browsing.applyDefaultChoice(hardware: hardware(16), catalog: newCache)
+        #expect(browsing.selection.alias == browsingAlias)
+
+        let reviewing = QuickstartCoordinator()
+        reviewing.applyDefaultChoice(hardware: hardware(16), catalog: [])
+        let reviewingAlias = reviewing.selection.alias
+        reviewing.beginReviewDownload(origin: .shortlist)
+        reviewing.applyDefaultChoice(hardware: hardware(16), catalog: newCache)
+        #expect(reviewing.selection.alias == reviewingAlias)
+    }
 }

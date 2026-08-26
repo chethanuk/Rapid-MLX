@@ -510,6 +510,7 @@ Open the picker any time to switch models.
     /// return rather than a reset.
     func beginBrowsingCatalog() {
         guard case .idle = phase else { return }
+        selectionUsesAutomaticPolicy = false
         stage = .chooseModel
         step2Stage = .browsing
     }
@@ -534,6 +535,7 @@ Open the picker any time to switch models.
     func beginReviewDownload(origin: ReviewOrigin) {
         guard case .idle = phase else { return }
         guard step2Stage != .reviewing else { return }
+        selectionUsesAutomaticPolicy = false
         stage = .chooseModel
         reviewOrigin = origin
         step2Stage = .reviewing
