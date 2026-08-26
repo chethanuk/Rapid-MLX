@@ -1425,40 +1425,34 @@ def _safe_display_name(fname: str, max_len: int = 80) -> str:
     return cleaned
 
 
-def _blob_fingerprint(repo_root) -> tuple[tuple[str, int, int], ...]:
-    """Sorted ``(name, size, mtime_ns)`` of every real blob under ``blobs/``.
+def _hf_landed_blob_predated_pull(
+    hf_path: str | None,
+    predicted: Path,
+    pull_start_wall: float,
+) -> bool:
+    """True when the HF-fallback file's byte-backed blob already existed before
+    this pull started (a warm re-link, zero bytes transferred).
 
-    The mirror's stable transfer signal (Codex #2392): a NEW/MODIFIED blob is
-    the only thing meaning bytes crossed the wire. ``network_fetch`` compares
-    this before vs after the per-file pool, so a warm fallback that merely
-    re-links snapshot symlinks to ALREADY-LOCAL blobs is not counted as a
-    fetch — regardless of whether the catalog exposed a sha256 (the
-    ``expected_sha256``-only check missed non-LFS files, whose blobs HF stores
-    under their own blob id). ``.incomplete*`` scratch is excluded (HF churn).
+    ``hf_hub_download`` returns the snapshot path, normally a relative symlink
+    to ``blobs/<sha>``. We resolve it to the real blob and compare its mtime
+    against ``pull_start_wall``: a blob written before the pull began was
+    already on disk, so HF only re-linked it -> "cached". A fresh blob (mtime
+    >= pull start, including a freshly-written zero-byte blob) means HF wrote
+    bytes this pull -> "hf".
+
+    This is per-file and O(1): it stats only THIS file's resolved blob, never
+    the whole ``blobs/`` store — so it carries no shared-cache race and no
+    O(N×B) scan (Codex #2392 R5). On any failure to resolve/stat we fall back
+    to assuming a real download ("not predated"), which only risks a display-
+    level over-count, never an under-count.
     """
-    import os as _os
-
-    if not repo_root:
-        return ()
-    blob_dir = repo_root / "blobs"
-    if not blob_dir.is_dir():
-        return ()
-    rows: list[tuple[str, int, int]] = []
     try:
-        names = _os.listdir(blob_dir)
+        src = Path(hf_path) if hf_path else predicted
+        resolved = src.resolve(strict=True)
+        mtime_ns = resolved.stat().st_mtime_ns
     except OSError:
-        return ()
-    for name in names:
-        if name.startswith(".incomplete"):
-            continue
-        p = blob_dir / name
-        try:
-            if p.is_file():
-                st = p.stat()
-                rows.append((name, st.st_size, st.st_mtime_ns))
-        except OSError:
-            continue
-    return tuple(sorted(rows))
+        return False
+    return mtime_ns < int(pull_start_wall * 1e9)
 
 
 def download_with_mirror_fallback(
@@ -1624,10 +1618,6 @@ def download_with_mirror_fallback(
     cache_root = cache_dir if cache_dir else _hf_cache_root()
     owner, _, repo = repo_id.partition("/")
     repo_root = cache_root / f"models--{owner}--{repo}"
-    # Stable transfer account (Codex #2392): fingerprint the BLOB store before
-    # the per-file pool so we can tell a warm re-link from a real fetch, even
-    # for non-LFS files with no catalog sha256.
-    blobs_before = _blob_fingerprint(repo_root)
     snap_dir = repo_root / "snapshots" / revision
     refs_dir = repo_root / "refs"
     # Codex round-14 BLOCKING #1+#2: keep ``.part`` and ``.lock``
@@ -1972,22 +1962,26 @@ def download_with_mirror_fallback(
         # collide with our aggregate UI; keep it for weight/unknown-size
         # files (see ``_should_suppress_hf_bar``).
         #
-        # Stable transfer-account seam (Codex #2392, R4 BLOCKING): before the
-        # HF call, fingerprint the local BLOB store (sorted name/size/mtime of
-        # every real blob under ``blobs/``). If ``hf_hub_download`` only
-        # re-links a blob that was ALREADY in HF's local cache, the store is
-        # unchanged — zero bytes cross the wire — so the outcome is a "cached"
-        # no-transfer, not a fetch. If it materializes or repairs a blob
-        # (bytes crossed the wire), the store changes -> "hf". Unlike the
-        # earlier ``blob_already_local`` check (which needed ``expected_sha256``
-        # and left non-LFS files always classified "hf"), this also classifies
-        # files whose blob key the catalog does not expose (config.json etc.).
-        # A worker that really downloads always writes its own blob, so a real
-        # fetch is never misread as cached; a relink racing an unrelated
-        # concurrent write can only over-count, never under-count. Keyed on the
-        # local file inventory (public size/mtime), never on huggingface_hub's
-        # tqdm progress internals.
-        blobs_before_file = _blob_fingerprint(repo_root)
+        # Stable transfer-account seam (Codex #2392 R5): detect a warm HF
+        # re-link per-file, WITHOUT a shared-cache blob diff — a repository-
+        # wide diff is racy under concurrent workers / foreign processes and
+        # costs O(N×B) scandir to compute per file (Codex #2392 R5 #1/#2/#3).
+        #   * LFS files (catalog exposes ``expected_sha256``): the blob key is
+        #     known, so probe ``blobs/<sha>`` directly — O(1), deterministic,
+        #     immune to other workers. If it is present BEFORE the call,
+        #     ``hf_hub_download`` only re-links it (zero bytes) -> "cached".
+        #   * Non-LFS files (no catalog sha): the blob key is unknowable ahead
+        #     of time, so after the call we resolve the SPECIFIC blob this file
+        #     landed on and compare its mtime to this pull's start. A blob that
+        #     predates the pull was already on disk -> "cached"; a fresh blob
+        #     (mtime >= pull start) means HF wrote bytes -> "hf". This is
+        #     per-file (O(1)), not a whole-store scan.
+        blob_already_local = False
+        if expected_sha256 is not None:
+            try:
+                blob_already_local = (repo_root / "blobs" / expected_sha256).is_file()
+            except OSError:
+                blob_already_local = False
         ok, hf_path = _hf_fallback_one(
             repo_id,
             fname,
@@ -2009,11 +2003,15 @@ def download_with_mirror_fallback(
                     size = (snap_dir / fname).stat().st_size
             except OSError:
                 size = 0
-            # If the blob store was unchanged across this HF call, the file was
-            # satisfied from HF's LOCAL blob cache (a warm re-link) — no bytes
-            # transferred (Codex #2392 R4). Classify as "cached", not "hf", so
-            # `network_fetch`/`transferred_bytes` don't mislabel a warm pull.
-            was_hf_fetch = blobs_before_file != _blob_fingerprint(repo_root)
+            # A warm re-link of an already-local blob (either kind) transfers
+            # no bytes -> "cached", so `network_fetch`/`transferred_bytes`
+            # never mislabel a warm pull as a download (Codex #2392 R5).
+            if blob_already_local:
+                was_hf_fetch = False
+            else:
+                was_hf_fetch = not _hf_landed_blob_predated_pull(
+                    hf_path, snap_dir / fname, pull_start_wall
+                )
             return fname, ("hf" if was_hf_fetch else "cached"), size
 
         return fname, "miss", 0
@@ -2034,6 +2032,13 @@ def download_with_mirror_fallback(
     # Issue #651 follow-up: track elapsed wall-time for the final
     # summary so users see throughput, not just total bytes.
     pull_started = time.monotonic()
+    # Wall-clock twin used by the HF-fallback transfer probe (Codex #2392
+    # R5): a blob whose mtime predates the pull start was already on disk, so
+    # a re-link that merely points at it is "cached", not a fetch. Captured
+    # once here (worker closure) so every ``_do_file`` compares against the
+    # same pull boundary. NS-precision ``st_mtime_ns`` vs this float is fine
+    # on a single host.
+    pull_start_wall = time.time()
     completed = 0
     # Issue #689: wrap the pool block in try/finally so the final
     # ``progress_tracker.flush()`` always fires — even when a worker
@@ -2139,6 +2144,24 @@ def download_with_mirror_fallback(
         # 100% before the failure banner.
         progress_tracker.flush()
 
+    # Transfer account — populated on EVERY exit path (success AND partial
+    # miss), so ``pull_command`` combines a failed/partial mirror attempt
+    # with its HF-fallback baseline instead of discarding the bytes the
+    # mirror DID fetch (Codex #2392 R5 + #2353). ``network_fetch`` is the
+    # authoritative "did THIS invocation fetch anything over the wire?" —
+    # aggregated from the per-file classifications, never a shared-cache blob
+    # diff, so concurrent processes cannot pollute it (Codex #2392 R5 #1/#2).
+    # ``r2_hits``/``hf_hits`` are bumped only for files this worker actually
+    # fetched: R2 workers return "cached" before fetching when the target
+    # already exists, and an HF worker re-linking an already-local blob
+    # classifies "cached" (LFS via the pre-call blob probe; non-LFS via the
+    # resolved blob's pre-pull mtime). A fetched zero-byte file still counts
+    # (its freshly-written blob classifies hf). ``bool(r2_hits) or
+    # bool(hf_hits)`` is therefore foreign-process-immune and O(1).
+    if out is not None:
+        out["transferred_bytes"] = transferred_bytes
+        out["network_fetch"] = bool(r2_hits) or bool(hf_hits)
+
     if misses:
         # At least one file we couldn't get from either source. Caller
         # should fall back to ``snapshot_download`` — it has more retry
@@ -2201,29 +2224,9 @@ def download_with_mirror_fallback(
             f"{DIM}(HF: {hf_hits}){RESET}{suffix}"
         )
     else:
-        # All files were already cached — quiet success.
+        # All files were already cached — quiet success. NB ``out`` was
+        # already populated before the ``if misses`` branch above, so the
+        # "Already cached" label here is consistent with what the caller
+        # reads from ``out["network_fetch"]``.
         _print_dim(f"  {BOLD}Already cached{RESET} ({len(files)} files, {mb:.0f} MB)")
-    if out is not None:
-        out["transferred_bytes"] = transferred_bytes
-        # Authoritative "did we fetch anything over the wire this pull?" —
-        # distinct from the byte count so a fetched zero-byte file still
-        # counts as a transfer (codex round-4 BLOCKING #4).
-        #
-        # Two independent signals, OR'd (Codex #2392 + R4 BLOCKING):
-        #   1. ``bool(r2_hits)`` — any R2 worker actually fetched a file
-        #      over the wire. R2 serves non-LFS / no-catalog-sha256 files
-        #      straight into ``snapshots/<rev>/`` WITHOUT touching HF's
-        #      ``blobs/`` store, so those transfers are invisible to the
-        #      blob diff yet are genuine fetches. ``_do_file`` returns
-        #      "cached" before ever calling R2 when the target already
-        #      exists, so a warm R2 pull does not bump ``r2_hits``.
-        #   2. ``blobs_before != _blob_fingerprint(repo_root)`` — an HF
-        #      fallback materialized a new/modified blob (bytes crossed the
-        #      wire). A warm re-link of an already-local blob does NOT
-        #      change the blob store, so it is not counted as a fetch
-        #      (matching the ``blob_already_local`` "cached" classification
-        #      in ``_do_file``).
-        out["network_fetch"] = bool(r2_hits) or (
-            blobs_before != _blob_fingerprint(repo_root)
-        )
     return True
