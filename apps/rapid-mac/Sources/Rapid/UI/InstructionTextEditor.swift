@@ -168,8 +168,20 @@ struct EffectiveSystemPromptDisclosure: View {
 
     @State private var expanded = false
 
-    private var prompt: String {
+    /// One clock sample for the preview. Keeping this pure lets the rollover
+    /// contract prove the displayed prompt uses the same date-context helper
+    /// as request assembly without waiting for wall-clock time in a UI test.
+    nonisolated static func prompt(
+        at now: Date,
+        calendar: Calendar,
+        global: String,
+        conversation: String
+    ) -> String {
         ChatViewModel.effectiveSystemPrompt(
+            dateContext: ChatViewModel.currentDateTimeContext(
+                now: now,
+                calendar: calendar
+            ),
             global: global,
             conversation: conversation
         )
@@ -181,23 +193,30 @@ struct EffectiveSystemPromptDisclosure: View {
                 Text("Preview includes current automatic context. Tool and attachment context may be added when you send.")
                     .font(RapidFont.caption)
                     .foregroundStyle(RapidTheme.textSecondary)
-                ScrollView {
-                    Text(prompt)
-                        .font(RapidFont.code)
-                        .foregroundStyle(RapidTheme.textPrimary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(RapidTheme.Space.md)
-                        .accessibilityIdentifier(accessibilityIdentifier)
-                }
-                .frame(maxHeight: 180)
-                .background(
-                    RoundedRectangle(
-                        cornerRadius: RapidTheme.Radius.input,
-                        style: .continuous
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    ScrollView {
+                        Text(Self.prompt(
+                            at: context.date,
+                            calendar: .autoupdatingCurrent,
+                            global: global,
+                            conversation: conversation
+                        ))
+                            .font(RapidFont.code)
+                            .foregroundStyle(RapidTheme.textPrimary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(RapidTheme.Space.md)
+                            .accessibilityIdentifier(accessibilityIdentifier)
+                    }
+                    .frame(maxHeight: 180)
+                    .background(
+                        RoundedRectangle(
+                            cornerRadius: RapidTheme.Radius.input,
+                            style: .continuous
+                        )
+                        .fill(RapidTheme.surfaceCode)
                     )
-                    .fill(RapidTheme.surfaceCode)
-                )
+                }
             }
             .padding(.top, RapidTheme.Space.sm)
         }

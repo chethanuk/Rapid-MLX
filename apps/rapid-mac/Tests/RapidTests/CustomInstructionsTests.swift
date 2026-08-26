@@ -113,6 +113,48 @@ struct CustomInstructionsTests {
             < preview.range(of: "Use bullet points.")!.lowerBound)
     }
 
+    @Test("Effective prompt preview refreshes across midnight and time-zone changes")
+    func effectivePromptPreviewFollowsClockAndZone() throws {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = try #require(TimeZone(identifier: "UTC"))
+        let beforeMidnight = try #require(
+            utc.date(from: DateComponents(
+                year: 2026, month: 8, day: 25, hour: 23, minute: 59
+            ))
+        )
+        let afterMidnight = beforeMidnight.addingTimeInterval(120)
+
+        let before = EffectiveSystemPromptDisclosure.prompt(
+            at: beforeMidnight,
+            calendar: utc,
+            global: "Global",
+            conversation: "Conversation"
+        )
+        let after = EffectiveSystemPromptDisclosure.prompt(
+            at: afterMidnight,
+            calendar: utc,
+            global: "Global",
+            conversation: "Conversation"
+        )
+
+        #expect(before.contains("Tuesday, August 25, 2026"))
+        #expect(before.contains("11:59 PM (GMT, GMT)"))
+        #expect(after.contains("Wednesday, August 26, 2026"))
+        #expect(after.contains("12:01 AM (GMT, GMT)"))
+
+        var tokyo = utc
+        tokyo.timeZone = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let tokyoPreview = EffectiveSystemPromptDisclosure.prompt(
+            at: beforeMidnight,
+            calendar: tokyo,
+            global: "Global",
+            conversation: "Conversation"
+        )
+        #expect(tokyoPreview.contains("Wednesday, August 26, 2026"))
+        #expect(tokyoPreview.contains("8:59 AM (GMT+9, Asia/Tokyo)"))
+        #expect(tokyoPreview != before)
+    }
+
     @Test("System prompt UI names global and conversation precedence explicitly")
     func systemPromptTerminologyAndPreviewWiring() throws {
         let settings = try Self.source("Sources/Rapid/UI/SettingsView.swift")
@@ -126,6 +168,9 @@ struct CustomInstructionsTests {
         #expect(editor.contains("this prompt wins."))
         #expect(editor.contains("DisclosureGroup(\"Effective System Prompt\""))
         #expect(editor.contains("Tool and attachment context may be added when you send."))
+        #expect(editor.contains("TimelineView(.periodic(from: .now, by: 60))"))
+        #expect(editor.contains("at: context.date"))
+        #expect(editor.contains("calendar: .autoupdatingCurrent"))
         #expect(editor.contains("ChatViewModel.effectiveSystemPrompt"))
         #expect(editor.contains("ChatView.SystemPrompt.EffectivePreview"))
 
