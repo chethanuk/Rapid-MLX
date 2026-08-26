@@ -787,6 +787,10 @@ class ResidentModelManager:
                         destructive_primary_publish_attempted
                         and self._on_primary_changed is not None
                     ):
+                        # Removing the rejected target may auto-promote an
+                        # unrelated secondary. A failed primary publication
+                        # has no valid default until a later load succeeds.
+                        self.registry.clear_default()
                         try:
                             self._on_primary_changed(None)
                         except BaseException:

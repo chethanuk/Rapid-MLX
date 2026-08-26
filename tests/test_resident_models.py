@@ -1199,7 +1199,10 @@ async def test_evict_first_partial_target_publication_is_cleared_on_failure():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()
     primary = entry("chat-old", old_engine)
+    image_engine = FakeImageEngine()
+    image = entry("image", image_engine)
     registry.add(primary, is_default=True)
+    registry.add(image)
     published: list[ModelEntry | None] = [primary]
     loaded: list[FakeEngine] = []
     handoff = Mock()
@@ -1223,6 +1226,15 @@ async def test_evict_first_partial_target_publication_is_cleared_on_failure():
         on_primary_changed=publish_then_fail,
     )
     manager.register_primary(primary, estimated_bytes=4 * GIB)
+    manager._index_record(
+        ResidencyRecord(
+            entry=image,
+            estimated_bytes=1 * GIB,
+            loaded_at=0,
+            last_used_at=0,
+            pinned=True,
+        )
+    )
 
     with pytest.raises(RuntimeError, match="parser construction failed"):
         await manager.load(
@@ -1235,7 +1247,8 @@ async def test_evict_first_partial_target_publication_is_cleared_on_failure():
     assert loaded[0].stopped is True
     assert published == [None]
     assert registry.default_name is None
-    assert manager.snapshot()["models"] == []
+    assert [item["id"] for item in manager.snapshot()["models"]] == ["image"]
+    assert image_engine.stopped is False
     handoff.commit.assert_called_once_with(None)
     handoff.rollback.assert_not_called()
 
