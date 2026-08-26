@@ -53,6 +53,44 @@ can actually understand.
 - **Share CLI contracts use supported invocation forms and run in CI.**
   ([#2377](https://github.com/raullenchai/Rapid-MLX/issues/2377),
   [#2382](https://github.com/raullenchai/Rapid-MLX/pull/2382))
+- **First run chooses a hardware-fit starter and photos use the correct lane.**
+  Eligible cached models remain preferred, and supported hybrid vision models
+  route automatically. ([#2385](https://github.com/raullenchai/Rapid-MLX/pull/2385),
+  [#2219](https://github.com/raullenchai/Rapid-MLX/issues/2219),
+  [#2388](https://github.com/raullenchai/Rapid-MLX/pull/2388))
+- **Dictation remains available across chat-model switches.** The speech model
+  stays resident and is restored after switching, while a proven chat selection
+  survives an in-session restart. ([#2400](https://github.com/raullenchai/Rapid-MLX/pull/2400),
+  [#2374](https://github.com/raullenchai/Rapid-MLX/pull/2374),
+  [#2363](https://github.com/raullenchai/Rapid-MLX/issues/2363),
+  [#2364](https://github.com/raullenchai/Rapid-MLX/issues/2364))
+- **Photo rejection and multimodal reloads recover cleanly.** A rejected image
+  cannot poison the next text turn, and a reloaded vision model cannot reuse a
+  stale generation worker. ([#2379](https://github.com/raullenchai/Rapid-MLX/pull/2379),
+  [#2378](https://github.com/raullenchai/Rapid-MLX/issues/2378),
+  [#2401](https://github.com/raullenchai/Rapid-MLX/pull/2401),
+  [#2397](https://github.com/raullenchai/Rapid-MLX/issues/2397))
+- **Live API identity and cancellation are dependable.** Readiness and connect
+  guidance use the live port and served model name, and public streaming IDs
+  are cancellable. ([#2386](https://github.com/raullenchai/Rapid-MLX/pull/2386),
+  [#2348](https://github.com/raullenchai/Rapid-MLX/issues/2348),
+  [#2395](https://github.com/raullenchai/Rapid-MLX/pull/2395),
+  [#2353](https://github.com/raullenchai/Rapid-MLX/issues/2353),
+  [#2398](https://github.com/raullenchai/Rapid-MLX/pull/2398),
+  [#2342](https://github.com/raullenchai/Rapid-MLX/issues/2342))
+- **Reload failures preserve a truthful serving state.** Registry, residency,
+  routing, readiness, and speech handoff remain consistent even when both a
+  primary reload and its restoration fail. ([#2394](https://github.com/raullenchai/Rapid-MLX/pull/2394),
+  [#2360](https://github.com/raullenchai/Rapid-MLX/issues/2360))
+- **Download status and size warnings stay truthful offline.** Catalog size is
+  retained when remote metadata is unavailable, and cached pulls report
+  verification rather than a new download. ([#2391](https://github.com/raullenchai/Rapid-MLX/pull/2391),
+  [#2350](https://github.com/raullenchai/Rapid-MLX/issues/2350),
+  [#2392](https://github.com/raullenchai/Rapid-MLX/pull/2392),
+  [#2349](https://github.com/raullenchai/Rapid-MLX/issues/2349))
+- **System-prompt settings explain what is actually sent.** Saved and effective
+  prompts are distinguished, and optional credentials are read only when
+  needed. ([#2341](https://github.com/raullenchai/Rapid-MLX/pull/2341))
 
 ### Documentation
 
@@ -60,6 +98,8 @@ can actually understand.
   supported text-model path. ([#2376](https://github.com/raullenchai/Rapid-MLX/pull/2376))
 - Published a reproducible M2 Pro comparison of 0.13.0 and 0.12.18.
   ([#2375](https://github.com/raullenchai/Rapid-MLX/pull/2375))
+
+<!-- Train 3 entries are added here only after that train lands. -->
 
 ## [0.13.0] — 2026-08-26
 
