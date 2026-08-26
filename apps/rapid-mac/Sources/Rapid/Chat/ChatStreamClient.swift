@@ -799,6 +799,22 @@ enum ChatStreamError: LocalizedError {
             return "rapid-mlx closed the stream mid-response (likely a crash). Restart the server and resend."
         }
     }
+
+    /// The standard error envelope is the server's public, user-facing reason
+    /// for the exact attachment request that failed. Bare bodies and HTML are
+    /// still diagnostics only and must not leak into the transcript.
+    var attachmentFailureMessage: String? {
+        guard case .httpStatus(let code, let body) = self,
+              (400..<600).contains(code),
+              let data = body.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(Wire.ErrorEnvelope.self, from: data),
+              let message = envelope.error.message?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ),
+              !message.isEmpty
+        else { return nil }
+        return message
+    }
 }
 
 /// On-the-wire shapes. Kept inside ``ChatStreamClient`` so the rest of

@@ -784,12 +784,14 @@ struct ContentView: View {
     private var mainArea: some View {
         switch ContentView.mainAreaBranch(for: server.state) {
         case .chat:
+            let imageAvailability = imageInputAvailability(for: alias)
             ChatView(
                 viewModel: chat,
                 server: server,
                 alias: $alias,
                 readiness: readiness,
-                supportsImageInput: supportsImageInput(for: alias),
+                supportsImageInput: imageAvailability.isAvailable,
+                imageInputUnavailableMessage: imageAvailability.unavailableMessage,
                 catalogRefreshEnabled: !telemetryConsentPending,
                 onUserModelSelection: selectChatModel,
                 onReadinessAction: performReadinessAction,
@@ -800,7 +802,7 @@ struct ContentView: View {
         }
     }
 
-    private func supportsImageInput(for alias: String) -> Bool {
+    private func imageInputAvailability(for alias: String) -> ImageInputAvailability {
         let entry = catalogEntries.first {
             $0.alias.caseInsensitiveCompare(alias) == .orderedSame
         }
@@ -809,7 +811,7 @@ struct ContentView: View {
             isBuiltinProfile: entry?.isBuiltinProfile,
             isTextOnly: entry?.isTextOnly
         )
-        return server.supportsImageInput(
+        return server.imageInputAvailability(
             forAlias: alias,
             catalogSupportsImageInput: catalogSupportsImageInput
         )

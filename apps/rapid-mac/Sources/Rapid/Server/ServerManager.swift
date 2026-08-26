@@ -646,6 +646,20 @@ final class ServerManager {
     /// Process-wide lane captured at spawn. Nil means there is no live child;
     /// UI capability must observe this value rather than the process handle.
     private(set) var launchedImageInputLane: Bool?
+    /// Exact live `/v1/models/{alias}` profile. Consumers require its id to
+    /// match the current alias, so a profile can never lag one model behind.
+    private(set) var activeModelProfile: ServerModelProfile?
+
+    func clearActiveModelProfile() {
+        activeModelProfile = nil
+    }
+
+    func applyActiveModelProfile(_ profile: ServerModelProfile, forAlias alias: String) {
+        guard servingAlias?.caseInsensitiveCompare(alias) == .orderedSame,
+              profile.id.caseInsensitiveCompare(alias) == .orderedSame
+        else { return }
+        activeModelProfile = profile
+    }
 
     func hasAppliedSpeculativeDecoding(forAlias alias: String) -> Bool {
         guard child != nil,
@@ -3428,16 +3442,33 @@ final class ServerManager {
         forAlias alias: String,
         catalogSupportsImageInput: Bool? = nil
     ) -> Bool {
+        imageInputAvailability(
+            forAlias: alias,
+            catalogSupportsImageInput: catalogSupportsImageInput
+        ).isAvailable
+    }
+
+    internal func imageInputAvailability(
+        forAlias alias: String,
+        catalogSupportsImageInput: Bool? = nil
+    ) -> ImageInputAvailability {
         let catalogCapability = catalogSupportsImageInput
             ?? ModelCatalogCache.supportsImageInput(forAlias: alias, binary: binaryPath)
         let safeOverrides = Self.imageSafePerformanceOverrides(
             catalogSupportsImageInput: catalogCapability,
             userOverrides: perfLaunchFlagsProvider?(alias) ?? []
         )
-        return Self.effectiveRunningImageCapability(
+        let fallback = Self.effectiveRunningImageCapability(
             catalogSupportsImageInput: catalogCapability,
             userOverrides: safeOverrides,
             processLaunchFlags: launchedImageInputLane.map { $0 ? ["--mllm"] : [] }
+        )
+        let profile = activeModelProfile.flatMap {
+            $0.id.caseInsensitiveCompare(alias) == .orderedSame ? $0 : nil
+        }
+        return ImageInputAvailability.resolve(
+            fallbackSupportsImageInput: fallback,
+            profile: profile
         )
     }
 

@@ -226,6 +226,39 @@ struct ModelResidencyTests {
         #expect(alias == "flux-klein")
     }
 
+    @Test("Server accepts only the exact live alias profile for photo capability")
+    func liveProfileCannotLagAcrossModelSwitch() {
+        let server = ServerManager(testingState: .ready(alias: "current-model"))
+        server.applyActiveModelProfile(
+            ServerModelProfile(
+                id: "old-model",
+                capabilities: ["text", "vision"],
+                servingLane: "vision",
+                servingLaneReason: "vision_supported"
+            ),
+            forAlias: "old-model"
+        )
+        #expect(server.activeModelProfile == nil)
+
+        server.applyActiveModelProfile(
+            ServerModelProfile(
+                id: "current-model",
+                capabilities: ["text"],
+                servingLane: "text",
+                servingLaneReason: "operator_forced_text"
+            ),
+            forAlias: "current-model"
+        )
+        #expect(server.activeModelProfile?.id == "current-model")
+        #expect(!server.imageInputAvailability(
+            forAlias: "current-model",
+            catalogSupportsImageInput: true
+        ).isAvailable)
+
+        server.clearActiveModelProfile()
+        #expect(server.activeModelProfile == nil)
+    }
+
     @Test("Resident ceiling reuses the Mac usable-RAM bucket")
     func residentMemoryCeiling() {
         #expect(ModelSizing.residentMemoryCeilingGB(on: mockMac(ramGB: 32)) == 25)

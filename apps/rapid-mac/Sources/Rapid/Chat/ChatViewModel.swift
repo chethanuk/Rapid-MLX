@@ -2814,7 +2814,10 @@ Your previous draft refused the question by claiming you lack real-time access o
             // humanize()'s clean, jargon-free copy.
             print("[chat] stream failed: \(error.localizedDescription)")
             let failureKind = FailureDiagnoser.chatFailureKind(error: error)
-            let actionable = FailureDiagnoser.diagnosis(
+            let imageRejection = request.imageMessageID == nil
+                ? nil
+                : (error as? ChatStreamError)?.attachmentFailureMessage
+            let actionable = imageRejection ?? FailureDiagnoser.diagnosis(
                 for: failureKind,
                 modelAlias: request.alias
             ).message
