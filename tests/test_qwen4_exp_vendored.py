@@ -8,6 +8,8 @@ pytest.importorskip("mlx_lm")
 
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, CacheList, KVCache
 
+import vllm_mlx.models.qwen4_exp as qwen4_exp
+from scripts.qwen38_streaming_convert import quantized_tensor_names
 from vllm_mlx.models.qwen4_exp import (
     GatedDeltaNet,
     GatedResidual,
@@ -16,9 +18,11 @@ from vllm_mlx.models.qwen4_exp import (
     NGramEmbedding,
     PLELayer,
     QSAAttention,
+    QSAIndexer,
     ShardedEmbedding,
     TextModelArgs,
     ZeroCenteredRMSNorm,
+    apply_qwen4_exp_rope,
     build_layer_multipliers,
 )
 from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
@@ -67,6 +71,28 @@ def test_config_rejects_partial_indexer_contract():
         _args(indexer_budget=None)
 
 
+def test_qwen4_rope_uses_reference_half_split_pairing():
+    values = np.array([[[[0.25, -0.5, 0.75, 1.0]]]], dtype=np.float32)
+    output = apply_qwen4_exp_rope(
+        mx.array(values),
+        mx.array([[39]], dtype=mx.int64),
+        rotary_dim=4,
+        base=10_000_000,
+    )
+    frequencies = 1.0 / (10_000_000 ** (np.arange(0, 4, 2, dtype=np.float32) / 4))
+    angles = 39 * frequencies
+    first = values[..., :2]
+    second = values[..., 2:]
+    expected = np.concatenate(
+        [
+            first * np.cos(angles) - second * np.sin(angles),
+            second * np.cos(angles) + first * np.sin(angles),
+        ],
+        axis=-1,
+    )
+    np.testing.assert_allclose(np.asarray(output), expected, rtol=1e-5, atol=1e-5)
+
+
 def test_zero_centered_grouped_rms_norm_matches_numpy():
     norm = ZeroCenteredRMSNorm(8, group_size=4, eps=1e-6)
     norm.weight = mx.array(np.linspace(-0.2, 0.2, 8, dtype=np.float32))
@@ -75,7 +101,9 @@ def test_zero_centered_grouped_rms_norm_matches_numpy():
     grouped = x_np.reshape(1, 2, 2, 4)
     expected = grouped / np.sqrt(np.mean(grouped**2, axis=-1, keepdims=True) + 1e-6)
     expected *= (1 + np.linspace(-0.2, 0.2, 8, dtype=np.float32)).reshape(2, 4)
-    np.testing.assert_allclose(np.array(out), expected.reshape(x_np.shape), rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(
+        np.array(out), expected.reshape(x_np.shape), rtol=2e-5, atol=2e-5
+    )
 
 
 def test_gated_residual_matches_reference_equations():
@@ -109,7 +137,9 @@ def test_gated_residual_matches_reference_equations():
     )
     np.testing.assert_allclose(np.array(mixed), expected_mixed, rtol=3e-5, atol=3e-5)
     np.testing.assert_array_equal(np.array(residual), x_np)
-    np.testing.assert_allclose(np.array(injection), expected_injection, rtol=3e-5, atol=3e-5)
+    np.testing.assert_allclose(
+        np.array(injection), expected_injection, rtol=3e-5, atol=3e-5
+    )
 
 
 def test_gdn_ratio_three_state_shapes_and_cached_decode():
@@ -137,7 +167,9 @@ def test_sharded_embedding_preserves_global_row_identity():
         shard.weight = mx.array(np.repeat(rows[:, None], 4, axis=1))
     ids = mx.array([[0, 3, 4, 9, 15]])
     output = embedding(ids)
-    expected = np.repeat(np.array([[0, 3, 4, 9, 15]], dtype=np.float32)[..., None], 4, axis=-1)
+    expected = np.repeat(
+        np.array([[0, 3, 4, 9, 15]], dtype=np.float32)[..., None], 4, axis=-1
+    )
     np.testing.assert_array_equal(np.array(output), expected)
 
 
@@ -244,9 +276,7 @@ def test_qsa_cache_keeps_only_raw_ring_and_persistent_compressed_keys():
     def transform(group, start):
         return group + start
 
-    compressed = cache.update(
-        mx.array([[[1.0], [3.0], [5.0], [7.0]]]), transform
-    )
+    compressed = cache.update(mx.array([[[1.0], [3.0], [5.0], [7.0]]]), transform)
     mx.eval(compressed, cache.state)
     np.testing.assert_array_equal(np.array(compressed), np.array([[[2.0], [8.0]]]))
     assert cache.offset == 4
@@ -283,12 +313,8 @@ def test_qsa_cache_rewinds_recoverable_group_and_recomputes_divergence(length):
     cold.update(mx.array(expected_values.reshape(1, -1, 1)), transform)
     mx.eval(original.state, cold.state)
     assert original.offset == cold.offset == length
-    np.testing.assert_array_equal(
-        np.array(original.state[1]), np.array(cold.state[1])
-    )
-    np.testing.assert_array_equal(
-        np.array(original.raw_ring), np.array(cold.raw_ring)
-    )
+    np.testing.assert_array_equal(np.array(original.state[1]), np.array(cold.state[1]))
+    np.testing.assert_array_equal(np.array(original.raw_ring), np.array(cold.raw_ring))
 
 
 def test_qsa_cache_refuses_rewind_beyond_retained_raw_group():
@@ -323,6 +349,61 @@ def test_qsa_attention_prefill_and_decode_keep_both_cache_owners_aligned():
     assert cache[0].offset == 6
     assert cache[1].offset == 6
     assert cache[1]._compressed_count == 3
+
+
+def test_qsa_attention_uses_reference_dense_path_below_sparse_budget(monkeypatch):
+    args = _args(
+        indexer_budget=8,
+        indexer_compress_ratio=2,
+        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
+    )
+    attention = QSAAttention(args)
+    cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
+    observed = []
+
+    def fake_attention(queries, keys, values, *, cache, scale, mask):
+        observed.append(mask)
+        return mx.zeros_like(queries)
+
+    monkeypatch.setattr(
+        "vllm_mlx.models.qwen4_exp.scaled_dot_product_attention",
+        fake_attention,
+    )
+    output = attention(mx.zeros((1, 5, args.hidden_size)), cache)
+    mx.eval(output, cache.state)
+
+    assert observed == ["causal"]
+    assert cache[0].offset == cache[1].offset == 5
+
+
+def test_qsa_sparse_scores_use_one_reference_batched_matmul(monkeypatch):
+    args = _args(
+        indexer_budget=2,
+        indexer_compress_ratio=2,
+        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
+    )
+    indexer = QSAIndexer(args)
+    cache = QSAIndexCache(compress_ratio=2)
+    original = qwen4_exp.mx.matmul
+    shapes = []
+
+    def record_matmul(left, right):
+        shapes.append((left.shape, right.shape))
+        return original(left, right)
+
+    monkeypatch.setattr(qwen4_exp.mx, "matmul", record_matmul)
+    selected = indexer(
+        mx.zeros((1, 6, args.hidden_size), dtype=mx.bfloat16),
+        cache,
+        physical_kv_length=6,
+    )
+    mx.eval(selected)
+    assert shapes == [
+        (
+            (args.indexer_n_heads, 6, args.indexer_head_dim),
+            (args.indexer_head_dim, 3),
+        )
+    ]
 
 
 def test_qsa_cache_uses_standard_batch_lifecycle_without_rebuilding_history():
@@ -464,15 +545,21 @@ def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():
     args = _ple_args()
     model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
     weights = {
-        "model.language_model.layers.0.mlp.experts.gate_up_proj": mx.zeros(
-            (4, 8, 8)
+        "model.language_model.layers.0.mlp.experts.gate_up_proj": mx.zeros((4, 8, 8)),
+        "model.language_model.layers.0.mlp.experts.down_proj": mx.zeros((4, 8, 4)),
+        "model.language_model.layers.0.mlp.experts.gate_up_proj.scales": mx.zeros(
+            (4, 8, 1)
         ),
-        "model.language_model.layers.0.mlp.experts.down_proj": mx.zeros(
-            (4, 8, 4)
+        "model.language_model.layers.0.mlp.experts.gate_up_proj.biases": mx.zeros(
+            (4, 8, 1)
         ),
-        "model.language_model.layers.0.linear_attn.conv1d.weight": mx.zeros(
-            (20, 1, 3)
+        "model.language_model.layers.0.mlp.experts.down_proj.scales": mx.zeros(
+            (4, 8, 1)
         ),
+        "model.language_model.layers.0.mlp.experts.down_proj.biases": mx.zeros(
+            (4, 8, 1)
+        ),
+        "model.language_model.layers.0.linear_attn.conv1d.weight": mx.zeros((20, 1, 3)),
         "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.shard_3.weight": mx.zeros(
             (32, 1)
         ),
@@ -480,21 +567,16 @@ def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():
         "mtp.layers.0.weight": mx.zeros((1,)),
     }
     sanitized = model.sanitize(weights)
-    assert (
-        "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight"
-        in sanitized
-    )
-    assert (
-        "language_model.model.layers.0.mlp.switch_mlp.up_proj.weight"
-        in sanitized
-    )
-    assert (
-        "language_model.model.layers.0.mlp.switch_mlp.down_proj.weight"
-        in sanitized
-    )
-    conv = sanitized[
-        "language_model.model.layers.0.linear_attn.conv1d.weight"
-    ]
+    assert "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight" in sanitized
+    assert "language_model.model.layers.0.mlp.switch_mlp.up_proj.weight" in sanitized
+    assert "language_model.model.layers.0.mlp.switch_mlp.down_proj.weight" in sanitized
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        for auxiliary in ("scales", "biases"):
+            assert (
+                f"language_model.model.layers.0.mlp.switch_mlp."
+                f"{projection}.{auxiliary}" in sanitized
+            )
+    conv = sanitized["language_model.model.layers.0.linear_attn.conv1d.weight"]
     assert conv.shape == (20, 3, 1)
     assert (
         "language_model.model.layers.0.ple.ple_embedding.ngram_embedding.shards.3.weight"
@@ -503,21 +585,57 @@ def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():
     assert all("visual" not in key and not key.startswith("mtp") for key in sanitized)
 
 
+def test_converter_quantized_keys_match_loader_sanitizer_contract():
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(_ple_args())))
+    ordinary = "model.language_model.layers.0.self_attn.q_proj.weight"
+    assert quantized_tensor_names(ordinary) == (
+        ordinary,
+        "model.language_model.layers.0.self_attn.q_proj.scales",
+        "model.language_model.layers.0.self_attn.q_proj.biases",
+    )
+
+    emitted = {}
+    for name, shape in (
+        (ordinary, (8, 8)),
+        ("model.language_model.layers.0.mlp.experts.gate_up_proj", (4, 8, 8)),
+        ("model.language_model.layers.0.mlp.experts.down_proj", (4, 8, 4)),
+    ):
+        weight, scales, biases = quantized_tensor_names(name)
+        emitted[weight] = mx.zeros(shape)
+        aux_shape = (*shape[:-2], shape[-2], 1)
+        emitted[scales] = mx.zeros(aux_shape)
+        emitted[biases] = mx.zeros(aux_shape)
+
+    sanitized = model.sanitize(emitted)
+    expected = {
+        "language_model.model.layers.0.self_attn.q_proj.weight",
+        "language_model.model.layers.0.self_attn.q_proj.scales",
+        "language_model.model.layers.0.self_attn.q_proj.biases",
+    }
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        expected.update(
+            {
+                f"language_model.model.layers.0.mlp.switch_mlp.{projection}.weight",
+                f"language_model.model.layers.0.mlp.switch_mlp.{projection}.scales",
+                f"language_model.model.layers.0.mlp.switch_mlp.{projection}.biases",
+            }
+        )
+    assert set(sanitized) == expected
+
+
 def test_quantization_contract_uses_shape_exact_ple_groups_and_q8_routing():
     model = Model(ModelArgs(model_type="qwen4_exp", text_config=_ple_args().__dict__))
     predicate = model.quant_predicate
 
     assert predicate(
-        "language_model.model.layers.1.ple.ple_embedding."
-        "ngram_embedding.shards.3",
+        "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.3",
         object(),
     ) == {"group_size": 32, "bits": 4}
-    assert predicate(
-        "language_model.model.layers.1.mlp.gate", object()
-    ) == {"group_size": 64, "bits": 8}
+    assert predicate("language_model.model.layers.1.mlp.gate", object()) == {
+        "group_size": 64,
+        "bits": 8,
+    }
     assert predicate(
         "language_model.model.layers.1.mlp.shared_expert_gate", object()
     ) == {"group_size": 64, "bits": 8}
-    assert predicate(
-        "language_model.model.layers.1.self_attn.q_proj", object()
-    ) is True
+    assert predicate("language_model.model.layers.1.self_attn.q_proj", object()) is True

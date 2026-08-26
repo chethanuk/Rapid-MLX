@@ -23,7 +23,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from qwen38_streaming_convert import classify_tensor
+from qwen38_streaming_convert import classify_tensor, quantized_tensor_names
 from safetensors import safe_open as st_safe_open
 
 
@@ -103,7 +103,7 @@ def verify(src: Path, out: Path) -> int:
     for name, (shape, dtype) in src_meta.items():
         action, _, _ = classify_tensor(name, shape, dtype)
         if action == "quantize":
-            expected_output_keys.update({name + ".scales", name + ".biases"})
+            expected_output_keys.update(quantized_tensor_names(name)[1:])
     if set(out_wm) != expected_output_keys:
         failures.append("output index does not map exactly every emitted tensor")
     expected_total = 0
@@ -148,10 +148,11 @@ def verify(src: Path, out: Path) -> int:
         _, group_size, bits = classify_tensor(
             name, src_meta[name][0], src_meta[name][1]
         )
+        _, scales_name, biases_name = quantized_tensor_names(name)
         rec = _dequantize(
             shard[name],
-            shard[name + ".scales"],
-            shard[name + ".biases"],
+            shard[scales_name],
+            shard[biases_name],
             group_size=group_size,
             bits=bits,
         ).astype(np.float32)

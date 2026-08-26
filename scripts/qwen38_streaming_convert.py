@@ -34,6 +34,7 @@ import math
 import mmap
 import resource
 import shutil
+import struct
 import sys
 import time
 from pathlib import Path
@@ -50,9 +51,7 @@ _BUFFER_SUFFIXES = (".A_log",)
 _NON_QUANT_DTYPES = {"F64", "F8", "F4", "I8", "I16", "I32", "I64", "U8", "BOOL"}
 _FLOAT_DTYPES = {"BF16", "F16", "F32"}
 
-_PLE_PREFIX = (
-    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_"
-)
+_PLE_PREFIX = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_"
 _PLE_SUFFIX = ".weight"
 _ROUTING_GATE_SUFFIXES = (".mlp.gate.weight", ".mlp.shared_expert_gate.weight")
 
@@ -109,7 +108,9 @@ def classify_tensor(name: str, shape: list[int], dtype: str) -> tuple[str, int, 
         return "quantize", 32, 4
     if name.endswith(_ROUTING_GATE_SUFFIXES):
         if shape[-1] % 64:
-            raise RuntimeError(f"invalid Qwen4-Exp routing-gate shape for {name}: {shape}")
+            raise RuntimeError(
+                f"invalid Qwen4-Exp routing-gate shape for {name}: {shape}"
+            )
         return "quantize", 64, 8
     if shape[-1] % 64:
         return "copy", 0, 0
@@ -183,6 +184,20 @@ def quantize_affine(
     return q, scales, biases
 
 
+def quantized_tensor_names(name: str) -> tuple[str, str, str]:
+    """Return the MLX parameter names for an affine-quantized tensor.
+
+    MLX stores ``scales`` and ``biases`` beside a module's ``weight``.  Most
+    checkpoint tensors therefore replace the terminal ``.weight`` component;
+    Qwen4-Exp's fused expert tensors omit that component and retain the
+    established append form until the model sanitizer splits them.
+    """
+    if name.endswith(".weight"):
+        module = name.removesuffix(".weight")
+        return name, f"{module}.scales", f"{module}.biases"
+    return name, f"{name}.scales", f"{name}.biases"
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -229,7 +244,9 @@ def _module_path_for_override(source_weight: str) -> str:
     return key
 
 
-def _write_quantized_config(source: Path, output: Path, overrides: dict[str, dict]) -> None:
+def _write_quantized_config(
+    source: Path, output: Path, overrides: dict[str, dict]
+) -> None:
     config_path = source / "config.json"
     if not config_path.is_file():
         raise RuntimeError("source has no config.json")
@@ -415,11 +432,14 @@ def convert(
             n_copy += 1
         else:
             arr = _mlx_from_bytes(data, dtype, shape)
-            q, scales, biases = quantize_affine(
-                arr, group_size=group_size, bits=bits
-            )
+            q, scales, biases = quantize_affine(arr, group_size=group_size, bits=bits)
+            weight_name, scales_name, biases_name = quantized_tensor_names(name)
             writer.add(
-                {name: q, name + ".scales": scales, name + ".biases": biases},
+                {
+                    weight_name: q,
+                    scales_name: scales,
+                    biases_name: biases,
+                },
             )
             if (group_size, bits) != (64, 4):
                 quant_overrides[_module_path_for_override(name)] = {
@@ -471,6 +491,89 @@ def convert(
     }
 
 
+def _renamed_quantized_aux_key(name: str) -> str:
+    if name.endswith(".weight.scales"):
+        return name.removesuffix(".weight.scales") + ".scales"
+    if name.endswith(".weight.biases"):
+        return name.removesuffix(".weight.biases") + ".biases"
+    return name
+
+
+def repair_quantized_aux_names(output: Path) -> dict:
+    """Repair a converted tree without moving or rewriting tensor payloads.
+
+    Safetensors permits JSON whitespace at the end of its fixed-size header.
+    Renaming ``*.weight.{scales,biases}`` to sibling module parameters only
+    shortens the JSON, so the original header length and every data offset stay
+    unchanged.  The function fails closed on collisions or header growth.
+    """
+    output = output.expanduser().resolve()
+    index_path = output / "model.safetensors.index.json"
+    if not index_path.is_file():
+        raise RuntimeError(f"missing output index: {index_path}")
+
+    changed_keys = 0
+    changed_shards = 0
+    payload_checks: dict[str, tuple[str, str]] = {}
+    for shard in sorted(output.glob("model-*.safetensors")):
+        with shard.open("r+b") as handle:
+            raw_len = handle.read(8)
+            if len(raw_len) != 8:
+                raise RuntimeError(f"truncated safetensors prefix: {shard}")
+            header_len = struct.unpack("<Q", raw_len)[0]
+            raw_header = handle.read(header_len)
+            if len(raw_header) != header_len:
+                raise RuntimeError(f"truncated safetensors header: {shard}")
+            header = json.loads(raw_header)
+            renamed: dict[str, object] = {}
+            shard_changes = 0
+            for key, value in header.items():
+                new_key = (
+                    key if key == "__metadata__" else _renamed_quantized_aux_key(key)
+                )
+                if new_key in renamed:
+                    raise RuntimeError(
+                        f"quantized auxiliary rename collision in {shard}: {new_key}"
+                    )
+                renamed[new_key] = value
+                shard_changes += int(new_key != key)
+            if not shard_changes:
+                continue
+            encoded = json.dumps(
+                renamed, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            if len(encoded) > header_len:
+                raise RuntimeError(
+                    f"repaired header grew in {shard}: {len(encoded)} > {header_len}"
+                )
+            handle.seek(8)
+            handle.write(encoded)
+            handle.write(b" " * (header_len - len(encoded)))
+            handle.flush()
+            changed_keys += shard_changes
+            changed_shards += 1
+            payload_checks[shard.name] = (str(header_len), str(shard.stat().st_size))
+
+    index = json.loads(index_path.read_text())
+    old_map: dict[str, str] = index.get("weight_map", {})
+    new_map: dict[str, str] = {}
+    for key, shard_name in old_map.items():
+        new_key = _renamed_quantized_aux_key(key)
+        if new_key in new_map:
+            raise RuntimeError(f"output index rename collision: {new_key}")
+        new_map[new_key] = shard_name
+    index["weight_map"] = dict(sorted(new_map.items()))
+    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    _write_sha256sums(output)
+    return {
+        "status": "ok",
+        "output": str(output),
+        "changed_keys": changed_keys,
+        "changed_shards": changed_shards,
+        "unchanged_payload_layout": payload_checks,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", required=True, type=Path)
@@ -481,10 +584,22 @@ def main() -> int:
         action="store_true",
         help="validate and classify all headers without creating output",
     )
+    ap.add_argument(
+        "--repair-quantized-aux-names",
+        action="store_true",
+        help="repair an existing output tree's MLX quantized parameter names",
+    )
     args = ap.parse_args()
     try:
         if args.inspect_only:
             print(json.dumps(inspect_manifest(args.source), indent=2))
+            return 0
+        if args.repair_quantized_aux_names:
+            if args.output is not None:
+                ap.error(
+                    "--repair-quantized-aux-names uses --source as the output tree"
+                )
+            print(json.dumps(repair_quantized_aux_names(args.source), indent=2))
             return 0
         if args.output is None:
             ap.error("--output is required unless --inspect-only is set")

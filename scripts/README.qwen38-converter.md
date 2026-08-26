@@ -1,8 +1,8 @@
-# Qwen3.8-Flash-Next streaming q4-g32 converter (prototype v2)
+# Qwen3.8-Flash-Next mixed-q4 streaming converter
 
 **Lane:** script-only helper for Vector's `qwen4_exp` port. Never edits model
-math. This is a **prototype** to be reviewed and transplanted by Vector — it is
-verified on a SMALL SYNTHETIC shard set, **not** on the real checkpoint.
+math. It is verified against a scaled synthetic checkpoint and by a complete
+header-only classification of the pinned real checkpoint before payload reads.
 
 ## Why this shape
 
@@ -12,11 +12,10 @@ a ~51B-param PLE embedding table spread across **128 PLE shards**. Loading the
 PLE table into memory (or concatenating it) blows past any reasonable footprint
 guard. So this converter:
 
-1. processes the checkpoint **shard-by-shard** (one MoE expert matrix at a time,
-   exactly as `mlx_lm convert.py` streams with `lazy=True`), and
-2. **quantises** every quantisable weight (including PLE/embed tables) to affine
-   **q4-g32** while streaming each tensor via `mmap` byte-slice — it never
-   materialises the whole ~51B PLE table in RAM.
+1. processes one checkpoint tensor at a time, and
+2. uses the model's fine-grained quantization contract: PLE is q4-g32, routing
+   gates are q8-g64, and ordinary eligible matrices are q4-g64. It never
+   concatenates the ~51B PLE table.
 
 ## Files
 
@@ -47,7 +46,7 @@ source .venv/bin/activate   # mlx 0.32.2, safetensors, numpy
     --output /tmp/synth-out \
     --max-shard-bytes 2000000
 
-# 3. verify COPY preservation, q4-g32 quant round-trip, total_size, manifests
+# 3. verify COPY preservation, mixed-quant round-trip, total_size, manifests
 .venv/bin/python scripts/verify_synth_conversion.py /tmp/synth-src /tmp/synth-out
 
 # 4. prove the guards abort closed
@@ -63,7 +62,7 @@ Expected: all green, with the converter ledger reporting `peak_rss_bytes`
 --source           <snapshot dir>   must contain model.safetensors.index.json
 --output           <dir>            must NOT exist (aborts if it does)
 --max-shard-bytes  <int>            output shard cap (default 4 GiB)
---group-size       <int>            quant group size (default 32 = q4-g32)
+--inspect-only                       classify all headers; read no payloads
 ```
 
 Runbook-guard parameters (only via the Python API today): `min_free_bytes`
@@ -72,26 +71,23 @@ operator confirms ≥140 GiB free at the output root before starting.
 
 ## Output contract
 
-* **Quantised** weights (all 2-D, group-size-divisible tensors incl. the PLE /
-  embed tables) → affine **q4-g32** (`mx.quantize(bits=4, group_size=32,
-  mode='affine')`), each emitted with `.scales` / `.biases`, packed into
-  bounded output shards. PLE is quantised, never preserved BF16, and never
-  materialised as a whole table (per-tensor mmap streaming).
+* The 128 exact PLE shard embeddings (width 160) use affine q4-g32. The 98
+  decoder/MTP routing gates use affine q8-g64. Other eligible matrices use
+  affine q4-g64. No padding, slicing, or name-derived model heuristic exists.
+  Every quantized tensor emits its weight, `.scales`, and `.biases` keys.
 * **Copy** tensors (1-D norms/biases, `A_log`, aux/buffer dtypes, widths not
-  divisible by group_size) → carried through value-for-value with their source
+  divisible by the applicable group size) → carried through value-for-value with their source
   shape/dtype, so no quantisable-unfriendly tensor is dropped or mangled.
-* Non-weight metadata (config.json, generation_config.json, tokenizer files)
-  copied verbatim (root level) so the output tree is self-contained loader
-  input; these are never quantized.
-* `model.safetensors.index.json` → `total_size` = Σ over every source weight of
-  `numel × dtype_bytes` (the loader's semantic model size, not source
-  *.safetensors file sizes), and a `weight_map` covering every original weight
-  (2 extra keys per quantised tensor for scales/biases).
+* Non-weight metadata is copied at the root. `config.json` additionally records
+  the global q4-g64 format and exact per-module PLE/routing overrides consumed
+  by the loader.
+* `model.safetensors.index.json` maps every emitted weight/scales/biases key and
+  `total_size` is the sum of every emitted tensor's bytes.
 * Output shards use deterministic `model-{i:05d}-of-{N:05d}.safetensors` with
   the real total `N` (bounded by `--max-shard-bytes`).
 * `SHA256SUMS.txt` → byte-sorted `sha256  <relative path>` per output file.
 * Execution ledger on stdout: file count, output bytes, shard list, **peak RSS**,
-  group_size, quant/copy counts, `total_weight_bytes`, `status`.
+  mixed quant/copy counts, source/output weight bytes, and `status`.
 
 ## Fail-closed guarantees
 
@@ -100,24 +96,13 @@ operator confirms ≥140 GiB free at the output root before starting.
 | output dir exists | abort, no publish |
 | missing / empty `model.safetensors.index.json` | abort |
 | weight_map references a missing source shard | abort |
-| source shard escapes source root (symlink / `..`) | abort |
+| non-flat shard path or symlink outside the model cache root | abort |
 | source or output under `/Volumes/Extreme SSD` | abort |
 | free space at output root < 140 GiB | abort |
 | process peak RSS > 220 GiB | abort mid-run |
 
-## Known prototype limits (for Vector to finalise)
-
-* bf16 **copy** tensors (norms etc.) are widened to fp32 in the output because
-  numpy safetensors cannot carry bfloat16; a bf16-preserving copy needs mlx
-  `framework="mlx"` in the transplant (Vector's loader). Quantised PATH handles
-  bf16 correctly (widens via bit-manip → q4-g32).
-* The manifest `classify_tensor` conjoins explicit embed/PLE names with the
-  predicate; Vector may want to gate embed/PLE q4-g32 against the loader's
-  `nn.Embedding.as_linear` / quantised-embedding contract (rows must be
-  divisible by 32 — true for hidden=2560).
-* `--group-size` defaults to 32; swap to 64 for a q4-g64 variant is a one-line
-  change (shard sizes / packed dtype shift accordingly).
-* No `--upload-repo` (forbidden on the real run by the runbook).
+Copied BF16 tensors remain BF16. There is no upload option; publication is a
+separate, explicitly guarded operation after loader and evaluation evidence.
 
 ## Reference
 

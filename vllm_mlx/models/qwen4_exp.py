@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 
 import mlx.core as mx
@@ -25,6 +26,7 @@ _mlx_compat.install()
 
 from mlx_lm.models.base import (  # noqa: E402
     BaseModelArgs,
+    create_attention_mask,
     create_ssm_mask,
     scaled_dot_product_attention,
 )
@@ -102,7 +104,9 @@ class TextModelArgs(BaseModelArgs):
             rope.get("partial_rotary_factor", self.partial_rotary_factor)
         )
         self.rope_theta = float(rope.get("rope_theta", self.rope_theta))
-        self.ple_embed_dim = self.hidden_size if self.ple_embed_dim is None else self.ple_embed_dim
+        self.ple_embed_dim = (
+            self.hidden_size if self.ple_embed_dim is None else self.ple_embed_dim
+        )
         self.ple_layer_ids = sorted(set(self.ple_layer_ids))
         if self.layer_types is None:
             self.layer_types = [
@@ -128,7 +132,9 @@ class TextModelArgs(BaseModelArgs):
             "qwen_sparse_attention",
         }
         if unsupported:
-            raise ValueError(f"Unsupported Qwen4-Exp layer types: {sorted(unsupported)}")
+            raise ValueError(
+                f"Unsupported Qwen4-Exp layer types: {sorted(unsupported)}"
+            )
         if self.hc_count <= 1 or self.hidden_size <= 0 or self.hc_lowrank <= 0:
             raise ValueError("Qwen4-Exp requires positive four-stream HC dimensions")
         if self.linear_num_value_heads % self.linear_num_key_heads:
@@ -151,7 +157,9 @@ class TextModelArgs(BaseModelArgs):
         if self.indexer_kv_heads != 1:
             raise ValueError("Qwen4-Exp QSA requires one indexer KV head")
         if self.indexer_budget % self.indexer_compress_ratio:
-            raise ValueError("indexer_budget must be divisible by indexer_compress_ratio")
+            raise ValueError(
+                "indexer_budget must be divisible by indexer_compress_ratio"
+            )
         rotary_dim = int(self.head_dim * self.partial_rotary_factor)
         if rotary_dim > self.indexer_head_dim:
             raise ValueError("attention rotary dimensions must fit the QSA index head")
@@ -159,10 +167,17 @@ class TextModelArgs(BaseModelArgs):
             raise ValueError("num_experts_per_tok must be within num_experts")
         ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
         if self.ple_layer_ids and self.ple_embed_dim % ngram_heads:
-            raise ValueError("PLE embedding width must divide evenly across n-gram heads")
-        if any(layer < 1 or layer > self.num_hidden_layers for layer in self.ple_layer_ids):
+            raise ValueError(
+                "PLE embedding width must divide evenly across n-gram heads"
+            )
+        if any(
+            layer < 1 or layer > self.num_hidden_layers for layer in self.ple_layer_ids
+        ):
             raise ValueError("ple_layer_ids are one-indexed decoder layer ids")
-        if any(self.layer_types[layer - 1] != "linear_attention" for layer in self.ple_layer_ids):
+        if any(
+            self.layer_types[layer - 1] != "linear_attention"
+            for layer in self.ple_layer_ids
+        ):
             raise ValueError("PLE is only valid on linear-attention layers")
         if self.ple_layer_ids and self.eos_token_id is None:
             raise ValueError("PLE requires eos_token_id for segment-local n-grams")
@@ -210,19 +225,27 @@ class ZeroCenteredRMSNorm(nn.Module):
 class SigmoidRMSNormGated(nn.Module):
     """Qwen4-Exp's norm-before-gate GDN output transform."""
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        activation: str = "sigmoid",
+    ):
         super().__init__()
         self.weight = mx.ones((dim,))
         self.eps = eps
+        self.activation = activation
 
     def __call__(self, hidden: mx.array, gate: mx.array) -> mx.array:
         dtype = hidden.dtype
-        normalized = hidden.astype(mx.float32)
-        normalized = normalized * mx.rsqrt(
-            mx.mean(mx.square(normalized), axis=-1, keepdims=True) + self.eps
-        )
-        normalized = normalized * self.weight.astype(mx.float32)
-        return (normalized * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
+        # Preserve the architecture reference's BF16 rounding boundary: the
+        # fused RMSNorm returns activation dtype before the gate multiplies in
+        # FP32. Adapted from mlx-vlm ecf1aa0a62958ea770bc25c35e173effe142aa3c
+        # (MIT).
+        normalized = mx.fast.rms_norm(hidden, self.weight, self.eps).astype(mx.float32)
+        gate = gate.astype(mx.float32)
+        gate = mx.sigmoid(gate) if self.activation == "sigmoid" else nn.silu(gate)
+        return (normalized * gate).astype(dtype)
 
 
 class GatedResidual(nn.Module):
@@ -258,9 +281,7 @@ class GatedResidual(nn.Module):
         mixed = mx.mean(mix * streams, axis=-2)
         if self.block_inject_weight is None:
             return mixed
-        injection = 2 * mx.sigmoid(
-            self.block_inject_weight(normalized) / self.hc_count
-        )
+        injection = 2 * mx.sigmoid(self.block_inject_weight(normalized) / self.hc_count)
         return mixed, hyper_input, injection
 
 
@@ -287,9 +308,7 @@ class SparseMoeBlock(nn.Module):
         self.switch_mlp = SwitchGLU(
             args.hidden_size, args.moe_intermediate_size, args.num_experts
         )
-        self.shared_expert = MLP(
-            args.hidden_size, args.shared_expert_intermediate_size
-        )
+        self.shared_expert = MLP(args.hidden_size, args.shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(args.hidden_size, 1, bias=False)
         self.sharding_group = None
 
@@ -327,9 +346,7 @@ class GatedDeltaNet(nn.Module):
             groups=self.conv_dim,
             bias=False,
         )
-        self.in_proj_qkv = nn.Linear(
-            self.hidden_size, self.conv_dim, bias=False
-        )
+        self.in_proj_qkv = nn.Linear(self.hidden_size, self.conv_dim, bias=False)
         self.in_proj_z = nn.Linear(self.hidden_size, self.value_dim, bias=False)
         self.in_proj_b = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
         self.in_proj_a = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
@@ -337,7 +354,11 @@ class GatedDeltaNet(nn.Module):
         self.A_log = mx.log(
             mx.random.uniform(low=0.01, high=16.0, shape=(self.num_v_heads,))
         )
-        self.norm = SigmoidRMSNormGated(self.head_v_dim, eps=args.rms_norm_eps)
+        self.norm = SigmoidRMSNormGated(
+            self.head_v_dim,
+            eps=args.rms_norm_eps,
+            activation=args.output_gate_type or args.hidden_act,
+        )
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
     def __call__(
@@ -382,9 +403,17 @@ class GatedDeltaNet(nn.Module):
             )
         ]
         state = cache[1] if cache is not None else None
+        # Exact Qwen4-Exp normalization: L2 epsilon is applied after the sum,
+        # then queries receive the attention scale. Adapted from mlx-vlm
+        # ecf1aa0a62958ea770bc25c35e173effe142aa3c (MIT); the previous
+        # RMS-normalized form moved epsilon inside the mean and diverged on the
+        # real q4 checkpoint.
         inv_scale = key.shape[-1] ** -0.5
-        query = (inv_scale**2) * mx.fast.rms_norm(query, None, 1e-6)
-        key = inv_scale * mx.fast.rms_norm(key, None, 1e-6)
+        query = query * mx.rsqrt(
+            mx.sum(mx.square(query), axis=-1, keepdims=True) + 1e-6
+        )
+        key = key * mx.rsqrt(mx.sum(mx.square(key), axis=-1, keepdims=True) + 1e-6)
+        query = query * inv_scale
         output, state = gated_delta_update(
             query,
             key,
@@ -425,11 +454,7 @@ def apply_rotary_positions(
     if positions.ndim == 1:
         positions = positions[None, :]
     inverse_frequency = 1.0 / (
-        base
-        ** (
-            mx.arange(0, rotary_dim, 2, dtype=mx.float32)
-            / float(rotary_dim)
-        )
+        base ** (mx.arange(0, rotary_dim, 2, dtype=mx.float32) / float(rotary_dim))
     )
     angles = positions.astype(mx.float32)[..., None] * inverse_frequency
     angles = mx.concatenate([angles, angles], axis=-1)[:, :, None, :]
@@ -437,11 +462,113 @@ def apply_rotary_positions(
     sine = mx.sin(angles)
     rotary = x[..., :rotary_dim]
     half = rotary_dim // 2
-    rotated_half = mx.concatenate(
-        [-rotary[..., half:], rotary[..., :half]], axis=-1
-    )
+    rotated_half = mx.concatenate([-rotary[..., half:], rotary[..., :half]], axis=-1)
     rotated = rotary * cosine + rotated_half * sine
     return mx.concatenate([rotated.astype(x.dtype), x[..., rotary_dim:]], axis=-1)
+
+
+@cache
+def _qwen4_exp_rope_kernel(rotary_dim: int, position_ndim: int):
+    """Build the architecture's half-split MRoPE forward kernel.
+
+    Forward math is adopted line-for-line from mlx-vlm commit
+    ecf1aa0a62958ea770bc25c35e173effe142aa3c (MIT).  Rapid only needs the
+    inference forward here; the pure-MLX fallback below covers non-Metal use.
+    """
+
+    if not mx.metal.is_available():
+        return None
+    if position_ndim == 2:
+        position_expr = "position_ids[b * q_len + t]"
+    else:
+        raise ValueError("Qwen4-Exp text RoPE requires 2-D position IDs")
+    source = f"""
+        uint elem = thread_position_in_grid.x;
+
+        const int half_dim = {rotary_dim // 2};
+        const int q_bsz = x_shape[0];
+        const int q_heads = x_shape[1];
+        const int q_len = x_shape[2];
+        const int q_dim = x_shape[3];
+        const int slots = half_dim + q_dim - {rotary_dim};
+        const int work_size = q_bsz * q_heads * q_len * slots;
+
+        if (elem >= uint(work_size)) {{
+            return;
+        }}
+
+        int local = int(elem);
+        int slot = local % slots;
+        int tmp = local / slots;
+        int t = tmp % q_len;
+        tmp = tmp / q_len;
+        int h = tmp % q_heads;
+        int b = tmp / q_heads;
+        int base = ((b * q_heads + h) * q_len + t) * q_dim;
+
+        if (slot >= half_dim) {{
+            int pass_d = {rotary_dim} + slot - half_dim;
+            int pass_idx = base + pass_d;
+            x_out[pass_idx] = x[pass_idx];
+            return;
+        }}
+
+        int freq_idx = slot;
+        int d = freq_idx;
+        int pair_d = d + half_dim;
+        float pos = static_cast<float>({position_expr});
+        float angle = pos * static_cast<float>(inv_freq[freq_idx]);
+        float c = metal::cos(angle);
+        float s = metal::sin(angle);
+
+        int idx = base + d;
+        float xv = static_cast<float>(x[idx]);
+        float xp = static_cast<float>(x[base + pair_d]);
+        x_out[idx] = static_cast<T>(xv * c - xp * s);
+        x_out[base + pair_d] = static_cast<T>(xp * c + xv * s);
+    """
+    return mx.fast.metal_kernel(
+        name=f"qwen4_exp_rope_half_split_{rotary_dim}_{position_ndim}d",
+        input_names=["x", "position_ids", "inv_freq"],
+        output_names=["x_out"],
+        source=source,
+    )
+
+
+def apply_qwen4_exp_rope(
+    x: mx.array,
+    positions: mx.array,
+    *,
+    rotary_dim: int,
+    base: float,
+) -> mx.array:
+    """Apply exact Qwen4-Exp text RoPE to ``[B, H, L, D]`` states."""
+
+    if positions.ndim == 1:
+        positions = mx.broadcast_to(positions[None], (x.shape[0], positions.size))
+    inverse_frequency = 1.0 / (
+        base ** (mx.arange(0, rotary_dim, 2, dtype=mx.float32) / float(rotary_dim))
+    )
+    kernel = _qwen4_exp_rope_kernel(rotary_dim, positions.ndim)
+    if kernel is None:
+        return apply_rotary_positions(
+            x.transpose(0, 2, 1, 3),
+            positions,
+            rotary_dim=rotary_dim,
+            base=base,
+        ).transpose(0, 2, 1, 3)
+    half_dim = inverse_frequency.shape[0]
+    slots = half_dim + x.shape[-1] - rotary_dim
+    work_size = x.shape[0] * x.shape[1] * x.shape[2] * slots
+    (output,) = kernel(
+        inputs=[x, positions, inverse_frequency],
+        template=[("T", x.dtype)],
+        grid=(work_size, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[x.shape],
+        output_dtypes=[x.dtype],
+    )
+    return output
 
 
 class QSAIndexer(nn.Module):
@@ -462,12 +589,8 @@ class QSAIndexer(nn.Module):
             (self.num_heads + self.num_kv_heads) * self.head_dim,
             bias=False,
         )
-        self.q_layernorm = ZeroCenteredRMSNorm(
-            self.head_dim, eps=args.rms_norm_eps
-        )
-        self.k_layernorm = ZeroCenteredRMSNorm(
-            self.head_dim, eps=args.rms_norm_eps
-        )
+        self.q_layernorm = ZeroCenteredRMSNorm(self.head_dim, eps=args.rms_norm_eps)
+        self.k_layernorm = ZeroCenteredRMSNorm(self.head_dim, eps=args.rms_norm_eps)
 
     def __call__(
         self,
@@ -475,7 +598,7 @@ class QSAIndexer(nn.Module):
         cache: QSAIndexCache,
         *,
         physical_kv_length: int,
-    ) -> mx.array:
+    ) -> mx.array | None:
         batch, length, _ = hidden_states.shape
         cache._ensure_batch(batch)
         offsets = list(cache._offsets)
@@ -488,32 +611,38 @@ class QSAIndexer(nn.Module):
         if self.num_kv_heads != 1:
             raise ValueError("Qwen4-Exp QSA requires one indexer KV head")
         raw_keys = raw_keys.squeeze(2)
-        starts = mx.array(
-            [start for start, _ in valid_spans], dtype=mx.int64
-        )
+        starts = mx.array([start for start, _ in valid_spans], dtype=mx.int64)
         positions = (
             mx.array(offsets, dtype=mx.int64)[:, None]
             + mx.arange(length, dtype=mx.int64)[None, :]
             - starts[:, None]
         )
         query = self.q_layernorm(query)
-        query = apply_rotary_positions(
-            query,
+        query = apply_qwen4_exp_rope(
+            query.transpose(0, 2, 1, 3),
             positions,
             rotary_dim=self.rotary_dim,
             base=self.rope_theta,
-        )
+        ).transpose(0, 2, 1, 3)
 
         def transform_group(group: mx.array, start: int) -> mx.array:
             normalized = self.k_layernorm(group[:, None, :])[:, 0, :]
-            return apply_rotary_positions(
+            return apply_qwen4_exp_rope(
                 normalized[:, None, None, :],
-                mx.array([start], dtype=mx.int64),
+                mx.array([[start]], dtype=mx.int64),
                 rotary_dim=self.rotary_dim,
                 base=self.rope_theta,
             )[:, 0, 0, :]
 
         cache.update(raw_keys, transform_group)
+        # The architecture reference stays on ordinary causal attention while
+        # every complete block fits the QSA budget. Preserve that exact math
+        # and kernel selection while still updating Rapid's persistent index
+        # cache for the first later token that crosses the sparse boundary.
+        # Adapted from mlx-vlm ecf1aa0a62958ea770bc25c35e173effe142aa3c
+        # (MIT), without its O(B*L*topk*K) token-mask materialization.
+        if physical_kv_length // self.compress_ratio <= self.block_topk:
+            return None
         selected = mx.zeros((batch, length, physical_kv_length), dtype=mx.bool_)
         left_padding = (
             [0] * batch
@@ -522,30 +651,40 @@ class QSAIndexer(nn.Module):
         )
         for batch_index in range(batch):
             input_start, valid_length = valid_spans[batch_index]
-            for query_index in range(input_start, input_start + valid_length):
-                logical_position = (
-                    offsets[batch_index] + query_index - input_start
+            available_blocks = cache._compressed_counts[batch_index]
+            selected_blocks = None
+            if available_blocks > self.block_topk:
+                keys = cache.keys_for_blocks(batch_index, available_blocks)
+                # Preserve the reference's single batched matmul and FP32
+                # reduction. Per-token matmuls choose a different Metal
+                # accumulation kernel and can perturb the top-k boundary.
+                scores = mx.matmul(
+                    query[batch_index].transpose(1, 0, 2),
+                    keys.T,
                 )
+                scores = mx.sum(
+                    mx.maximum(scores.astype(mx.float32), 0), axis=0
+                ) / math.sqrt(self.head_dim)
+                query_ends = offsets[batch_index] + mx.arange(length) - input_start + 1
+                complete_counts = mx.maximum(query_ends // self.compress_ratio, 0)
+                valid_blocks = (
+                    mx.arange(available_blocks)[None, :] < complete_counts[:, None]
+                )
+                scores = mx.where(valid_blocks, scores, -mx.inf)
+                selected_blocks = mx.argpartition(
+                    scores, kth=-self.block_topk, axis=-1
+                )[..., -self.block_topk :]
+            for query_index in range(input_start, input_start + valid_length):
+                logical_position = offsets[batch_index] + query_index - input_start
                 complete_blocks = (logical_position + 1) // self.compress_ratio
                 token_indices: list[int] = []
                 if complete_blocks:
-                    keys = cache.keys_for_blocks(batch_index, complete_blocks)
-                    scores = mx.matmul(
-                        query[batch_index, query_index].astype(mx.float32),
-                        keys.astype(mx.float32).T,
-                    )
-                    scores = mx.sum(mx.maximum(scores, 0), axis=0) / math.sqrt(
-                        self.head_dim
-                    )
-                    count = min(self.block_topk, complete_blocks)
-                    if count == complete_blocks:
+                    if complete_blocks <= self.block_topk:
                         blocks = list(range(complete_blocks))
                     else:
                         blocks = [
                             int(value)
-                            for value in mx.argpartition(
-                                scores, kth=-count
-                            )[-count:].tolist()
+                            for value in selected_blocks[query_index].tolist()
                         ]
                     for block in blocks:
                         start = block * self.compress_ratio
@@ -630,17 +769,39 @@ class QSAAttention(nn.Module):
         values = self.v_proj(x).reshape(
             batch, length, self.num_key_value_heads, self.head_dim
         )
-        queries = self.q_norm(queries).transpose(0, 2, 1, 3)
-        keys = self.k_norm(keys).transpose(0, 2, 1, 3)
+        queries = self.q_norm(queries)
+        keys = self.k_norm(keys)
         values = values.transpose(0, 2, 1, 3)
-        queries = self.rope(queries, offset=offset)
-        keys = self.rope(keys, offset=offset)
+        positions = mx.arange(length, dtype=mx.int64)
+        if isinstance(offset, mx.array) and offset.ndim:
+            positions = offset[:, None] + positions[None, :]
+        else:
+            positions = positions + int(offset)
+        # Qwen4-Exp uses half-split (rotate-half) pairing for its partial RoPE.
+        # This follows mlx-vlm ecf1aa0a62958ea770bc25c35e173effe142aa3c
+        # (MIT) while retaining Rapid's persistent QSA cache contract.
+        queries = apply_qwen4_exp_rope(
+            queries.transpose(0, 2, 1, 3),
+            positions,
+            rotary_dim=self.rotary_dim,
+            base=self.indexer.rope_theta,
+        )
+        keys = apply_qwen4_exp_rope(
+            keys.transpose(0, 2, 1, 3),
+            positions,
+            rotary_dim=self.rotary_dim,
+            base=self.indexer.rope_theta,
+        )
         if kv_cache is not None:
             keys, values = kv_cache.update_and_fetch(keys, values)
-        additive_mask = mx.where(
-            selected,
-            mx.array(0.0, dtype=queries.dtype),
-            mx.array(-1e9, dtype=queries.dtype),
+        additive_mask = (
+            create_attention_mask(x, kv_cache)
+            if selected is None
+            else mx.where(
+                selected,
+                mx.array(0.0, dtype=queries.dtype),
+                mx.array(-1e9, dtype=queries.dtype),
+            )
         )
         output = scaled_dot_product_attention(
             queries,
@@ -672,12 +833,7 @@ def build_layer_multipliers(
     half_bound = max(1, multiplier_max // 2)
     base_seed = seed + 10007 * ple_layer_index
     return [
-        2
-        * (
-            _splitmix64(base_seed + 0x9E3779B97F4A7C15 * (index + 1))
-            % half_bound
-        )
-        + 1
+        2 * (_splitmix64(base_seed + 0x9E3779B97F4A7C15 * (index + 1)) % half_bound) + 1
         for index in range(ngram_size)
     ]
 
@@ -791,7 +947,10 @@ class NGramEmbedding(nn.Module):
         eos_positions = mx.where(token_ids == self.eos_token_id, positions, -1)
         previous_eos_inclusive = mx.cummax(eos_positions, axis=1)
         previous_eos = mx.concatenate(
-            [mx.full((token_ids.shape[0], 1), -1, dtype=mx.int64), previous_eos_inclusive[:, :-1]],
+            [
+                mx.full((token_ids.shape[0], 1), -1, dtype=mx.int64),
+                previous_eos_inclusive[:, :-1],
+            ],
             axis=1,
         )
         position_in_segment = positions[None, :] - previous_eos - 1
@@ -896,14 +1055,10 @@ class PLELayer(nn.Module):
         if cache is not None:
             if cache.lengths is not None:
                 valid = mx.clip(cache.lengths, 0, x.shape[1])
-                positions = (
-                    valid[:, None] + mx.arange(self.conv_state_len)
-                )[..., None]
+                positions = (valid[:, None] + mx.arange(self.conv_state_len))[..., None]
                 cache[2] = mx.take_along_axis(conv_input, positions, axis=1)
             else:
-                cache[2] = mx.contiguous(
-                    conv_input[:, -self.conv_state_len :, :]
-                )
+                cache[2] = mx.contiguous(conv_input[:, -self.conv_state_len :, :])
         return nn.silu(self.conv1d(conv_input))
 
     def __call__(
@@ -952,9 +1107,7 @@ class DecoderLayer(nn.Module):
             else None
         )
         self.ple = (
-            PLELayer(args, ple_layer_index=ple_index)
-            if ple_index is not None
-            else None
+            PLELayer(args, ple_layer_index=ple_index) if ple_index is not None else None
         )
         self.attn_hyper_connection = GatedResidual(args)
         self.mlp_hyper_connection = GatedResidual(args)
@@ -1087,19 +1240,33 @@ class TextModel(nn.Module):
             weights.pop("lm_head.weight", None)
         sanitized = {}
         for key, value in weights.items():
-            if key.endswith("conv1d.weight") and value.ndim == 3 and value.shape[1] == 1:
+            if (
+                key.endswith("conv1d.weight")
+                and value.ndim == 3
+                and value.shape[1] == 1
+            ):
                 value = value.moveaxis(2, 1)
             if ".mlp.experts.gate_up_proj" in key:
                 gate_up = value
                 midpoint = gate_up.shape[-2] // 2
-                base = key.replace("experts.gate_up_proj", "switch_mlp")
-                sanitized[f"{base}.gate_proj.weight"] = gate_up[..., :midpoint, :]
-                sanitized[f"{base}.up_proj.weight"] = gate_up[..., midpoint:, :]
+                prefix, suffix = key.split("experts.gate_up_proj", 1)
+                leaf = {"": "weight", ".scales": "scales", ".biases": "biases"}.get(
+                    suffix
+                )
+                if leaf is None:
+                    sanitized[key] = value
+                    continue
+                base = f"{prefix}switch_mlp"
+                sanitized[f"{base}.gate_proj.{leaf}"] = gate_up[..., :midpoint, :]
+                sanitized[f"{base}.up_proj.{leaf}"] = gate_up[..., midpoint:, :]
                 continue
             if ".mlp.experts.down_proj" in key:
-                key = key.replace(
-                    "experts.down_proj", "switch_mlp.down_proj.weight"
+                prefix, suffix = key.split("experts.down_proj", 1)
+                leaf = {"": "weight", ".scales": "scales", ".biases": "biases"}.get(
+                    suffix
                 )
+                if leaf is not None:
+                    key = f"{prefix}switch_mlp.down_proj.{leaf}"
             if ".ngram_embedding.shard_" in key:
                 prefix, suffix = key.split(".ngram_embedding.shard_", 1)
                 shard, leaf = suffix.split(".", 1)
@@ -1155,9 +1322,7 @@ class Model(nn.Module):
             if key.startswith("mtp."):
                 continue
             if key.startswith("model.language_model"):
-                key = key.replace(
-                    "model.language_model", "language_model.model", 1
-                )
+                key = key.replace("model.language_model", "language_model.model", 1)
             elif not key.startswith("language_model."):
                 key = f"language_model.{key}"
             mapped[key] = value
