@@ -1047,7 +1047,7 @@ def _emit_catalog(subcommand, alias):
         if "--json" in sys.argv:
             aliases = []
             if _setting("FAKE_INCLUDE_STARTER") == "1":
-                aliases.append("lfm2.5-1b-4bit")
+                aliases.extend(["lfm2.5-2.6b-4bit", "lfm2.5-1b-4bit"])
             if _setting("FAKE_CACHED_CURATED_TRADEUP") == "1":
                 aliases.extend([f"a-cached-{index}" for index in range(6)])
                 aliases.append("qwen3.5-4b-4bit")
@@ -1085,10 +1085,12 @@ def _emit_catalog(subcommand, alias):
         print("Alias                  Parser           Reasoning        Preset")
         print("---------------------  ---------------  ---------------  --------")
         if _setting("FAKE_INCLUDE_STARTER") == "1":
-            # A production catalog always contains the onboarding starter.
+            # A production catalog contains both the RAM-aware compact starter
+            # and the explicit low-memory alternative.
             # Most flows deliberately keep the compact single-chat-row
             # fixture, but fresh-install must exercise the real default
             # selection contract rather than falling back to fake-alias.
+            print("lfm2.5-2.6b-4bit      hermes           none")
             print("lfm2.5-1b-4bit        hermes           none")
         if _setting("FAKE_CACHED_CURATED_TRADEUP") == "1":
             for index in range(6):
