@@ -7,7 +7,13 @@ import argparse
 import re
 from pathlib import Path
 
-from scripts.strip_release_note_comments import strip_release_note_comments
+if __package__:
+    from scripts.strip_release_note_comments import strip_release_note_comments
+else:
+    # Workflows intentionally execute this file by path. In that mode Python
+    # places scripts/ (not the repository root) on sys.path, so import the
+    # sibling directly. Keep both entrypoints on the same implementation.
+    from strip_release_note_comments import strip_release_note_comments
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?$")
 CHANGELOG_HEADING_RE = re.compile(r"^## \[([^]]+)\](?:\s|$)")

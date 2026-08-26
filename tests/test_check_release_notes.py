@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 
@@ -169,3 +170,24 @@ def test_cli_failure_is_fail_closed(
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2
+
+
+def test_workflow_script_entrypoint_loads_sibling_normalizer(tmp_path: Path) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_release_notes.py",
+            "--version",
+            "0.13.1",
+            "--changelog",
+            str(changelog),
+            "--notes-dir",
+            str(notes_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "preflight passed for 0.13.1" in result.stdout
