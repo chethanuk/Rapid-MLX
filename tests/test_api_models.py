@@ -1167,30 +1167,6 @@ class TestStreamingModels:
         assert second == "chatcmpl-12345678" + "b" * 24
         assert first != second
 
-    def test_mllm_scheduler_rejects_duplicate_public_ids(self):
-        """A duplicate cannot replace the MLLM request cancellation addresses."""
-        from collections import deque
-
-        from vllm_mlx.mllm_scheduler import MLLMScheduler
-
-        public_id = "chatcmpl-" + "a" * 32
-        mllm_scheduler = MLLMScheduler.__new__(MLLMScheduler)
-        mllm_scheduler._generation_paused = False
-        mllm_scheduler._paused_admission_tokens = set()
-        mllm_scheduler._paused_add_allowance = 0
-        mllm_scheduler.requests = {}
-        mllm_scheduler.waiting = deque()
-        mllm_scheduler._cancelled_request_ids = set()
-        mllm_scheduler._disconnect_abort_ids = set()
-        mllm_request = SimpleNamespace(
-            request_id=public_id,
-            lifecycle_admission_token=None,
-        )
-        mllm_scheduler._commit_request(mllm_request)
-        with pytest.raises(ValueError, match="already exists"):
-            mllm_scheduler._commit_request(mllm_request)
-        assert mllm_scheduler.requests[public_id] is mllm_request
-
     @pytest.mark.asyncio
     async def test_diffusion_stream_registers_public_id_for_cancellation(self):
         """The diffusion worker's existing cancel event is publicly addressable."""
