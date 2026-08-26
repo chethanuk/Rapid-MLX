@@ -9023,17 +9023,22 @@ def connect_command(args):
     # context across process boundaries (#2348): the serve banner advertises
     # ``connect openai-python --base-url <url>`` pointing at the real server,
     # and a standalone ``connect`` derives host/port from it instead of falling
-    # back to the localhost:8000 default. It fills host/port only when neither
-    # explicit ``--host``/``--port`` flag was given (flags > base-url > config).
+    # back to the localhost:8000 default. Parse the base URL first, then let an
+    # explicit ``--host``/``--port`` override its respective coordinate only
+    # when that flag is actually supplied (independent overrides, codex #2348).
     host = args.host
     port = args.port
     base_url = getattr(args, "base_url", None)
-    if base_url is not None and host is None and port is None:
+    if base_url is not None:
         try:
-            host, port = _parse_base_url(base_url)
+            base_host, base_port = _parse_base_url(base_url)
         except ValueError:
             print(f"  connect: invalid --base-url: {base_url}")
             sys.exit(1)
+        if args.host is None:
+            host = base_host
+        if args.port is None:
+            port = base_port
 
     eps = resolve_endpoints(host=host, port=port, model=args.model)
 

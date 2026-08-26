@@ -520,9 +520,38 @@ def test_parse_base_url_ipv6_bracketing():
 def test_parse_base_url_default_port_and_errors():
     # No port → the rapid-mlx default.
     assert connect._parse_base_url("http://server.local/v1") == ("server.local", 8000)
-    for bad in ("ftp://localhost:8123", "not-a-url", "http://:8123"):
+    # Non-http scheme (incl. https, which the http-only connect SSOT would
+    # silently downgrade), malformed URL, no host, and an out-of-range/zero
+    # explicit port are all rejected rather than retargeting the snippet.
+    for bad in (
+        "ftp://localhost:8123",
+        "https://localhost:8123/v1",
+        "not-a-url",
+        "http://:8123",
+        "http://localhost:0/v1",
+        "http://localhost:70000/v1",
+    ):
         with pytest.raises(ValueError):
             connect._parse_base_url(bad)
+
+
+def test_connect_base_url_partial_override_keeps_other_coordinate(monkeypatch):
+    """`--host` and `--port` are independent overrides of the base URL: giving
+    only `--host` must keep the base URL's port (not fall back to 8000)."""
+    probed = []
+
+    def fake_probe(host, port):
+        probed.append((host, port))
+        return "m"
+
+    monkeypatch.setattr(connect, "_probe_running_model", fake_probe)
+    out = _run_connect(
+        target="openai-python",
+        base_url="http://localhost:8123/v1",
+        host="127.0.0.1",
+    )
+    assert "http://127.0.0.1:8123/v1" in out
+    assert probed == [("127.0.0.1", 8123)]
 
 
 def test_connect_openai_python_uses_base_url_for_snippet(monkeypatch):

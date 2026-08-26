@@ -265,14 +265,21 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     user can paste the banner URL verbatim. A missing port falls back to the
     rapid-mlx default (8000).
 
-    Raises ``ValueError`` on a non-http(s) scheme or a URL with no host.
+    ``connect`` targets a local ``http://`` server (the SSOT endpoints are all
+    ``http``), so any non-``http`` scheme is rejected rather than silently
+    downgraded (codex #2348-R1). An explicit port is validated against the CLI
+    ``_port_arg`` 1-65535 invariant, so ``:0`` or out-of-range values fail
+    loudly instead of retargeting the snippet elsewhere.
+
+    Raises ``ValueError`` on a non-http scheme, a URL with no host, or an
+    explicit out-of-range port.
     """
     from urllib.parse import unquote, urlsplit
 
     split = urlsplit(base_url, scheme="http")
     scheme = split.scheme or "http"
-    if scheme not in ("http", "https"):
-        raise ValueError(f"base-url must be an http(s) URL, got {base_url!r}")
+    if scheme != "http":
+        raise ValueError(f"base-url must be an http URL, got {base_url!r}")
     host = split.hostname
     if not host:
         raise ValueError(f"base-url has no host, got {base_url!r}")
@@ -280,7 +287,9 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     # raw form (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then
     # re-encodes it consistently when rendering, so the round-trip is stable.
     host = unquote(host)
-    port = split.port or 8000
+    port = split.port if split.port is not None else 8000
+    if not (1 <= port <= 65535):
+        raise ValueError(f"base-url port must be between 1 and 65535, got {port}")
     return host, port
 
 
