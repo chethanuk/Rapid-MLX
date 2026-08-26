@@ -19,8 +19,8 @@ def _long_document() -> str:
         700: "The final audit sequence is 6042.",
     }
     baseline = (
-        "Routine status nominal; system checks passed, owner acknowledged, "
-        "retry zero, checksum remains stable."
+        "Routine status nominal; checks passed, owner acknowledged, retry count zero, "
+        "checksum stable."
     )
     return "\n".join(
         f"Record {index:03d}: {baseline} {needles.get(index, '')}".rstrip()
