@@ -18,8 +18,13 @@ def _long_document() -> str:
         400: "The cold-room reading is -17°C.",
         700: "The final audit sequence is 6042.",
     }
+    baseline = (
+        "Routine status is nominal; subsystem checks passed, owner acknowledged, "
+        "retry count zero, and checksum stable. No exception or operator action "
+        "was recorded."
+    )
     return "\n".join(
-        f"Record {index:03d}: {needles.get(index, 'Routine status is nominal.')}"
+        f"Record {index:03d}: {baseline} {needles.get(index, '')}".rstrip()
         for index in range(1, 801)
     )
 
