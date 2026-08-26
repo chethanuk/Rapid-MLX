@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import logging
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 

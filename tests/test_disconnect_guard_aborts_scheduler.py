@@ -823,16 +823,19 @@ async def test_batched_engine_admits_caller_provided_public_request_id():
 
     public_id = "chatcmpl-public1"
     holder: list[str | None] = [None]
+    admitted = asyncio.Event()
     async for _ in eng.stream_generate(
         prompt="hi",
         max_tokens=8,
         request_id=public_id,
         request_id_holder=holder,
+        request_admitted_event=admitted,
     ):
         break
 
     assert admitted_kwargs["request_id"] == public_id
     assert holder[0] == public_id
+    assert admitted.is_set()
 
 
 @pytest.mark.asyncio
@@ -887,16 +890,54 @@ async def test_mllm_scheduler_admits_caller_provided_public_request_id():
 
     public_id = "chatcmpl-vision1"
     holder: list[str | None] = [None]
+    admitted = asyncio.Event()
     async for _ in eng.stream_generate(
         prompt="hi",
         max_tokens=8,
         request_id=public_id,
         request_id_holder=holder,
+        request_admitted_event=admitted,
     ):
         break
 
     assert admitted_kwargs["request_id"] == public_id
     assert holder[0] == public_id
+    assert admitted.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outputs", [[], ["first", "second"]])
+async def test_batched_stream_chat_primes_the_routed_engine_stream(outputs):
+    """The public stream observes admission before prefixes or output."""
+    from vllm_mlx.engine.base import GenerationOutput
+    from vllm_mlx.engine.batched import BatchedEngine
+
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._prepare_cache_stable_messages = lambda messages: (messages, None)
+    engine._apply_chat_template = lambda *_args, **_kwargs: "prompt"
+    engine._prepare_harmony_no_thinking_prompt = lambda prompt, **_kwargs: (
+        prompt,
+        None,
+    )
+    engine._needs_prefix_boundary_snapshot = lambda: False
+    engine._create_output_router = lambda: None
+    engine._stream_with_output_router = lambda stream, _router: stream
+
+    async def stream_generate(**_kwargs):
+        for text in outputs:
+            yield GenerationOutput(text=text, new_text=text)
+
+    engine.stream_generate = stream_generate
+    chunks = [
+        chunk
+        async for chunk in engine.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            forced_assistant_prefix="prefix",
+        )
+    ]
+
+    assert [chunk.new_text for chunk in chunks] == ["prefix", *outputs]
 
 
 def test_text_scheduler_rejects_duplicate_public_request_id():
