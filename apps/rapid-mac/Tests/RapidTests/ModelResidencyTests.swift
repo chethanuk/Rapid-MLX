@@ -635,8 +635,11 @@ struct ModelResidencyTests {
         #expect(performance["cache_memory_mb"] as? Int == 4096)
     }
 
-    @Test("A typed 507 replacement projection reaches the user-facing rejection")
-    func loadDecodesReplacementProjectionRejection() async {
+    @Test(
+        "A typed 507 replacement projection reaches the user-facing rejection",
+        arguments: [false, true]
+    )
+    func loadDecodesReplacementProjectionRejection(legacyEnvelope: Bool) async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ResidencyLoadProjectionRejectProtocol.self]
         var client = ServerResidencyClient()
@@ -649,7 +652,7 @@ struct ModelResidencyTests {
             replaceGroup: .assistant,
             memoryPolicy: .evictFirstIfNeeded,
             port: 8000,
-            bearer: nil
+            bearer: legacyEnvelope ? "legacy-envelope" : nil
         )
 
         guard case .rejected(let message) = result else {
@@ -754,7 +757,12 @@ private final class ResidencyLoadProjectionRejectProtocol: URLProtocol, @uncheck
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let payload = #"{"detail":{"error":{"message":"insufficient capacity","type":"insufficient_capacity_error","code":"insufficient_capacity_error","param":"estimated_size_gb"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}}"#.data(using: .utf8)!
+        let structured = #"{"error":{"message":"insufficient capacity","type":"insufficient_capacity_error","code":"insufficient_capacity_error","param":"estimated_size_gb"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}"#
+        let payload = if request.value(forHTTPHeaderField: "Authorization") == "Bearer legacy-envelope" {
+            Data(#"{"detail":\#(structured)}"#.utf8)
+        } else {
+            Data(structured.utf8)
+        }
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 507, httpVersion: "HTTP/1.1", headerFields: nil
         )!

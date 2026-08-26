@@ -375,6 +375,14 @@ struct ServerResidencyClient {
         }
 
         let detail: Detail?
+        let error: StructuredDetail.Error?
+        let replacementProjection: ResidentReplacementProjection?
+
+        enum CodingKeys: String, CodingKey {
+            case detail
+            case error
+            case replacementProjection = "replacement_projection"
+        }
     }
 
     var session: URLSession = {
@@ -447,16 +455,16 @@ struct ServerResidencyClient {
                 return .unsupported
             }
             let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
-            let detail: String?
-            switch envelope?.detail {
-            case .message(let message):
-                detail = message
+            let nestedDetail: String? = switch envelope?.detail {
+            case .message(let message): message
             case .structured(let structured):
-                detail = structured.replacementProjection?.rejectionMessage(alias: alias)
+                structured.replacementProjection?.rejectionMessage(alias: alias)
                     ?? structured.error?.message
-            case nil:
-                detail = nil
+            case nil: nil
             }
+            let detail = envelope?.replacementProjection?.rejectionMessage(alias: alias)
+                ?? envelope?.error?.message
+                ?? nestedDetail
             return .rejected(detail ?? "The model could not be kept resident (HTTP \(http.statusCode)).")
         } catch {
             return .rejected("The model server could not load another resident model.")
