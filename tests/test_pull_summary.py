@@ -165,7 +165,6 @@ def test_hf_cached_fallback_reports_verified(
     assert "Downloaded" not in out, out
 
 
-
 def test_partial_mirror_fetch_combines_into_fallback_verdict(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -211,6 +210,8 @@ def test_partial_mirror_fetch_combines_into_fallback_verdict(
     out = capsys.readouterr().out
     assert "Downloaded" in out, out
     assert "Already cached" not in out, out
+
+
 def test_hf_fetch_zero_byte_file_counts_as_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
