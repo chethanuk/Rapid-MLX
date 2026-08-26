@@ -159,8 +159,7 @@ def _normalize_stop(v):
             out.append(item)
         return out
     raise ValueError(
-        "stop must be a string or a list of strings "
-        f"(got {type(v).__name__})."
+        f"stop must be a string or a list of strings (got {type(v).__name__})."
     )
 
 
