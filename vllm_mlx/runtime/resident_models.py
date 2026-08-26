@@ -27,7 +27,49 @@ class ResidentModelError(RuntimeError):
 
 
 class ResidentModelCapacityError(ResidentModelError):
-    """The configured ceiling cannot admit a model after eligible eviction."""
+    """The configured ceiling cannot admit a role after eligible eviction."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        requested_bytes: int | None,
+        limit_bytes: int,
+        used_bytes: int,
+        requested_role: str,
+    ) -> None:
+        self.reason = reason
+        self.requested_bytes = requested_bytes
+        self.limit_bytes = limit_bytes
+        self.used_bytes = used_bytes
+        self.requested_role = requested_role
+        requested = (
+            "unknown"
+            if requested_bytes is None
+            else f"{requested_bytes / _GIB:.2f} GiB"
+        )
+        super().__init__(
+            f"insufficient capacity for {requested_role}: requested={requested}, "
+            f"used={used_bytes / _GIB:.2f} GiB, "
+            f"limit={limit_bytes / _GIB:.2f} GiB; "
+            "no idle unpinned model is eligible for eviction"
+        )
+
+    def envelope(self) -> dict[str, object]:
+        """Return the stable machine-readable 507 response contract."""
+
+        return {
+            "error": {
+                "message": str(self),
+                "type": "insufficient_capacity_error",
+                "code": "insufficient_capacity_error",
+                "reason": self.reason,
+                "param": "model",
+                "requested_bytes": self.requested_bytes,
+                "limit_bytes": self.limit_bytes,
+                "used_bytes": self.used_bytes,
+            }
+        }
 
 
 class ResidentModelBusyError(ResidentModelError):
@@ -173,6 +215,18 @@ class ResidencyRecord:
     @property
     def model_id(self) -> str:
         return self.entry.model_name
+
+
+@dataclass
+class ResidentRoleReservation:
+    """A non-registry role charged to the process residency ceiling."""
+
+    role: str
+    model_id: str
+    reserved_bytes: int
+    capacity_source: str
+    state: str
+    loaded_at: float
 
 
 Loader = Callable[..., Awaitable[ModelEntry]]
@@ -376,6 +430,7 @@ class ResidentModelManager:
         self._on_primary_changed = on_primary_changed
         self._records: dict[str, ResidencyRecord] = {}
         self._index: dict[str, str] = {}
+        self._roles: dict[str, ResidentRoleReservation] = {}
         self._lock = asyncio.Lock()
         self._ttl_task: asyncio.Task | None = None
         self.evictions_total = 0
@@ -438,6 +493,11 @@ class ResidentModelManager:
             max(record.estimated_bytes, record.measured_bytes)
             for record in self._records.values()
             if record.state == "resident"
+        )
+        reserved += sum(
+            record.reserved_bytes
+            for record in self._roles.values()
+            if record.state in {"loading", "resident"}
         )
         # Some engines (notably mflux) construct lazy MLX arrays without
         # faulting all weight pages into the process. The footprint delta at
@@ -525,13 +585,76 @@ class ResidentModelManager:
             if not candidates:
                 usage = self._accounted_usage()
                 raise ResidentModelCapacityError(
-                    "resident model memory ceiling exceeded: "
-                    f"usage={usage / _GIB:.2f} GiB, "
-                    f"incoming={incoming_bytes / _GIB:.2f} GiB, "
-                    f"limit={self.memory_limit_bytes / _GIB:.2f} GiB; "
-                    "no idle unpinned model is eligible for eviction"
+                    reason="role_capacity_assistant",
+                    requested_bytes=incoming_bytes,
+                    limit_bytes=self.memory_limit_bytes,
+                    used_bytes=usage,
+                    requested_role="assistant",
                 )
             await self._evict_locked(candidates[0], reason="memory_pressure")
+
+    @asynccontextmanager
+    async def admit_role(
+        self,
+        *,
+        role: str,
+        model_id: str,
+        requested_bytes: int | None,
+        capacity_source: str,
+    ):
+        """Reserve a protected auxiliary role before its weights load."""
+
+        async with self._lock:
+            if role in self._roles:
+                raise ResidentModelError(f"role {role!r} is already resident")
+            used = self._accounted_usage()
+            if self.memory_limit_bytes > 0 and requested_bytes is None:
+                raise ResidentModelCapacityError(
+                    reason="role_capacity_unknown",
+                    requested_bytes=None,
+                    limit_bytes=self.memory_limit_bytes,
+                    used_bytes=used,
+                    requested_role=role,
+                )
+            reserved_bytes = max(0, int(requested_bytes or 0))
+            if (
+                self.memory_limit_bytes > 0
+                and used + reserved_bytes > self.memory_limit_bytes
+            ):
+                raise ResidentModelCapacityError(
+                    reason=f"role_capacity_{role.replace('-', '_')}",
+                    requested_bytes=reserved_bytes,
+                    limit_bytes=self.memory_limit_bytes,
+                    used_bytes=used,
+                    requested_role=role,
+                )
+            record = ResidentRoleReservation(
+                role=role,
+                model_id=model_id,
+                reserved_bytes=reserved_bytes,
+                capacity_source=capacity_source,
+                state="loading",
+                loaded_at=self._clock(),
+            )
+            self._roles[role] = record
+        try:
+            yield record
+        except BaseException:
+            async with self._lock:
+                if self._roles.get(role) is record:
+                    self._roles.pop(role, None)
+            raise
+        else:
+            async with self._lock:
+                if self._roles.get(role) is record:
+                    record.state = "resident"
+                    record.loaded_at = self._clock()
+
+    async def release_role(self, role: str) -> None:
+        """Stop charging a role after its owning lane released the engine."""
+
+        async with self._lock:
+            self._roles.pop(role, None)
 
     async def load(
         self,
@@ -1154,6 +1277,7 @@ class ResidentModelManager:
                     "model_path": record.entry.model_path,
                     "aliases": sorted(record.entry.aliases),
                     "modality": (_modality(record.entry)),
+                    "role": _replacement_group(record.entry),
                     "state": record.state if resident else "registered",
                     "pinned": record.pinned,
                     "primary": record.primary,
@@ -1171,6 +1295,32 @@ class ResidentModelManager:
                     ),
                 }
             )
+        roles = [
+            {
+                "role": model["role"],
+                "model": model["id"],
+                "state": model["state"],
+                "pinned": model["pinned"],
+                "active_requests": model["active_requests"],
+                "reserved_bytes": max(
+                    model["estimated_bytes"], model["measured_bytes"] or 0
+                ),
+                "capacity_source": "model",
+            }
+            for model in models
+        ]
+        roles.extend(
+            {
+                "role": record.role,
+                "model": record.model_id,
+                "state": record.state,
+                "pinned": True,
+                "active_requests": 0,
+                "reserved_bytes": record.reserved_bytes,
+                "capacity_source": record.capacity_source,
+            }
+            for record in sorted(self._roles.values(), key=lambda item: item.role)
+        )
         usage = self._accounted_usage()
         return {
             "memory_limit_bytes": self.memory_limit_bytes,
@@ -1184,4 +1334,5 @@ class ResidentModelManager:
             "loads_total": self.loads_total,
             "evictions_total": self.evictions_total,
             "models": models,
+            "roles": roles,
         }
