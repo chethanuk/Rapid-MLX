@@ -1154,6 +1154,8 @@ class ResidentModelManager:
                     "model_path": record.entry.model_path,
                     "aliases": sorted(record.entry.aliases),
                     "modality": (_modality(record.entry)),
+                    "serving_lane": getattr(engine, "serving_lane", None),
+                    "serving_lane_reason": getattr(engine, "serving_lane_reason", None),
                     "state": record.state if resident else "registered",
                     "pinned": record.pinned,
                     "primary": record.primary,
