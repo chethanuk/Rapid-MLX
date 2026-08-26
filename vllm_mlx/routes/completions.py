@@ -647,6 +647,14 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         # ``@_safe``, so this is a cheap no-op when telemetry is off / not
         # sampled and can never affect the response. TTFT == total latency
         # here (a non-streaming response is delivered in one shot).
+        #
+        # Ordering: the ``request`` event fires before ``CompletionResponse``
+        # is serialized (doc'd deferral, codex r4-B#1). This exactly matches
+        # the chat lane's order — chat.py also emits its *request* event
+        # before response serialization, and protects only the billing-
+        # critical *activation* funnel by emitting it after the body is
+        # built. The conservative variant of task C wires NO activation
+        # funnel, so there is no post-serialization funnel to guard here.
         from vllm_mlx.telemetry import emit as _telemetry_emit
 
         _telemetry_emit.request(
@@ -739,6 +747,11 @@ async def stream_completion(
     _stream_start = time.perf_counter()
     _first_token_ts: float | None = None
     if request.echo:
+        # Task C: in echo mode the echoed prompt is the FIRST client-visible
+        # content, so TTFT must be latched at this yield — not at the first
+        # generated token later in the loop (codex r4-B#2). Matches chat-lane
+        # semantics ("first real output token the client sees").
+        _first_token_ts = time.perf_counter()
         echo_data = {
             "id": completion_id,
             "object": "text_completion",
