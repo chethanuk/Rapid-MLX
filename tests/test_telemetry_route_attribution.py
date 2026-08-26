@@ -182,6 +182,11 @@ def test_anthropic_messages_nonstream_emits_claude_code_attribution(
     token counts and a positive TTFT. This is the structural proof codex
     asked for: it would FAIL if the route's ``emit.request`` were deleted or
     the User-Agent were not threaded through."""
+    # The ``/v1/messages`` route imports ``mlx`` at module load, so this test
+    # can only drive it where MLX is installed. Skip cleanly on the no-MLX
+    # pr_validate CI env (where the whole anthropic route suite is MLX-gated)
+    # rather than erroring at collection; it runs to completion locally.
+    pytest.importorskip("mlx")
     engine = _AnthropicEngine()
     client = _anthropic_client(engine)
 
@@ -231,6 +236,7 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
     small fraction of total proves ``_first_token_ts`` is latched and used —
     a regression to "total latency" would blow past ``0.5 * total``.
     """
+    pytest.importorskip("mlx")
     import time
 
     calls: list[dict] = []
