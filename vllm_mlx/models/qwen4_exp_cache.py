@@ -36,6 +36,7 @@ class QSAIndexCache(ArraysCache):
         self._compressed_counts = [0] * batch
         self._valid_until: list[int] | None = None
         self._right_padding: list[int] | None = None
+        self._pending_left_padding = [int(item) for item in (left_padding or [0])]
 
     def _ensure_batch(self, batch: int):
         """Adopt mlx-lm's fresh-batch size before state is committed."""
@@ -47,6 +48,9 @@ class QSAIndexCache(ArraysCache):
             raise ValueError("QSA cache batch metadata does not match input")
         self._offsets = [0] * batch
         self._compressed_counts = [0] * batch
+        self._pending_left_padding = [
+            int(item) for item in self.left_padding.tolist()
+        ]
 
     @property
     def raw_ring(self):
@@ -103,11 +107,22 @@ class QSAIndexCache(ArraysCache):
         # it needs no physical roll after a right-padded prefill.
 
     def valid_lengths(self, input_length: int) -> list[int]:
+        return [count for _, count in self.valid_spans(input_length)]
+
+    def valid_spans(self, input_length: int) -> list[tuple[int, int]]:
+        starts = [
+            min(input_length, pending) for pending in self._pending_left_padding
+        ]
         if self._valid_until is None:
-            return [input_length] * len(self._offsets)
+            return [(start, input_length - start) for start in starts]
         return [
-            max(0, min(input_length, limit - offset))
-            for limit, offset in zip(self._valid_until, self._offsets)
+            (
+                start,
+                max(0, min(input_length - start, limit - offset)),
+            )
+            for start, limit, offset in zip(
+                starts, self._valid_until, self._offsets
+            )
         ]
 
     def update(
@@ -133,12 +148,12 @@ class QSAIndexCache(ArraysCache):
             raise ValueError("QSA raw-key cache shape changed within one request")
 
         completed: list[list[mx.array]] = [[] for _ in range(batch)]
-        valid_lengths = self.valid_lengths(length)
-        for row, valid_length in enumerate(valid_lengths):
+        valid_spans = self.valid_spans(length)
+        for row, (input_start, valid_length) in enumerate(valid_spans):
             for token in range(valid_length):
                 position = self._offsets[row] + token
                 self.raw_ring[row, position % self.compress_ratio, :] = raw_keys[
-                    row, token, :
+                    row, input_start + token, :
                 ]
                 if (position + 1) % self.compress_ratio == 0:
                     pooled = mx.mean(
@@ -150,6 +165,7 @@ class QSAIndexCache(ArraysCache):
                         )[0]
                     )
             self._offsets[row] += valid_length
+            self._pending_left_padding[row] -= input_start
 
         new_counts = [
             old + len(rows)
@@ -221,6 +237,7 @@ class QSAIndexCache(ArraysCache):
         ]
         self._valid_until = None
         self._right_padding = None
+        self._pending_left_padding = [0] * len(self._offsets)
         self.left_padding = (
             None
             if len(self._offsets) == 1
@@ -266,6 +283,9 @@ class QSAIndexCache(ArraysCache):
         self._compressed_counts = [
             self._compressed_counts[index] for index in indices
         ]
+        self._pending_left_padding = [
+            self._pending_left_padding[index] for index in indices
+        ]
         if self._valid_until is not None:
             self._valid_until = [self._valid_until[index] for index in indices]
         max_offset = max(self._offsets, default=0)
@@ -282,6 +302,7 @@ class QSAIndexCache(ArraysCache):
         self.lengths = None
         self._offsets = merged._offsets
         self._compressed_counts = merged._compressed_counts
+        self._pending_left_padding = merged._pending_left_padding
         self._valid_until = self._right_padding = None
 
     def extract(self, idx):
@@ -295,6 +316,7 @@ class QSAIndexCache(ArraysCache):
             )
         cache._offsets = [self._offsets[idx]]
         cache._compressed_counts = [count]
+        cache._pending_left_padding = [0]
         return cache
 
     @classmethod
@@ -309,6 +331,7 @@ class QSAIndexCache(ArraysCache):
         merged._compressed_counts = [
             cache._compressed_counts[0] for cache in caches
         ]
+        merged._pending_left_padding = [0] * len(caches)
         max_offset = max(merged._offsets, default=0)
         merged.left_padding = mx.array(
             [max_offset - offset for offset in merged._offsets], dtype=mx.int32

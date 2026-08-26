@@ -6,7 +6,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 pytest.importorskip("mlx_lm")
 
-from mlx_lm.models.cache import ArraysCache, CacheList, KVCache
+from mlx_lm.models.cache import ArraysCache, BatchKVCache, CacheList, KVCache
 
 from vllm_mlx.models.qwen4_exp import (
     GatedDeltaNet,
@@ -346,6 +346,26 @@ def test_qsa_cache_skips_right_padding_and_preserves_physical_alignment():
     np.testing.assert_array_equal(np.array(cache.left_padding), np.array([0, 2]))
 
 
+def test_qsa_cache_skips_fresh_batch_left_padding():
+    cache = QSAIndexCache(compress_ratio=2)
+    cache.left_padding = mx.array([2, 0])
+    cache.update(
+        mx.array(
+            [
+                [[99.0], [99.0], [1.0], [3.0], [5.0]],
+                [[2.0], [4.0], [6.0], [8.0], [10.0]],
+            ]
+        ),
+        lambda group, start: group + start,
+    )
+    mx.eval(cache.state)
+    assert cache._offsets == [3, 5]
+    assert cache._compressed_counts == [1, 2]
+    np.testing.assert_array_equal(
+        np.array(cache.compressed_keys[0, :1]), np.array([[2.0]])
+    )
+
+
 def test_qsa_attention_continuous_batch_decode_matches_cache_lengths():
     args = _args(
         indexer_budget=2,
@@ -366,6 +386,24 @@ def test_qsa_attention_continuous_batch_decode_matches_cache_lengths():
     assert output.shape == (2, 1, args.hidden_size)
     np.testing.assert_array_equal(np.array(batch_cache[0].offset), np.array([4, 6]))
     np.testing.assert_array_equal(np.array(batch_cache[1].offset), np.array([4, 6]))
+
+
+def test_qsa_attention_fresh_left_padded_batch_aligns_with_main_kv():
+    args = _args(
+        indexer_budget=2,
+        indexer_compress_ratio=2,
+        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
+    )
+    attention = QSAAttention(args)
+    qsa = QSAIndexCache(compress_ratio=2)
+    # mlx-lm adopts an ArraysCache subclass by assigning this metadata.
+    qsa.left_padding = mx.array([2, 0])
+    cache = CacheList(BatchKVCache([2, 0]), qsa)
+    output = attention(mx.zeros((2, 5, args.hidden_size)), cache)
+    mx.eval(output, cache.state)
+    assert output.shape == (2, 5, args.hidden_size)
+    np.testing.assert_array_equal(np.array(cache[0].offset), np.array([3, 5]))
+    np.testing.assert_array_equal(np.array(cache[1].offset), np.array([3, 5]))
 
 
 def test_complete_synthetic_text_model_prefill_and_decode():

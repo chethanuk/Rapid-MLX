@@ -479,7 +479,7 @@ class QSAIndexer(nn.Module):
         batch, length, _ = hidden_states.shape
         cache._ensure_batch(batch)
         offsets = list(cache._offsets)
-        valid_lengths = cache.valid_lengths(length)
+        valid_spans = cache.valid_spans(length)
         projected = self.index_qk_proj(hidden_states)
         query_width = self.num_heads * self.head_dim
         query, raw_keys = mx.split(projected, [query_width], axis=-1)
@@ -488,9 +488,14 @@ class QSAIndexer(nn.Module):
         if self.num_kv_heads != 1:
             raise ValueError("Qwen4-Exp QSA requires one indexer KV head")
         raw_keys = raw_keys.squeeze(2)
-        positions = mx.array(offsets, dtype=mx.int64)[:, None] + mx.arange(
-            length, dtype=mx.int64
-        )[None, :]
+        starts = mx.array(
+            [start for start, _ in valid_spans], dtype=mx.int64
+        )
+        positions = (
+            mx.array(offsets, dtype=mx.int64)[:, None]
+            + mx.arange(length, dtype=mx.int64)[None, :]
+            - starts[:, None]
+        )
         query = self.q_layernorm(query)
         query = apply_rotary_positions(
             query,
@@ -516,8 +521,11 @@ class QSAIndexer(nn.Module):
             else [int(value) for value in cache.left_padding.tolist()]
         )
         for batch_index in range(batch):
-            for query_index in range(valid_lengths[batch_index]):
-                logical_position = offsets[batch_index] + query_index
+            input_start, valid_length = valid_spans[batch_index]
+            for query_index in range(input_start, input_start + valid_length):
+                logical_position = (
+                    offsets[batch_index] + query_index - input_start
+                )
                 complete_blocks = (logical_position + 1) // self.compress_ratio
                 token_indices: list[int] = []
                 if complete_blocks:
