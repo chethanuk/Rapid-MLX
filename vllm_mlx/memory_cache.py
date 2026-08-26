@@ -55,6 +55,32 @@ _MIN_MEMORY_BYTES = 100 * _BYTES_PER_MB  # Minimum 100MB
 # weights, activations, and non-cache allocations already resident.
 _REPLACE_STAGING_PHYS_HEADROOM_FRACTION = 0.75
 
+
+def _vendored_cache_registry() -> dict[str, type]:
+    """Return cache classes owned by Rapid rather than ``mlx_lm``.
+
+    Persisted prefix-cache restore and the scheduler's in-memory mid-prefill
+    restore share this registry. This prevents a vendored hybrid side-cache
+    from restoring after restart but failing in the live scheduler path.
+    """
+    from vllm_mlx.models.deepseek_v4_cache import (
+        BatchDeepseekV4PoolingCache,
+        BatchPoolingCache,
+        DeepseekV4PoolingCache,
+        PoolingCache,
+    )
+    from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
+
+    classes = (
+        PoolingCache,
+        BatchPoolingCache,
+        DeepseekV4PoolingCache,
+        BatchDeepseekV4PoolingCache,
+        QSAIndexCache,
+    )
+    return {cls.__name__: cls for cls in classes}
+
+
 # ---------------------------------------------------------------------------
 # Persist-format pinning (R10-D, Talia r10-R1)
 # ---------------------------------------------------------------------------
@@ -207,24 +233,7 @@ def _load_prompt_cache_compat(path: str) -> list[Any]:
     # when mlx-lm has no class by that name.
     import mlx_lm.models.cache as mlx_cache
 
-    from vllm_mlx.models.deepseek_v4_cache import (
-        BatchDeepseekV4PoolingCache,
-        BatchPoolingCache,
-        DeepseekV4PoolingCache,
-        PoolingCache,
-    )
-    from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
-
-    registry = {
-        cls.__name__: cls
-        for cls in (
-            PoolingCache,
-            BatchPoolingCache,
-            DeepseekV4PoolingCache,
-            BatchDeepseekV4PoolingCache,
-            QSAIndexCache,
-        )
-    }
+    registry = _vendored_cache_registry()
     declared_vendored = set(json.loads(metadata.get(_VENDORED_STATE_METADATA, "[]")))
 
     def restore(name, state, meta_state):

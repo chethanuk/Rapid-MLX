@@ -4384,22 +4384,9 @@ class Scheduler:
                         from mlx_lm.models import cache as _mlx_cache
                         from mlx_lm.models.cache import CacheList as _CacheList
 
-                        from vllm_mlx.models.deepseek_v4_cache import (
-                            BatchDeepseekV4PoolingCache,
-                            BatchPoolingCache,
-                            DeepseekV4PoolingCache,
-                            PoolingCache,
-                        )
+                        from vllm_mlx.memory_cache import _vendored_cache_registry
 
-                        vendored = {
-                            cls.__name__: cls
-                            for cls in (
-                                PoolingCache,
-                                BatchPoolingCache,
-                                DeepseekV4PoolingCache,
-                                BatchDeepseekV4PoolingCache,
-                            )
-                        }
+                        vendored = _vendored_cache_registry()
                         names, nested_meta = meta_state
                         if not (len(state) == len(names) == len(nested_meta)):
                             raise ValueError(

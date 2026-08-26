@@ -740,10 +740,20 @@ class QSAAttention(nn.Module):
         )
         self.indexer = QSAIndexer(args)
 
-    def __call__(self, x: mx.array, cache: Any | None = None) -> mx.array:
+    def __call__(
+        self,
+        x: mx.array,
+        cache: Any | None = None,
+        mask: mx.array | str | None = None,
+    ) -> mx.array:
         batch, length, _ = x.shape
         kv_cache = None if cache is None else cache[0]
         index_cache = None if cache is None else cache[1]
+        if mask is None:
+            # The cache offset must be observed before this layer appends the
+            # current K/V chunk. Computing the mask after update double-counts
+            # chunked prefills (L queries against past+2L keys).
+            mask = create_attention_mask(x, kv_cache)
         offset = 0 if kv_cache is None else kv_cache.offset
         physical_length = (
             length
@@ -795,7 +805,7 @@ class QSAAttention(nn.Module):
         if kv_cache is not None:
             keys, values = kv_cache.update_and_fetch(keys, values)
         additive_mask = (
-            create_attention_mask(x, kv_cache)
+            mask
             if selected is None
             else mx.where(
                 selected,
@@ -1140,7 +1150,7 @@ class DecoderLayer(nn.Module):
         if self.is_linear:
             output = self.linear_attn(mixed, mask=mask, cache=cache)
         else:
-            output = self.self_attn(mixed, cache=cache)
+            output = self.self_attn(mixed, cache=cache, mask=mask)
         hidden_states = self._combine(output, residual, injection)
 
         mixed, residual, injection = self.mlp_hyper_connection(hidden_states)
@@ -1182,11 +1192,21 @@ class Qwen4ExpTextModel(nn.Module):
             if linear_index is None
             else create_ssm_mask(hidden_states, cache[linear_index])
         )
+        attention_index = next(
+            (index for index, layer in enumerate(self.layers) if not layer.is_linear),
+            None,
+        )
+        attention_cache = (
+            None
+            if attention_index is None or cache[attention_index] is None
+            else cache[attention_index][0]
+        )
+        attention_mask = create_attention_mask(hidden_states, attention_cache)
         for layer, layer_cache in zip(self.layers, cache):
             hidden_states = layer(
                 hidden_states,
                 input_ids=inputs,
-                mask=linear_mask if layer.is_linear else None,
+                mask=linear_mask if layer.is_linear else attention_mask,
                 cache=layer_cache,
             )
         return self.hyper_connection_mixer(hidden_states)

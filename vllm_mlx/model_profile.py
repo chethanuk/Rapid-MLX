@@ -250,6 +250,12 @@ class ModelProfile:
     # automatic vision admission when no catalog measurement is available;
     # explicit ``--mllm`` always remains the operator override.
     vision_min_memory_gb: float | None = None
+    # Experimental aliases remain directly resolvable for explicit operator
+    # testing but stay out of the default catalog surfaces. The capability is
+    # also exposed on /v1/models for a running experimental checkpoint so
+    # clients never mistake it for a generally supported model.
+    experimental: bool = False
+    hidden: bool = False
     # ``is_text_only`` = this checkpoint is served through the
     # auto-regressive text (mlx-lm) lane even though its ``config.json``
     # declares a ``vision_config`` (and may ship ``vision_tower`` weights)

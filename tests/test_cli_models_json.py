@@ -59,6 +59,16 @@ def test_available_sections_are_split_by_modality() -> None:
     assert all(e["modality"] == "audio" for e in payload["audio"])
 
 
+def test_hidden_experimental_alias_is_not_in_default_catalog() -> None:
+    payload = _available_models_json_payload()
+    aliases = {
+        entry["alias"]
+        for section in ("text", "video", "image")
+        for entry in payload[section]
+    }
+    assert "qwen3.8-flash-next-4bit-experimental" not in aliases
+
+
 def test_cached_payload_shape() -> None:
     payload = _cached_models_json_payload()
     assert set(payload) == {"cached", "count", "total_bytes"}

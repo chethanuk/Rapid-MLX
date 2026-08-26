@@ -376,6 +376,61 @@ def test_qsa_attention_uses_reference_dense_path_below_sparse_budget(monkeypatch
     assert cache[0].offset == cache[1].offset == 5
 
 
+def test_qsa_batch_prefill_builds_mask_before_kv_update(monkeypatch):
+    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    attention = QSAAttention(args)
+    qsa = QSAIndexCache(compress_ratio=2)
+    qsa.left_padding = mx.array([0])
+    cache = CacheList(BatchKVCache([0]), qsa)
+    observed = []
+
+    def fake_attention(queries, keys, values, *, cache, scale, mask):
+        observed.append((keys.shape[-2], mask.shape[-1]))
+        return mx.zeros_like(queries)
+
+    monkeypatch.setattr(
+        "vllm_mlx.models.qwen4_exp.scaled_dot_product_attention",
+        fake_attention,
+    )
+    output = attention(mx.zeros((1, 5, args.hidden_size)), cache)
+    mx.eval(output, cache.state)
+    assert observed == [(5, 5)]
+
+
+def test_scheduler_mid_prefill_restores_qsa_cachelist():
+    """The live restore path recognizes the same vendored QSA side-cache."""
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    kv = KVCache()
+    values = mx.arange(20, dtype=mx.float32).reshape(1, 1, 5, 4)
+    kv.update_and_fetch(values, -values)
+    qsa = QSAIndexCache(compress_ratio=2)
+    qsa.update(
+        mx.arange(20, dtype=mx.float32).reshape(1, 5, 4),
+        lambda group, start: group + start,
+    )
+    original = CacheList(kv, qsa)
+
+    restored = scheduler._reconstruct_cache_from_states(
+        [
+            {
+                "state": original.state,
+                "meta_state": original.meta_state,
+                "class_ref": CacheList,
+            }
+        ]
+    )
+
+    assert restored is not None
+    restored_qsa = restored[0].caches[1]
+    assert isinstance(restored_qsa, QSAIndexCache)
+    assert restored_qsa.offset == qsa.offset
+    np.testing.assert_array_equal(
+        np.array(restored_qsa.state[1]), np.array(qsa.state[1])
+    )
+
+
 def test_qsa_sparse_scores_use_one_reference_batched_matmul(monkeypatch):
     args = _args(
         indexer_budget=2,

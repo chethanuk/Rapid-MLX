@@ -564,6 +564,17 @@ class TestIsTextOnlyOverride:
         assert "vision" not in caps, caps
         assert "text" in caps and "tools" in caps
 
+    def test_experimental_profile_emits_machine_readable_capability(self):
+        from vllm_mlx.routes import models as models_route
+
+        caps = models_route._detect_capabilities(
+            "qwen3.8-flash-next-4bit-experimental",
+            profile_modality="text",
+            profile_tool_parser="qwen3_coder_xml",
+            experimental=True,
+        )
+        assert caps == ["text", "tools", "experimental"]
+
     def test_build_model_info_forwards_is_text_only_for_bonsai_alias(self, monkeypatch):
         """Integration guard (codex #1116 NIT): the direct-helper tests
         above stay green even if ``_build_model_info`` STOPS forwarding

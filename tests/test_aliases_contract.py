@@ -82,6 +82,8 @@ ALLOWED_PROFILE_KEYS: frozenset[str] = frozenset(
         "ddtree_tree_budget",
         "min_memory_gb",
         "vision_min_memory_gb",
+        "experimental",
+        "hidden",
         "recommended_sampling",
         "pflash_tier",
         "pflash_keep_ratio",
@@ -112,6 +114,20 @@ def test_minicpm5_aliases_pin_the_verified_native_xml_contract() -> None:
         assert profile.supports_spec_decode is False
         assert detect_model_config(alias) == profile
         assert detect_model_config(profile.hf_path) == profile
+
+
+def test_qwen38_flash_next_alias_is_hidden_experimental_and_memory_gated() -> None:
+    profile = list_profiles()["qwen3.8-flash-next-4bit-experimental"]
+    assert profile.hf_path == "mlx-community/Qwen3.8-Flash-Next-4bit"
+    assert profile.tool_call_parser == "qwen3_coder_xml"
+    assert profile.reasoning_parser == "qwen3"
+    assert profile.is_hybrid is True
+    assert profile.is_hybrid_explicit is True
+    assert profile.is_moe is True
+    assert profile.supports_spec_decode is False
+    assert profile.min_memory_gb == 128
+    assert profile.experimental is True
+    assert profile.hidden is True
 
 
 # =============================================================================

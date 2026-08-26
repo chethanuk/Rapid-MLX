@@ -519,6 +519,7 @@ def _detect_capabilities(
     profile_modality: str | None = None,
     profile_tool_parser: str | None = None,
     is_text_only: bool = False,
+    experimental: bool = False,
 ) -> list[str]:
     """Compute the ``capabilities`` tag list for ``model_id``.
 
@@ -564,6 +565,8 @@ def _detect_capabilities(
         caps.append("vision")
     if _tools_capable(model_id, profile_tool_parser):
         caps.append("tools")
+    if experimental:
+        caps.append("experimental")
     return caps
 
 
@@ -1051,6 +1054,7 @@ def _build_model_info(model_id: str) -> ModelInfo:
         profile_modality=profile.modality,
         profile_tool_parser=eff_tool,
         is_text_only=profile.is_text_only,
+        experimental=profile.experimental,
     )
     return ModelInfo(
         id=model_id,
