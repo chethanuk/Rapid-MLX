@@ -6457,18 +6457,20 @@ def _print_pull_summary(
     snapshot_dir,
     elapsed: float,
     *,
+    pre_dir=None,
     pre_size: int | None = None,
 ) -> None:
     """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
 
-    ``pre_size`` is the snapshot's on-disk size before this pull began
-    (:func:`_resolve_pull_snapshot_dir` + :func:`_snapshot_size_bytes`), or
-    ``None`` for a fresh pull with no pre-existing snapshot. The summary is
-    labelled "Already cached ... verified (nothing to download)" only when the
-    pull transferred no new bytes — i.e. the resolved snapshot is byte-for-byte
-    the same size as before. A mutable ``main`` that advanced remote-side makes
-    post-pull size grow, so it is reported as a real download instead of a lie
-    (issue #2349; see codex: label from actual transfer, not pre-pull presence).
+    ``pre_dir``/``pre_size`` describe the resolved snapshot before this pull
+    began (:func:`_resolve_pull_snapshot_dir` + :func:`_snapshot_size_bytes`);
+    both are ``None`` for a fresh pull with no pre-existing snapshot. The
+    summary is labelled "Already cached ... verified (nothing to download)"
+    only when the pull transferred no new bytes — i.e. the post-pull snapshot
+    resolves to the SAME directory AND is byte-for-byte the same size as
+    before. Comparing path+size (not bare presence, and not size alone) is what
+    distinguishes a true no-op from a ``main`` that advanced to another rev of
+    equal or different size (issue #2349; see codex: label from actual transfer).
     """
     import os as _os
 
@@ -6483,9 +6485,16 @@ def _print_pull_summary(
         if _os.path.isdir(_candidate):
             snapshot_dir = _candidate
     size = _snapshot_size_bytes(snapshot_dir)
-    # Nothing was transferred iff the post-pull snapshot is byte-for-byte the
-    # same size as before the pull began; ``pre_size=None`` means a fresh pull.
-    was_cached = pre_size is not None and size == pre_size
+    # Nothing was transferred iff the post-pull snapshot is the SAME resolved
+    # directory as before AND byte-for-byte the same size. ``pre_dir=None``
+    # marks a fresh pull (no prior snapshot). Path equality catches a ``main``
+    # that advanced to a different revision even when the byte count happens to
+    # match; size equality guards against in-place growth of the same rev.
+    _post_dir = _os.path.normpath(_os.path.abspath(str(snapshot_dir)))
+    _same_dir = pre_dir is not None and _post_dir == _os.path.normpath(
+        _os.path.abspath(str(pre_dir))
+    )
+    was_cached = _same_dir and pre_size is not None and size == pre_size
     if was_cached:
         print(
             f"  Already cached {repo_id} — {_format_bytes(size)} verified "
@@ -6626,15 +6635,16 @@ def pull_command(args):
         )
         sys.exit(1)
 
-    # Capture the resolved snapshot's size BEFORE the transfer. The post-pull
-    # summary is labelled "verified (nothing to download)" only when no new
-    # bytes were transferred (size unchanged), not merely because some local
-    # rev was already complete — a moved ``main`` can fetch new files even when
-    # a stale local snapshot exists (issue #2349).
+    # Capture the resolved snapshot's dir + size BEFORE the transfer. The
+    # post-pull summary is labelled "verified (nothing to download)" only when
+    # the pull transferred no new bytes — same resolved dir AND same size —
+    # not merely because some stale local rev was already complete (issue
+    # #2349; a moved ``main`` can fetch new files despite a pre-existing rev).
     try:
         _pre_dir = _resolve_pull_snapshot_dir(repo_id)
         _pre_size = _snapshot_size_bytes(_pre_dir) if _pre_dir else None
     except Exception:
+        _pre_dir = None
         _pre_size = None
 
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
@@ -6688,7 +6698,11 @@ def pull_command(args):
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
         _print_pull_summary(
-            repo_id, snapshot_dir, time.monotonic() - t0, pre_size=_pre_size
+            repo_id,
+            snapshot_dir,
+            time.monotonic() - t0,
+            pre_dir=_pre_dir,
+            pre_size=_pre_size,
         )
         return
     # Mirror returned False — fall through to plain snapshot_download.
@@ -6784,7 +6798,9 @@ def pull_command(args):
             sys.exit(1)
         raise
     print(f"  Cached at: {path}")
-    _print_pull_summary(repo_id, path, time.monotonic() - t0, pre_size=_pre_size)
+    _print_pull_summary(
+        repo_id, path, time.monotonic() - t0, pre_dir=_pre_dir, pre_size=_pre_size
+    )
 
 
 def rm_command(args):
