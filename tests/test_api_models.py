@@ -607,6 +607,16 @@ class TestStopScalar:
         with pytest.raises(ValidationError):
             factory(stop=["END", 42])
 
+    @pytest.mark.parametrize("factory", [_chat, _completion])
+    def test_stop_sequences_returns_normalized_list(self, factory):
+        """``stop_sequences()`` — the typed accessor used at the engine
+        boundary — returns the canonical normalized list even when the wire
+        input was a scalar string, so downstream ``SamplingParams.stop``
+        always sees a flat ``list[str]``."""
+        assert factory(stop="END").stop_sequences() == ["END"]
+        assert factory(stop=["END", "STOP"]).stop_sequences() == ["END", "STOP"]
+        assert factory().stop_sequences() is None
+
     @pytest.mark.parametrize("req_model", [ChatCompletionRequest, CompletionRequest])
     def test_openapi_schema_advertises_scalar_or_array(self, req_model):
         """The OpenAPI/JSON schema for ``stop`` must advertise both a
