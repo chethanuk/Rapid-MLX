@@ -61,6 +61,45 @@ struct QuickstartStarterPolicyTests {
         #expect(pick.alias == "qwen3.5-9b-4bit")
     }
 
+    @Test("A cached standard starter stays visible when it wins below 16 GB")
+    func cachedStandardStarterRemainsVisible() {
+        let catalog = [
+            entry("lfm2.5-2.6b-4bit"),
+            entry("qwen3.5-4b-4bit", cached: true),
+        ]
+        let pick = QuickstartCoordinator.defaultChoice(
+            hardware: hardware(15.99),
+            catalog: catalog
+        )
+        let shortlist = QuickstartView.shortlist(
+            catalog: catalog,
+            selection: pick.alias,
+            physicalRAMGB: 15.99
+        )
+
+        #expect(pick.alias == "qwen3.5-4b-4bit")
+        #expect(shortlist.cached.map(\.alias).contains(pick.alias))
+        #expect(shortlist.visibleAliases.contains(pick.alias))
+    }
+
+    @Test("An 8 GB Mac does not promote a cached model that fails its fit contract")
+    func cachedStandardStarterMustFit() {
+        let catalog = [
+            entry("lfm2.5-2.6b-4bit"),
+            entry("qwen3.5-4b-4bit", cached: true),
+        ]
+        let machine = hardware(8)
+
+        #expect(ModelSizing.classify(
+            ModelSizing.estimate(alias: "qwen3.5-4b-4bit"),
+            on: machine
+        ) == .tooBig)
+        #expect(QuickstartCoordinator.defaultChoice(
+            hardware: machine,
+            catalog: catalog
+        ).alias == "lfm2.5-2.6b-4bit")
+    }
+
     @Test("The chooser presents one hardware-fit starter, not two competing recommendations")
     func shortlistHasOneStarter() {
         let catalog = [
