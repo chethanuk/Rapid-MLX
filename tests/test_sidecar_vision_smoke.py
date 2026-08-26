@@ -16,6 +16,7 @@ _SPEC.loader.exec_module(_MODULE)
 def test_sensible_completion_accepts_known_fixture_descriptions() -> None:
     assert _MODULE._completion_is_sensible("A spotted cheetah cub runs forward.")
     assert _MODULE._completion_is_sensible("The image shows a playful feline mascot.")
+    assert _MODULE._completion_is_sensible("A cheetah is sitting, not running.")
 
 
 def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
@@ -28,6 +29,8 @@ def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
     assert not _MODULE._completion_is_sensible(
         "The animal might be a cat, but I am unsure."
     )
+    assert not _MODULE._completion_is_sensible("This is not a cheetah.")
+    assert not _MODULE._completion_is_sensible("I am not sure this is a leopard.")
 
 
 def test_release_workflow_runs_content_addressed_real_image_gate() -> None:

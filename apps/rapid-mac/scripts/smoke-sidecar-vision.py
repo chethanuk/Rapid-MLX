@@ -27,19 +27,29 @@ def _completion_is_sensible(text: object) -> bool:
     """Reject empty/error output and require recognition of the known fixture."""
     if not isinstance(text, str):
         return False
-    words = {word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()}
+    tokens = [word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()]
+    words = set(tokens)
     fixture_labels = {"cheetah", "leopard", "cat", "feline"}
-    uncertainty = {
-        "cannot",
-        "can't",
-        "unable",
-        "unclear",
-        "unknown",
-        "unsure",
-        "not",
-        "no",
-    }
-    return len(words) >= 3 and bool(words & fixture_labels) and not words & uncertainty
+    uncertainty = {"cannot", "can't", "unable", "unclear", "unknown", "unsure"}
+    if len(words) < 3 or not words & fixture_labels or words & uncertainty:
+        return False
+    if any(
+        left == "not" and right == "sure" for left, right in zip(tokens, tokens[1:])
+    ):
+        return False
+    for index, token in enumerate(tokens):
+        if token not in fixture_labels:
+            continue
+        prior = tokens[max(0, index - 2) : index]
+        if prior and prior[-1] in {"not", "no"}:
+            return False
+        if (
+            len(prior) == 2
+            and prior[0] in {"not", "no"}
+            and prior[1] in {"a", "an", "the"}
+        ):
+            return False
+    return True
 
 
 def _request_json(url: str, payload: dict | None, timeout: float) -> dict:
