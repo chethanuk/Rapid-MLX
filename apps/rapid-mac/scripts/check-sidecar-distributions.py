@@ -38,6 +38,8 @@ def is_validated_compatibility_exception(
 
 def find_errors(site_packages: Path) -> list[str]:
     distributions = list(metadata.distributions(path=[str(site_packages)]))
+    if not distributions:
+        return [f"no installed distributions found in {site_packages}"]
     installed = {
         canonicalize_name(dist.metadata["Name"]): dist.version for dist in distributions
     }

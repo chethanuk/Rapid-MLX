@@ -67,6 +67,82 @@ def test_bound_listener_holds_port_until_socket_activation_handoff() -> None:
         listener.close()
 
 
+_FAKE_SIDECAR = """#!/usr/bin/env python3
+import http.server
+import json
+import socket
+import sys
+
+fd = int(sys.argv[sys.argv.index("--listen-fd") + 1])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        assert self.path == "/v1/models"
+        body = json.dumps({"data": []}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        assert self.path == "/v1/chat/completions"
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length))
+        content = payload["messages"][0]["content"]
+        assert content[0]["type"] == "text"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        body = json.dumps({
+            "choices": [{"message": {"content": "A spotted cheetah cub runs forward."}}]
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+listener = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler, bind_and_activate=False)
+server.socket = listener
+server.server_address = listener.getsockname()
+server.serve_forever()
+"""
+
+
+def test_main_executes_socket_activated_http_image_journey(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = tmp_path / "sidecar"
+    executable = sidecar / "bin" / "rapid-mlx"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(_FAKE_SIDECAR)
+    executable.chmod(0o755)
+    model = tmp_path / "model"
+    model.mkdir()
+    image = tmp_path / "fixture.png"
+    image.write_bytes(b"fixture-image-bytes")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            str(_SCRIPT),
+            "--sidecar-root",
+            str(sidecar),
+            "--model",
+            str(model),
+            "--image",
+            str(image),
+            "--startup-timeout",
+            "5",
+            "--request-timeout",
+            "5",
+        ],
+    )
+    assert _MODULE.main() == 0
+
+
 class _FakeProcess:
     pid = 12345
 
