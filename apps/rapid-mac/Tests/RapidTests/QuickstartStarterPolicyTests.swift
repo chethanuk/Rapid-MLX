@@ -136,6 +136,30 @@ struct QuickstartStarterPolicyTests {
         #expect(standard.starters.map(\.alias) == ["qwen3.5-4b-4bit"])
     }
 
+    @Test("An automatically selected sibling alternate is surfaced as Your Pick")
+    func selectedCachedAlternateRemainsVisible() {
+        let catalog = [
+            entry("qwen3.5-4b-4bit"),
+            entry("llama3-8b-2bit", cached: true),
+            entry("llama3-8b-4bit", cached: true),
+        ]
+        let pick = QuickstartCoordinator.defaultChoice(
+            hardware: hardware(32),
+            catalog: catalog
+        )
+        let shortlist = QuickstartView.shortlist(
+            catalog: catalog,
+            selection: pick.alias,
+            physicalRAMGB: 32
+        )
+
+        #expect(pick.alias == "llama3-8b-2bit")
+        #expect(shortlist.cached.map(\.alias) == ["llama3-8b-4bit"])
+        #expect(shortlist.cachedAlternates.map(\.alias) == ["llama3-8b-2bit"])
+        #expect(shortlist.yourPick?.alias == pick.alias)
+        #expect(shortlist.visibleAliases.contains(pick.alias))
+    }
+
     @Test("Cached media and the 1.2B escape never become automatic starters")
     func ineligibleCacheDoesNotWin() {
         let pick = QuickstartCoordinator.defaultChoice(
