@@ -1167,27 +1167,13 @@ class TestStreamingModels:
         assert second == "chatcmpl-12345678" + "b" * 24
         assert first != second
 
-    def test_text_and_mllm_schedulers_reject_duplicate_public_ids(self):
-        """A duplicate cannot replace the request cancellation will address."""
+    def test_mllm_scheduler_rejects_duplicate_public_ids(self):
+        """A duplicate cannot replace the MLLM request cancellation addresses."""
         from collections import deque
 
         from vllm_mlx.mllm_scheduler import MLLMScheduler
-        from vllm_mlx.request import Request, SamplingParams
-        from vllm_mlx.scheduler import Scheduler
 
         public_id = "chatcmpl-" + "a" * 32
-        tokenizer = SimpleNamespace(eos_token_id=2, encode=lambda _text: [1, 2])
-        text_scheduler = Scheduler(SimpleNamespace(), tokenizer)
-        text_request = Request(
-            request_id=public_id,
-            prompt="hello",
-            sampling_params=SamplingParams(max_tokens=1),
-        )
-        text_scheduler.add_request(text_request)
-        with pytest.raises(ValueError, match="already exists"):
-            text_scheduler.add_request(text_request)
-        assert text_scheduler.requests[public_id] is text_request
-
         mllm_scheduler = MLLMScheduler.__new__(MLLMScheduler)
         mllm_scheduler._generation_paused = False
         mllm_scheduler._paused_admission_tokens = set()

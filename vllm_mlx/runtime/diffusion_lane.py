@@ -1139,7 +1139,7 @@ class DiffusionEngine(BaseEngine):
             # cleanup anyway, but explicit drain matches the rest of
             # the lifecycle and lets the unit test pin it.
             _pump_started = False
-            _request_registered = False
+            registered_request_id: str | None = None
             try:
                 pump_thread.start()
                 _pump_started = True
@@ -1148,17 +1148,20 @@ class DiffusionEngine(BaseEngine):
                         if request_id in self._request_cancels:
                             raise ValueError(f"Request {request_id} already exists")
                         self._request_cancels[request_id] = cancel_event
-                    _request_registered = True
+                    registered_request_id = request_id
                 self._jobs.put(
                     (prompt, max_tokens, cfg, thread_q, cancel_event, done_event)
                 )
                 if request_admitted_event is not None:
                     request_admitted_event.set()
             except BaseException:
-                if _request_registered:
+                if registered_request_id is not None:
                     with self._request_cancels_lock:
-                        if self._request_cancels.get(request_id) is cancel_event:
-                            self._request_cancels.pop(request_id, None)
+                        if (
+                            self._request_cancels.get(registered_request_id)
+                            is cancel_event
+                        ):
+                            self._request_cancels.pop(registered_request_id, None)
                 if _pump_started:
                     thread_q.put(_STREAM_DONE)
                     pump_thread.join(timeout=2.0)
@@ -1289,10 +1292,13 @@ class DiffusionEngine(BaseEngine):
                 # path beat us to it.
                 if not stream_done_observed:
                     cancel_event.set()
-                if _request_registered:
+                if registered_request_id is not None:
                     with self._request_cancels_lock:
-                        if self._request_cancels.get(request_id) is cancel_event:
-                            self._request_cancels.pop(request_id, None)
+                        if (
+                            self._request_cancels.get(registered_request_id)
+                            is cancel_event
+                        ):
+                            self._request_cancels.pop(registered_request_id, None)
                 # Wait for the worker to fully release this job before
                 # we drop the engine lock, else a queued sibling
                 # request acquires the lock while the worker is still

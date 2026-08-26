@@ -897,3 +897,25 @@ async def test_mllm_scheduler_admits_caller_provided_public_request_id():
 
     assert admitted_kwargs["request_id"] == public_id
     assert holder[0] == public_id
+
+
+def test_text_scheduler_rejects_duplicate_public_request_id():
+    """A duplicate cannot replace the text request cancellation addresses."""
+    from types import SimpleNamespace
+
+    from vllm_mlx.request import Request, SamplingParams
+    from vllm_mlx.scheduler import Scheduler
+
+    public_id = "chatcmpl-" + "a" * 32
+    tokenizer = SimpleNamespace(eos_token_id=2, encode=lambda _text: [1, 2])
+    scheduler = Scheduler(SimpleNamespace(), tokenizer)
+    request = Request(
+        request_id=public_id,
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    scheduler.add_request(request)
+    with pytest.raises(ValueError, match="already exists"):
+        scheduler.add_request(request)
+    assert scheduler.requests[public_id] is request
