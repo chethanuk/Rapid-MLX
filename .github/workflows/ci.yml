@@ -273,6 +273,7 @@ jobs:
         # scripts under tests/release/.
         run: |
           pytest \
+            tests/test_cli_connect.py \
             tests/test_mcp_security.py \
             tests/test_structured_output.py \
             tests/test_reasoning_parser.py \
