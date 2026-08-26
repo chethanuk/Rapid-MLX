@@ -53,7 +53,7 @@ jobs:
             full_gate="$FULL_CI"
             echo "full_gate=$full_gate" >> "$GITHUB_OUTPUT"
             if [ "$full_gate" = true ]; then
-              echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"}]}' >> "$GITHUB_OUTPUT"
+              echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"},{"model":"qwen3.5-9b-4bit","contract_only":"0"}]}' >> "$GITHUB_OUTPUT"
             else
               echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"}]}' >> "$GITHUB_OUTPUT"
             fi
@@ -66,7 +66,7 @@ jobs:
               echo 'desktop=true'
               echo 'docs_only=false'
               echo 'full_gate=true'
-              echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"}]}'
+              echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"},{"model":"qwen3.5-9b-4bit","contract_only":"0"}]}'
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -570,13 +570,17 @@ jobs:
     # the expensive Studio gate: garbage-from-first-token (#1234 doubled-norm
     # class, via the #1247 GOLDEN gate) and tool-call parser regressions.
     #
-    # Two GOLDEN models run coherence + the engine contract. The remaining 4B
+    # GOLDEN models run coherence + the engine contract. The Qwen3.5-9B is the
+    # largest lane (#2419: top-telemetry cover) at ~6GB 4-bit — at the ~7GB edge,
+    # so it is coherence + engine-contract and watched for OOM flakes. The
+    # remaining 4B
     # aliases run contract-only: forcing a zero-argument call factors model
     # competence out while still covering multi-turn replay, streaming channel
     # routing, and native-marker leaks (#1677).
-    # Each model runs on its own runner (parallel), so ~7GB RAM holds one ~2GB
-    # model comfortably. A 3-4B model is fine for a coherence/parser gate — it
-    # is not a chat-quality eval, which stays on the 35B L2 tier.
+    # Each model runs on its own runner (parallel) so lanes do not share RAM.
+    # The 26-35B top-telemetry lanes (Qwen3.6-35B-A3B, Qwen3.8/3.6-27B, Gemma-4-26B,
+    # Bonsai-27B) are 15-38GB and exceed this free runner's ~7GB budget — they stay
+    # on the self-hosted 35B Studio (L2) tier, not on L1.
     #
     # Gemma3 is multimodal but this contract is text/tool-only, so the smoke
     # script forces ``--no-mllm`` and exercises its LM backbone without pulling
