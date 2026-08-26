@@ -280,10 +280,16 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
 # ---------------------------------------------------------------- completions
 
 
-def _completions_client(monkeypatch):
+def _completions_client(monkeypatch, stream_generate=None):
     """Drive ``/v1/completions`` end-to-end with a fake engine, mirroring the
     proven harness from ``test_completions_log_redaction`` (engine + admission
-    + context-length shims so the route completes without loading a model)."""
+    + context-length shims so the route completes without loading a model).
+
+    ``stream_generate`` may be replaced by a caller-supplied async generator
+    to control *where* the latency lands in the stream (codex r7-B#1). The
+    default places the post-first-token gap AFTER the first generated chunk —
+    the correct shape for proving true TTFT on a plain (non-echo) stream.
+    """
     from vllm_mlx.routes import completions as completions_mod
 
     fake_engine = MagicMock()
@@ -299,27 +305,31 @@ def _completions_client(monkeypatch):
 
     fake_engine.generate = AsyncMock(side_effect=_finish)
 
-    async def _stream_finish(*_a, **_k):
-        # First chunk: non-empty content, not finished.
-        yield SimpleNamespace(
-            new_text="done",
-            finished=False,
-            finish_reason=None,
-            completion_tokens=0,
-            prompt_tokens=3,
-        )
-        # Post-first-token gap so total latency dwarfs true TTFT.
-        await _sleep(0.2)
-        # Final chunk: finished, carries the engine's final usage.
-        yield SimpleNamespace(
-            new_text="",
-            finished=True,
-            finish_reason="stop",
-            completion_tokens=5,
-            prompt_tokens=3,
-        )
+    if stream_generate is None:
 
-    fake_engine.stream_generate = _stream_finish
+        async def _stream_finish(*_a, **_k):
+            # First chunk: non-empty content, not finished.
+            yield SimpleNamespace(
+                new_text="done",
+                finished=False,
+                finish_reason=None,
+                completion_tokens=0,
+                prompt_tokens=3,
+            )
+            # Post-first-token gap so total latency dwarfs true TTFT.
+            await _sleep(0.2)
+            # Final chunk: finished, carries the engine's final usage.
+            yield SimpleNamespace(
+                new_text="",
+                finished=True,
+                finish_reason="stop",
+                completion_tokens=5,
+                prompt_tokens=3,
+            )
+
+        fake_engine.stream_generate = _stream_finish
+    else:
+        fake_engine.stream_generate = stream_generate
 
     monkeypatch.setattr(completions_mod, "get_engine", lambda _name: fake_engine)
     monkeypatch.setattr(completions_mod, "_check_admission_or_503", lambda _e: None)
@@ -425,19 +435,45 @@ def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkey
 def test_completions_stream_echo_latches_ttft_at_echo_yield(telemetry_on, monkeypatch):
     """In `echo=True` streaming, the echoed prompt is the client-visible first
     content, so TTFT is latched at the echo yield (completions.py:754) rather
-    than at the first generated token later in the loop.
+    than at the first generated token later in the loop (line 906).
 
-    The fake engine injects a 0.2s post-first-generated-chunk gap, so total
-    stream latency dwarfs the echo-yield TTFT. Asserting ``ttft_ms < 0.5 *
-    total`` proves the echo latch fires (a total-latency None-fallback would
-    blow past the ratio). Pins diff-cover on the echo latch + codex r4-B#2.
+    The route renders the echo SYNCHRONOUSLY before ``stream_generate`` is even
+    awaited, so we inject the model latency INSIDE the fake engine, BEFORE its
+    first generated chunk: that makes the first generated chunk arrive only
+    after a real 0.2s gap, while the echo yield is immediate. This is what makes
+    the test DISCRIMINATING (codex r7-B#1):
+      - with the echo latch:  TTFT latches at the immediate echo yield (~0ms)
+      - without the echo latch: line 906 latches at the first generated chunk,
+        which lands AFTER the 0.2s gap -> TTFT ~= the gap
+    Asserting ``ttft_ms < 0.5 * total`` then fails precisely when the echo latch
+    is deleted and the route silently falls back to generated-chunk timing.
     """
     import time
 
     calls: list[dict] = []
     _capture_request(monkeypatch, calls)
 
-    client = _completions_client(monkeypatch)
+    async def _echo_stream(*_a, **_k):
+        # Model latency between the (immediate) echo yield and the first
+        # generated chunk. Without the echo latch this makes line 906 latch
+        # ~0.2s late, blowing past the 0.5*total bound below.
+        await _sleep(0.2)
+        yield SimpleNamespace(
+            new_text="done",
+            finished=False,
+            finish_reason=None,
+            completion_tokens=0,
+            prompt_tokens=3,
+        )
+        yield SimpleNamespace(
+            new_text="",
+            finished=True,
+            finish_reason="stop",
+            completion_tokens=5,
+            prompt_tokens=3,
+        )
+
+    client = _completions_client(monkeypatch, stream_generate=_echo_stream)
     t0 = time.perf_counter()
     resp = client.post(
         "/v1/completions",
@@ -457,12 +493,14 @@ def test_completions_stream_echo_latches_ttft_at_echo_yield(telemetry_on, monkey
     assert kw["endpoint"] == "/v1/completions"
     assert kw["stream"] is True
     assert kw["caller_agent"] == "OpenAI/Python 1.30.1"
-    # The echo latch fires at the echo yield, so TTFT is a small fraction of
-    # total latency (which includes the 0.2s post-derived-gap). A None
-    # fallback (latch deleted) would report total-latency and fail this.
+    # The echo latch fires at the immediate echo yield, so TTFT is a small
+    # fraction of total latency (which includes the 0.2s pre-generated delay).
+    # Deleting the latch makes line 906 latch at the generated chunk, ~0.2s
+    # in -> TTFT would be ~the gap and this assertion would fail.
     assert kw["ttft_ms"] > 0.0
     assert kw["ttft_ms"] < 0.5 * total_ms, (
         f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
-        f"latency {total_ms:.1f}ms — it must reflect the echo-yield latency"
+        f"latency {total_ms:.1f}ms — it must reflect the immediate echo-yield "
+        f"latency, not the delayed first generated chunk"
     )
     assert kw["status"] == 200
