@@ -6445,14 +6445,14 @@ def _narrow_to_subfolder(repo_id: str, snapshot_dir):
     return snapshot_dir
 
 
-def _hf_snapshot_dir_for(repo_id: str):
-    """Locate the CURRENT on-disk HF snapshot content dir for ``repo_id``.
+def _hf_cache_root(repo_id: str):
+    """HF cache ``models--<id>`` dir for ``repo_id``, or None.
 
-    Pure path computation from the hub cache (no network): resolves
-    ``refs/main`` and narrows to the catalog subfolder, mirroring how
-    ``snapshot_download``'s return path is narrowed. Returns None when
-    nothing is cached yet. This is the stable 'before' side of the pull
-    transfer account (Codex #2392).
+    Pure path computation from the hub cache (no network). Handles BOTH
+    ``owner/repo`` and single-component repo ids (Codex #2392 #2): ``owner/repo``
+    maps to ``models--owner--repo``; a bare ``repo`` (no ``/``) maps to
+    ``models--repo`` — HF's real layout. Prefers HF's own ``repo_name_to_id``
+    when the installed version exposes it, else reconstructs locally.
     """
     from pathlib import Path
 
@@ -6460,64 +6460,54 @@ def _hf_snapshot_dir_for(repo_id: str):
         from huggingface_hub.constants import HF_HUB_CACHE
     except Exception:
         return None
-    cache_root = Path(HF_HUB_CACHE)
-    # Stable cache-path construction that handles BOTH ``owner/repo`` and
-    # single-component repo ids (Codex #2392 #2): ``owner/repo`` maps to the
-    # ``models--owner--repo`` dir, while a bare ``repo`` (no ``/``) maps to
-    # ``models--repo`` — HF's real layout. Prefer HF's own constant when the
-    # installed version exposes it, else reconstruct it locally.
     try:
         from huggingface_hub.utils import repo_name_to_id  # type: ignore[attr-defined]
 
         _cache_id = repo_name_to_id(repo_id)
     except Exception:
         _cache_id = repo_id.replace("/", "--")
-    repo_root = cache_root / f"models--{_cache_id}"
-    try:
-        rev = (repo_root / "refs" / "main").read_text().strip()
-    except OSError:
-        return None
-    snap = repo_root / "snapshots" / rev
-    return _narrow_to_subfolder(repo_id, snap) if snap.is_dir() else None
+    return Path(HF_HUB_CACHE) / f"models--{_cache_id}"
 
 
-def _snapshot_identifier(directory) -> tuple[tuple[str, int, int], ...]:
-    """Sorted ``(relpath, size, mtime_ns)`` per file under ``directory``.
+def _blob_identifier(repo_root) -> tuple[tuple[str, int, int], ...]:
+    """Sorted ``(name, size, mtime_ns)`` for every real blob under ``blobs/``.
 
-    Stable snapshot fingerprint for the pull transfer account (Codex #2392) —
-    independent of huggingface_hub's tqdm progress internals (bar ``desc``/
-    ``unit``/``update()`` are an undocumented presentation detail that changes
-    between hub versions). The snapshot CONTENT is the source of truth: an
-    identical inventory before and after the pull means nothing crossed the
-    wire (cache hit); any new/changed file means bytes were fetched this pull
-    (including a fetched zero-byte file, which still adds a new inventory row).
-    ``directory`` may be None (nothing cached yet) -> empty fingerprint.
+    The stable transfer signal for the pull account (Codex #2392): a NEW or
+    MODIFIED blob is the only thing that means bytes crossed the wire. A warm
+    pull that merely re-links snapshot symlinks to already-present blobs
+    leaves ``blobs/`` untouched (identical fingerprint => cached); a genuine
+    fetch creates a new blob (changed); a repair of a corrupt/truncated blob
+    changes its size/mtime (changed). This is robust to ``main`` moving to a
+    snapshot assembled entirely from blobs already present locally — which
+    transfers NOTHING and must be reported cached, whereas comparing the
+    snapshot TREE (changed paths) would falsely report a download (Codex #2392).
 
-    Entries are fingerprinted with ``stat`` (FOLLOWING symlinks to their blob
-    targets), NOT ``lstat``: HF stores snapshot files as symlinks into
-    ``blobs/<sha>``, and restoring a missing/corrupt BLOCK changes only the
-    blob (its size/mtime) while leaving the snapshot symlink itself
-    unchanged. Fingerprinting the resolved target is what makes that repair
-    visible as a transfer rather than a false "Already cached". A warm pull
-    that re-links an existing, unchanged blob leaves both the link and the
-    blob untouched, so its fingerprint is identical.
+    ``.incomplete*`` scratch files are excluded — HF prunes/creates them as
+    churn that has nothing to do with this pull's outcome. ``repo_root`` may
+    be None (no cache entry yet) -> empty fingerprint.
     """
     import os as _os
 
-    if not directory:
+    if not repo_root:
+        return ()
+    blob_dir = repo_root / "blobs"
+    if not blob_dir.is_dir():
         return ()
     rows: list[tuple[str, int, int]] = []
-    for dirpath, _dirnames, files in _os.walk(directory, followlinks=False):
-        for name in files:
-            p = _os.path.join(dirpath, name)
-            try:
-                # Follow symlinks: capture the blob target's size/mtime so a
-                # blob repair (which the lstat of the symlink would hide) is
-                # still detected as a transfer (Codex #2392).
-                st = _os.stat(p)
-            except OSError:
-                continue
-            rows.append((_os.path.relpath(p, directory), st.st_size, st.st_mtime_ns))
+    try:
+        names = _os.listdir(blob_dir)
+    except OSError:
+        return ()
+    for name in names:
+        if name.startswith(".incomplete"):
+            continue
+        p = blob_dir / name
+        try:
+            if p.is_file():
+                st = p.stat()
+                rows.append((name, st.st_size, st.st_mtime_ns))
+        except OSError:
+            continue
     return tuple(sorted(rows))
 
 
@@ -6820,21 +6810,23 @@ def pull_command(args):
             _allow = [f"{_subfolder}/*"] if _subfolder else None
         # HF-fallback runs only after a mirror miss — but a cached HF no-op is
         # still possible and must be labelled "Already cached", so account the
-        # TRANSFER from stable on-disk state (Codex #2392), never
-        # huggingface_hub's tqdm progress internals: capture the snapshot
-        # content inventory BEFORE the pull, then AFTER. Identical => zero
-        # bytes crossed the wire this pull (cache hit); any new/changed file
-        # (including a fetched zero-byte file, which adds an inventory row)
-        # => a real download. ``_hf_snapshot_dir_for`` resolves the CURRENT
-        # on-disk snapshot (no network); the returned ``path`` is the
-        # authoritative after-side, narrowed to the same subfolder.
-        _before = _snapshot_identifier(_hf_snapshot_dir_for(repo_id))
+        # TRANSFER from the BLOB store (Codex #2392), never huggingface_hub's
+        # tqdm progress internals and never the snapshot tree: a NEW/MODIFIED
+        # blob is the only thing meaning bytes crossed the wire. Capture the
+        # repo's ``blobs/`` inventory BEFORE the pull then AFTER. Identical =>
+        # zero bytes crossed this pull (cache hit) — even if ``main`` moved to
+        # a snapshot assembled from blobs already present locally, or a warm
+        # re-link recreated snapshot symlinks; any changed blob (new file, or
+        # a repaired corrupt/truncated blob whose size/mtime changed) => a real
+        # download. ``_hf_cache_root`` resolves the cache entry (no network).
+        _cache_root = _hf_cache_root(repo_id)
+        _before = _blob_identifier(_cache_root)
         path = (
             snapshot_download(repo_id, allow_patterns=_allow)
             if _allow
             else snapshot_download(repo_id)
         )
-        _after = _snapshot_identifier(_narrow_to_subfolder(repo_id, path))
+        _after = _blob_identifier(_cache_root)
         _was_cached = _before == _after and _before != ()
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
