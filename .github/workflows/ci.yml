@@ -160,13 +160,17 @@ jobs:
             bash "$t"
           done
 
-      # Parser microbench — catches >10x regressions in tool-call
-      # extraction. Pure Python (parsers don't import mlx). The gate is a
-      # RELATIVE budget (parser cost vs a same-run calibration baseline),
-      # so shared-runner speed no longer flakes it (#2344). This step runs
-      # `--report` (advisory) so a slow shared runner can never red a PR on
-      # timing noise — the numbers print for visibility, and the hard gate
-      # is reserved for a dedicated-M3 / maintainer check.
+      # Parser microbench — catches order-of-magnitude (>12x) regressions in
+      # tool-call extraction. Pure Python (parsers don't import mlx). The gate
+      # is a RELATIVE budget (parser μs/call vs a SAME-RUN calibration
+      # baseline, × REGRESSION_LIMIT), so shared-runner speed no longer flakes
+      # it (#2344): calibration and the parser bench run back-to-back on the
+      # same hardware, so runner speed cancels and the verdict is ε ≤ 12× — an
+      # order-of-magnitude regression check immune to shared-hardware variance.
+      # Running WITHOUT `--report` makes this an ENFORCED gate: the script
+      # exits nonzero when any parser exceeds its relative budget, reddening
+      # the PR, so a "still correct, 10x slower" perf regression can't merge —
+      # the exact failure this bench exists to catch.
       #
       # PYTHONPATH=. so `from vllm_mlx.tool_parsers...` resolves
       # without installing the package — pytest auto-adds rootdir but
@@ -177,7 +181,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pip install pydantic transformers jsonschema openai-harmony
-          python scripts/microbench_parsers.py --report
+          python scripts/microbench_parsers.py
 
   mlx-bound-guard:
     # #1248 — a change to an mlx / mlx-lm / mlx-vlm version bound can re-open the
