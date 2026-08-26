@@ -4365,20 +4365,23 @@ def test_mirror_hf_relink_of_local_blob_is_not_a_fetch(
     assert out["transferred_bytes"] == 0
 
 
-def test_mirror_hf_nonnfs_relink_of_local_blob_is_not_a_fetch(
+def test_mirror_nonnfs_relink_is_a_pinned_documented_limitation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-LFS HF re-link from an ALREADY-LOCAL blob is not a fetch (Codex
-    #2392 R4 BLOCKING).
+    """A non-LFS (no catalog sha) warm HF re-link counts as a fetch — the
+    ACCEPTED documented limitation (Atlas decision 2026-08-26, option A).
 
-    R2 misses the file; the HF fallback finds its blob already in HF's local
-    cache (no catalog sha256 exposed for non-LFS files) and only re-links the
-    snapshot symlink — zero bytes cross the wire. The old
-    ``expected_sha256``-only ``blob_already_local`` check left such files
-    always classified ``"hf"`` (over-counting ``transferred_bytes``). The
-    blob-store fingerprint before vs after the HF call catches this kind too:
-    unchanged store -> ``"cached"``.
+    For non-LFS files the blob key is unknowable ahead of time, so a warm
+    re-link of an already-local blob is indistinguishable from a real download
+    without huggingface_hub downloader instrumentation. Per Atlas's decision
+    the mirror classifies these ``"hf"`` (a download): a no-sha tiny non-LFS
+    file can show ``Downloaded`` only when (1) R2 misses it AND (2) its blob is
+    already in HF's local cache. The weight bytes — the actual transfer a pull
+    exists for — stay exact via the LFS ``blob_already_local`` probe. This test
+    PINS that behavior so it is a contract, not an accident. Follow-up for full
+    exactness: huggingface_hub downloader instrumentation (post-0.13.1, Vector
+    lane).
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     revision = "0badf00d" * 5
@@ -4400,9 +4403,7 @@ def test_mirror_hf_nonnfs_relink_of_local_blob_is_not_a_fetch(
 
     repo_root = Path(tmp_path) / f"models--{repo_id.replace('/', '--')}"
     # A blob for this non-LFS file is ALREADY in HF's local cache before the
-    # pull (warm). We don't know its key from the catalog — but the store is
-    # non-empty, which is what the before/after fingerprint needs to rule out
-    # the "empty store forces a download" tautology.
+    # pull (warm) — the exact corner the documented limitation covers.
     blob_dir = repo_root / "blobs"
     blob_dir.mkdir(parents=True, exist_ok=True)
     (blob_dir / "already-local-blob").write_bytes(b"x" * 100)
@@ -4418,8 +4419,7 @@ def test_mirror_hf_nonnfs_relink_of_local_blob_is_not_a_fetch(
         target = snap / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         # HF re-links the snapshot symlink to the pre-existing local blob; it
-        # writes NO new blob (warm local cache). The store is unchanged across
-        # the call, so the file classifies "cached".
+        # writes NO new blob (warm local cache).
         target.symlink_to("../../blobs/already-local-blob")
         return str(target)
 
@@ -4437,7 +4437,9 @@ def test_mirror_hf_nonnfs_relink_of_local_blob_is_not_a_fetch(
 
     assert ok is True
     assert hf_mock.call_count == 1  # HF re-linked the local non-LFS blob
-    assert out["network_fetch"] is False, (
-        "re-linking a locally-cached non-LFS blob is NOT a fetch (Codex #2392 R4)"
+    # PINNED: non-LFS relink counts as a fetch (documented limitation, option A).
+    assert out["network_fetch"] is True, (
+        "non-LFS warm relink shows Downloaded — ACCEPTED documented limitation "
+        "(Atlas 2026-08-26); LFS weights stay exact"
     )
-    assert out["transferred_bytes"] == 0
+    assert out["transferred_bytes"] == 100
