@@ -88,16 +88,16 @@ async def test_ready_banner_emitted_when_bind_fields_set():
     assert cfg.ready is False  # reset on shutdown (second next())
 
 
-async def test_ready_banner_shows_served_model_name_when_overridden():
-    """Issue #2353: when ``--served-model-name`` overrides the served identity
-    (``model_name != model_path``), the banner's ``Model:`` line must show the
-    copyable served API name, not the catalog alias."""
+async def test_ready_banner_shows_served_model_name_when_overridden(monkeypatch):
+    """Issue #2353: when ``--served-model-name`` is in effect, the banner's
+    ``Model:`` line must show the copyable served API name, not the catalog
+    alias."""
     cfg = get_config()
     cfg.bind_host = "localhost"
     cfg.bind_port = 8766
     cfg.model_alias = "lfm2.5-1b-4bit"  # the typed alias
     cfg.model_name = "studio-assistant"  # --served-model-name override
-    cfg.model_path = "mlx-community/LFM2.5-1.2B-Instruct-4bit"  # checkpoint
+    monkeypatch.setattr(server, "_served_model_name_set", True)
 
     out = await _enter_then_exit_lifespan()
 
