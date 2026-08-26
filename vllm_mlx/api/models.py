@@ -135,7 +135,7 @@ def _validate_timeout(v: float | None) -> float | None:
     return v
 
 
-def _normalize_stop(v):
+def _normalize_stop(v) -> list[str] | None:
     """Accept ``stop`` as either a scalar string or a sequence of
     strings, normalizing to a list once at the schema layer
     (mirrors the OpenAI request shape, where ``stop`` is
@@ -1920,6 +1920,14 @@ class ChatCompletionRequest(BaseModel):
     def _validate_timeout(cls, v: float | None) -> float | None:
         return _validate_timeout(v)
 
+    def stop_sequences(self) -> list[str] | None:
+        """The normalized ``stop`` sequences for the engine contract
+        (``SamplingParams.stop: list[str]``). ``_normalize_stop`` (mode="before")
+        already guarantees a list at runtime, so this returns the canonical
+        normalization — giving mypy a ``list[str] | None`` view at the engine
+        boundary while the wire schema keeps accepting a scalar string."""
+        return _normalize_stop(self.stop)
+
     @model_validator(mode="after")
     def _normalize_max_completion_tokens(self) -> "ChatCompletionRequest":
         if self.max_completion_tokens is not None:
@@ -2354,6 +2362,10 @@ class CompletionRequest(BaseModel):
     @classmethod
     def _validate_timeout(cls, v: float | None) -> float | None:
         return _validate_timeout(v)
+
+    def stop_sequences(self) -> list[str] | None:
+        """See ``ChatCompletionRequest.stop_sequences`` — same contract."""
+        return _normalize_stop(self.stop)
 
     # F-155: enforce ``n == 1`` at parse time, mirroring the chat
     # surface. The route already 400's ``n > 1``; the schema layer
