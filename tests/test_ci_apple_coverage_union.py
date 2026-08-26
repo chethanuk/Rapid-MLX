@@ -22,6 +22,12 @@ def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
     assert "coverage-linux-${{ matrix.python-version }}.data" in text
     assert "coverage-apple.data" in text
     assert "--cov=vllm_mlx" in apple["steps"][-2]["run"]
+    for qwen38_contract in (
+        "tests/test_dspark_scheduler.py",
+        "tests/test_prefix_cache_persistence.py",
+        "tests/test_qwen4_exp_vendored.py",
+    ):
+        assert qwen38_contract in apple["steps"][-2]["run"]
     assert set(gate["needs"]) == {
         "changes",
         "test-matrix",
