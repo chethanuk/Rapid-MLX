@@ -19,12 +19,36 @@ fully-cached mflux / split-video / Whisper model is never refused.
 from __future__ import annotations
 
 import sys
+from argparse import Namespace
 from unittest.mock import patch
 
 import pytest
 
 from vllm_mlx import cli
 
+
+def _make_serve_args(model: str) -> Namespace:
+    """Minimal serve ``Namespace`` mirroring test_audio_alias_registry's helper
+    so the audio-serve fork in ``serve_command`` is reachable under test."""
+    return Namespace(
+        model=model,
+        _original_alias=model,
+        embedding_model=None,
+        served_model_name=None,
+        no_mllm=True,
+        mllm=False,
+        max_tokens=None,
+        api_key=None,
+        timeout=60,
+        max_request_bytes=None,
+        cors_origins=None,
+        rate_limit=0,
+        log_level="INFO",
+        host="127.0.0.1",
+        port=8000,
+        listen_fd=None,
+        watchdog_ppid=None,
+    )
 
 def _uncached_probe(monkeypatch):
     """Force the runnability predicate to report "not cached runnable",
@@ -193,3 +217,83 @@ def test_gate_refuses_offline_uncached_before_notices(monkeypatch, capsys):
     # No contradictory download notice precedes the single refusal.
     assert "About to download" not in out.out
     assert "Proceeding" not in out.out
+
+
+def test_serve_audio_alias_refuses_offline_uncached(monkeypatch, capsys):
+    """``serve whisper`` (a short audio alias with no '/') never reaches
+    main()'s B2 gate, and ``_serve_audio_mode`` loads weights lazily — so the
+    audio fork itself must refuse an offline + uncached model BEFORE booting
+    the audio server (codex #2357-P1-a)."""
+    from vllm_mlx.audio.registry import AudioAliasEntry
+
+    # The resolved audio entry drives runnability + the refusal message.
+    entry = AudioAliasEntry(
+        alias="whisper",
+        type="stt",
+        hf_id="mlx-community/whisper-tiny-mlx",
+        family="whisper",
+    )
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    reached_audio_boot = []
+
+    def _cannot_boot(*a, **k):
+        reached_audio_boot.append(a)
+        raise AssertionError("audio server must not boot for offline+uncached")
+
+    with (
+        patch.object(cli, "_resolve_audio_model_for_serve", return_value=entry),
+        patch.object(cli, "_serve_audio_mode", side_effect=_cannot_boot),
+    ):
+        args = _make_serve_args("whisper")
+        with pytest.raises(SystemExit) as exc:
+            cli.serve_command(args)
+    assert exc.value.code == 1
+    out = capsys.readouterr()
+    assert "mlx-community/whisper-tiny-mlx is not cached" in out.err
+    assert "network is unavailable (offline mode is enabled)" in out.err
+    assert reached_audio_boot == []
+
+
+def test_gate_does_not_refuse_when_wan_local_dir_set(monkeypatch, capsys, tmp_path):
+    """An offline user serving a Wan video alias with a valid
+    ``RAPID_MLX_WAN_MODEL_DIR`` local checkpoint must NOT be refused — Wan's
+    own lane loads from the local dir and never goes through
+    ``_ensure_model_downloaded`` (codex #2357-P1-b)."""
+    import vllm_mlx._download_gate as gate
+
+    (tmp_path / "checkpoint").mkdir()
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
+    monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("RAPID_MLX_WAN_MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("RAPID_MLX_AUTO_PULL", raising=False)
+
+    confirmed = []
+
+    # Below the (skipped) offline refusal, the gate lands in the size-estimate
+    # + confirm path. Stub both so the only assertion is that the refusal did
+    # NOT fire; serve_command must still not be reached (gate self-skips or
+    # confirm handles it), so we patch it to a sentinel just in case.
+    monkeypatch.setattr(gate, "estimate_repo_size_bytes", lambda name: 1)
+    monkeypatch.setattr(
+        gate, "confirm_or_abort", lambda *a, **k: confirmed.append(a)
+    )
+    dispatched = []
+    with (
+        patch.object(
+            sys,
+            "argv",
+            ["rapid-mlx", "serve", "Anes1032/Wan2.2-TI2V-5B-mlx-q8"],
+        ),
+        patch.object(cli, "serve_command", side_effect=dispatched.append),
+    ):
+        cli.main()
+
+    out = capsys.readouterr()
+    assert "is not cached and the network is unavailable" not in out.err
+    assert confirmed != []  # the refusal was skipped; the confirm path ran
+    assert dispatched != []  # … and serve still dispatched the Wan model

@@ -3061,6 +3061,15 @@ def serve_command(args):
         # routes still accept both forms because the registry's
         # reverse HF-id index covers full ids too.
         args.model = audio_entry.hf_id
+        # Offline + uncached audio (#2357): refuse BEFORE the audio-mode
+        # fork. The main() B2 gate only fires for ids containing '/', so a
+        # short audio alias (``serve whisper``) never reaches it — and
+        # ``_serve_audio_mode`` loads weights lazily on first request, so
+        # without this the server would boot and only fail mid-request.
+        # Judge runnability with the SAME ``_cache_entry_is_runnable``
+        # predicate (which family-scopes the Whisper ``weights.npz`` probe).
+        if _offline_hub_mode_active() and not _cache_entry_is_runnable(audio_entry.hf_id):
+            _refuse_offline_uncached(audio_entry.hf_id)
         _serve_audio_mode(args, audio_entry)
         return
 
@@ -11784,9 +11793,15 @@ def main():
                 # rather than ``is_repo_cached`` alone: a fully-cached mflux or
                 # split-video checkpoint has no root ``model*.safetensors``, so a
                 # text-only check would wrongly refuse a model that IS cached
-                # (codex #2357-P1).
-                if _offline_hub_mode_active() and not _cache_entry_is_runnable(
-                    args.model
+                # (codex #2357-P1). Also skip when a lane-local source makes the
+                # model available offline even with an empty HF cache — Wan's
+                # ``RAPID_MLX_WAN_MODEL_DIR`` override (its own download path
+                # never goes through ``_ensure_model_downloaded``) (codex #2357-P1).
+                _wan_dir = os.environ.get("RAPID_MLX_WAN_MODEL_DIR")
+                if (
+                    _offline_hub_mode_active()
+                    and not _cache_entry_is_runnable(args.model)
+                    and not (_wan_dir and os.path.isdir(_wan_dir))
                 ):
                     _refuse_offline_uncached(args.model)
                 # The size estimate is a silent HF ``model_info`` round-trip
