@@ -12,6 +12,10 @@ set -euo pipefail
 : "${NOTES_FILE:?recover_engine_release.sh: NOTES_FILE is required}"
 : "${REASON:?recover_engine_release.sh: REASON is required}"
 
+if [[ -z "${REASON//[[:space:]]/}" ]]; then
+  echo "recover_engine_release.sh: REASON must contain non-whitespace text" >&2
+  exit 2
+fi
 case "$REASON" in
   *$'\r'*|*$'\n'*)
     echo "recover_engine_release.sh: REASON must be a single line" >&2

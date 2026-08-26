@@ -56,6 +56,10 @@ jobs:
             echo "::error::a non-empty recovery reason is required" >&2
             exit 1
           fi
+          if [[ -z "${REASON//[[:space:]]/}" ]]; then
+            echo "::error::recovery reason must contain non-whitespace text" >&2
+            exit 1
+          fi
           case "$REASON" in
             *$'\r'*|*$'\n'*)
               echo "::error::recovery reason must be a single line" >&2
@@ -234,11 +238,18 @@ jobs:
           fi
           grep -Fx "VERSION=$VERSION" evidence/recovery-identity.txt
           grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt
+
+          # Approval can wait while waiver policy changes on main. Refresh the
+          # policy tree after approval; the immutable Desktop tag remains the
+          # artifact identity, while live main is the policy source of truth.
+          git fetch --force origin refs/heads/main:refs/remotes/origin/main
+          LIVE_WAIVER_SOURCE="$RUNNER_TEMP/recovery-live-main"
+          git worktree add --detach "$LIVE_WAIVER_SOURCE" origin/main
           python3 scripts/check_release_blockers.py \
             --version "$VERSION" \
             --source-sha "$RELEASE_SHA" \
             --repo "$REPO" \
-            --waivers-dir docs/development/release-blockers \
+            --waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers" \
             --expected-open-ids "$EXPECTED_OPEN_IDS"
           python3 scripts/check_desktop_publish.py \
             --app-tag "rapid-mac-v${VERSION}" \

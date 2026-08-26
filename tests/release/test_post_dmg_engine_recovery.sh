@@ -23,6 +23,7 @@ contains "$VERIFY" 'refs/tags/${APP_TAG}^{commit}' "Desktop tag is the recovery 
 contains "$VERIFY" 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' "candidate must belong to main history"
 contains "$VERIFY" 'git show "${RELEASE_SHA}:pyproject.toml"' "version is read from the recovered candidate"
 contains "$VERIFY" 'recovery reason must be a single line' "multiline recovery reasons fail before evidence"
+contains "$VERIFY" 'recovery reason must contain non-whitespace text' "blank recovery reasons fail before evidence"
 contains "$VERIFY" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "a mismatched existing engine tag fails before approval"
 contains "$VERIFY" 'scripts/check_desktop_publish.py' "exact Desktop publication is verified before approval"
 contains "$VERIFY" 'scripts/check_release_blockers.py' "release blockers are checked before approval"
@@ -44,6 +45,8 @@ lacks "$RECOVER" 'needs.verify-published-desktop.outputs.have_pat' "protected jo
 contains "$RECOVER" 'scripts/check_desktop_publish.py' "Desktop publication is re-verified after approval"
 contains "$RECOVER" 'grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt' "downloaded evidence is bound to the approved SHA"
 contains "$RECOVER" '--expected-open-ids "$EXPECTED_OPEN_IDS"' "blocker set drift fails closed"
+contains "$RECOVER" 'git fetch --force origin refs/heads/main:refs/remotes/origin/main' "waiver policy is refreshed after approval"
+contains "$RECOVER" '--waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers"' "blocker recheck consumes live waiver policy"
 contains "$RECOVER" 'git ls-remote --exit-code --refs origin "refs/tags/${ENGINE_TAG}"' "engine tag is re-read after approval"
 contains "$RECOVER" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "post-approval engine tag mismatch fails closed"
 contains "$RECOVER" 'bash scripts/recover_engine_release.sh' "testable recovery publication unit is executed"
@@ -72,7 +75,12 @@ cat > "$TMP/bin/python3" <<'SH'
 #!/usr/bin/env bash
 echo "python3 $*" >> "$CALLS"
 case "$1" in
-  *check_release_blockers.py) exit "${BLOCKERS_RC:-0}" ;;
+  *check_release_blockers.py)
+    if printf '%s\n' "$*" | grep -Fq -- "$LIVE_WAIVER_DIR"; then
+      exit "${WAIVER_DRIFT_RC:-${BLOCKERS_RC:-0}}"
+    fi
+    exit "${BLOCKERS_RC:-0}"
+    ;;
   *check_desktop_publish.py) exit "${DESKTOP_RC:-0}" ;;
 esac
 exit 0
@@ -83,6 +91,10 @@ echo "git $*" >> "$CALLS"
 case "$1" in
   ls-remote) exit "${TAG_QUERY_RC:-2}" ;;
   fetch) exit "${TAG_FETCH_RC:-0}" ;;
+  worktree)
+    mkdir -p "$4/docs/development/release-blockers"
+    exit 0
+    ;;
   rev-parse) printf '%s\n' "${ENGINE_SHA:-0000000000000000000000000000000000000001}" ;;
 esac
 exit 0
@@ -101,7 +113,9 @@ run_transaction() {
       RELEASE_SHA=0000000000000000000000000000000000000001 \
       EXPECTED_OPEN_IDS= \
       REPO=raullenchai/Rapid-MLX \
+      LIVE_WAIVER_DIR="$TMP/recovery-live-main/docs/development/release-blockers" \
       BLOCKERS_RC="${BLOCKERS_RC:-0}" \
+      WAIVER_DRIFT_RC="${WAIVER_DRIFT_RC:-${BLOCKERS_RC:-0}}" \
       DESKTOP_RC="${DESKTOP_RC:-0}" \
       TAG_QUERY_RC="${TAG_QUERY_RC:-2}" \
       ENGINE_SHA="${ENGINE_SHA:-0000000000000000000000000000000000000001}" \
@@ -114,6 +128,8 @@ run_transaction() {
 
 BLOCKERS_RC=1 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction || true
 [ ! -e "$TMP/published" ] && ok "live blocker failure makes publication unreachable" || bad "blocker failure reached publication"
+BLOCKERS_RC=0 WAIVER_DRIFT_RC=1 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction || true
+[ ! -e "$TMP/published" ] && ok "live waiver drift with unchanged issue IDs makes publication unreachable" || bad "waiver drift reached publication"
 LIVE_HAVE_PAT=false BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction || true
 [ ! -e "$TMP/published" ] && ok "post-approval PAT loss makes publication unreachable" || bad "PAT loss reached publication"
 BLOCKERS_RC=0 DESKTOP_RC=1 TAG_QUERY_RC=2 run_transaction || true
@@ -171,6 +187,11 @@ if run_publication $'forged reason\rSECOND_RECORD'; then
   bad "multiline CR reason reached create_release"
 else
   [ ! -e "$TMP/publication/call" ] && ok "CR reason is rejected before create_release" || bad "CR reason reached create_release"
+fi
+if run_publication $' \t  '; then
+  bad "whitespace-only reason reached create_release"
+else
+  [ ! -e "$TMP/publication/call" ] && ok "whitespace-only reason is rejected before create_release" || bad "whitespace-only reason reached create_release"
 fi
 
 echo "passed: $PASS failed: $FAIL"
