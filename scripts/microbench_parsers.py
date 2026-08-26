@@ -141,6 +141,11 @@ class BenchResult:
     us_per_call: float
     iters: int
     threshold_us: float
+    # Runner speedup (vs the M3 reference) measured on the VERDICT round — the
+    # pair whose numbers are reported, so the printed threshold always matches
+    # the printed speedup (Codex #2409 NIT: the old display-only global
+    # calibrate-then-print could disagree with the actual verdict).
+    speedup: float
     passed: bool
 
 
@@ -197,12 +202,36 @@ def _measure_runner_speedup() -> float:
     speed this run). Returns the ratio (≈ 1 on an M3, larger on slower
     shared runners), floored at ``_RUNNER_SPEEDUP_FLOOR`` (0.5) so a
     suspiciously fast measurement can't compress the effective threshold
-    below the reference budget. ``main`` calls this fresh for EACH parser so
-    a runner that becomes busy mid-run still reflects the local speed.
+    below the reference budget. ``bench_one`` calls this fresh for EACH
+    round (right before each parser segment) so a runner that becomes busy
+    mid-run still normalizes the parser it is about to time (issue #2344 #2).
     """
     per_op = min(_run_calibration() for _ in range(_CAL_REPS))
     speedup = per_op / _CAL_REF_US_PER_ITER
     return max(speedup, _RUNNER_SPEEDUP_FLOOR)
+
+
+def _median_verdict(
+    pairs: list[tuple[float, float]], base_us: float
+) -> tuple[float, float, int]:
+    """Robust (MEDIAN) ε across interleaved ``(parser_us, speedup)`` rounds.
+
+    Returns ``(eps, verdict_speedup, verdict_index)``. Median, not max
+    (Codex #2409): ``max`` lets ONE round where the runner descheduled during
+    the parser segment (but not the adjacent calibration — the back-to-back
+    interleave) dominate an already-noisy ratio and false-fail the now-
+    ENFORCED gate, amplifying the original shared-runner flake. A genuine
+    regression is slow in EVERY round → every ε is high → the median still
+    fails it; a single transient spike lifts only one round, which the median
+    ignores. ``verdict_index`` points at the median-ε round so the caller can
+    report the pair that PRODUCED the verdict (printed numbers always agree
+    with pass/fail).
+    """
+    per_round_eps = [us / (base_us * speedup) for us, speedup in pairs]
+    idx = sorted(range(len(pairs)), key=lambda i: per_round_eps[i])[
+        len(pairs) // 2
+    ]
+    return per_round_eps[idx], pairs[idx][1], idx
 
 
 def bench_one(
@@ -225,10 +254,15 @@ def bench_one(
 
     To be robust to load changing mid-run, calibration and the parser bench
     are INTERLEAVED: each round times the calibration then the parser
-    immediately after, and the verdict uses the worst (max) ε over all
-    rounds. A regressed parser is slow in every round, so it fails; a
-    transiently-idle parser adjacent to a busy calibration reads as FAST
-    relative to that busy baseline (low ε), so it does not false-fail.
+    immediately after, and the verdict uses the MEDIAN ε across rounds (a
+    robust aggregate, not the max). A regressed parser is slow in every
+    round, so every ε is high and the median still fails it; a single round
+    where the runner descheduled during the parser segment (but not the
+    adjacent calibration) inflates only that one ε, which the median ignores
+    — so the now-ENFORCED CI gate does not false-fail on one transient
+    shared-runner pause (Codex #2409). A transiently-idle parser adjacent to
+    a busy calibration reads as FAST relative to that busy baseline (low ε),
+    so it does not false-fail either.
 
     ``runner_speedup`` overrides the calibration when provided (unit tests);
     when ``None`` (production), each round's speedup is measured live.
@@ -260,23 +294,20 @@ def bench_one(
         pairs.append((us, speedup))
     total_ms = (time.perf_counter() - t_total0) * 1000
     iters_executed = sum(per_round)
-    # Worst-case ε across all paired rounds (max(parser_us / (base × speedup))).
-    # The reported us_per_call and threshold come from the SAME pair that
-    # produced the verdict (the max-ε pair), so the printed numbers always
-    # agree with pass/fail (issue #2344 review).
-    worst_pair_idx = max(
-        range(len(pairs)), key=lambda i: pairs[i][0] / (base_us * pairs[i][1])
-    )
-    worst_us, worst_speedup = pairs[worst_pair_idx]
-    eps = worst_us / (base_us * worst_speedup)
-    threshold_us = base_us * REGRESSION_LIMIT * worst_speedup
-    us_per_call = worst_us
+    # Verdict = MEDIAN ε across all paired rounds (robust aggregate), not the
+    # max — see ``_median_verdict`` (Codex #2409). The reported us_per_call and
+    # threshold come from the SAME pair that produced the verdict (the
+    # median-ε round), so the printed numbers always agree with pass/fail.
+    eps, verdict_speedup, median_idx = _median_verdict(pairs, base_us)
+    threshold_us = base_us * REGRESSION_LIMIT * verdict_speedup
+    us_per_call = pairs[median_idx][0]
     return BenchResult(
         name=name,
         total_ms=total_ms,
         us_per_call=us_per_call,
         iters=iters_executed,
         threshold_us=threshold_us,
+        speedup=verdict_speedup,
         passed=eps <= REGRESSION_LIMIT,
     )
 
@@ -301,18 +332,14 @@ def main(argv: list[str] | None = None) -> int:
         print("FAIL: no parsers loaded — import path broken", file=sys.stderr)
         return 1
 
-    # Calibrate runner speed fresh for EACH parser, immediately before its
-    # bench, so a runner that becomes busy mid-run still normalizes the
-    # parser it is about to time (issue #2344 #2). Relative budget, not an
-    # absolute wall-clock ceiling.
-    first_speedup = _measure_runner_speedup()
-
-    print(
-        f"Parser microbench × {args.iters} iters/parser "
-        f"(runner speedup vs M3 ref: {first_speedup:.2f}×)"
-    )
-    print(f"{'parser':<12}{'us/call':>12}{'threshold':>14}{'verdict':>10}")
-    print("-" * 48)
+    # NOTE (Codex #2409 NIT): no display-only upfront calibration. Each
+    # verdict carries the speedup of its own verdict round (see BenchResult),
+    # so the printed speedup ALWAYS describes the reported threshold. Pre-
+    # measuring a global "runner speedup" solely to print a headline cost
+    # ~100k extra regex ops AND could disagree with the actual verdict.
+    print(f"Parser microbench × {args.iters} iters/parser")
+    print(f"{'parser':<12}{'us/call':>12}{'speedup':>10}{'threshold':>14}{'verdict':>10}")
+    print("-" * 58)
 
     results: list[BenchResult] = []
     for name, fn in parsers.items():
@@ -325,7 +352,10 @@ def main(argv: list[str] | None = None) -> int:
         r = bench_one(name, fn, sample, args.iters)
         results.append(r)
         verdict = "OK" if r.passed else "FAIL"
-        print(f"{r.name:<12}{r.us_per_call:>12.2f}{r.threshold_us:>14.2f}{verdict:>10}")
+        print(
+            f"{r.name:<12}{r.us_per_call:>12.2f}{r.speedup:>10.2f}"
+            f"{r.threshold_us:>14.2f}{verdict:>10}"
+        )
 
     failed = [r for r in results if not r.passed]
     print()

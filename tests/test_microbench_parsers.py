@@ -123,13 +123,22 @@ _CAL_TEXT = (
 
 
 def _cpu_iter_cost_us() -> float:
-    """Measure the per-iteration μs of the CPU-bound op on THIS machine."""
+    """Measure the per-iteration μs of the FULL generated parser body on THIS
+    machine — the ``count()`` op PLUS the ``for``-loop and ``c +=`` overhead
+    that every real iteration also pays (Codex #2409). Calibrating only
+    ``_CAL_TEXT.count("x")`` and ignoring that overhead made the synthetic
+    parser slightly SLOWER than its nominal target, so a borderline
+    sub-limit case could tip over and flake the test. The body timed here is
+    textually identical to the one ``_prop_parser`` generates, so the derived
+    ``n`` lands the parser precisely on its requested μs/call.
+    """
     import time
 
     n = 30_000
     t0 = time.perf_counter()
+    c = 0
     for _ in range(n):
-        _CAL_TEXT.count("x")
+        c += _CAL_TEXT.count("x")
     dt = time.perf_counter() - t0
     return (dt / n) * 1_000_000
 
@@ -199,6 +208,27 @@ def test_relative_budget_catches_regression_across_runner_speeds(mb, monkeypatch
     # Over the limit (ε=1.2×LIMIT): fails on 1x and 5x runners alike.
     assert not _bench_with_cal(mb, make, 1.2, 1.0, monkeypatch).passed
     assert not _bench_with_cal(mb, make, 1.2, 5.0, monkeypatch).passed
+
+
+def test_median_verdict_ignores_a_single_spiked_round(mb):
+    """The gate aggregate is the MEDIAN ε, not the max: one round where the
+    runner descheduled during the parser segment (ε spikes to 10×) must NOT
+    fail the gate, while a genuine regression (every round over the limit)
+    still does (Codex #2409). This is what lets the now-ENFORCED CI gate run
+    on a shared runner without flaking on a single pause."""
+    base = mb.BASE_US["hermes"]
+    limit = mb.REGRESSION_LIMIT
+    normal = (base * 0.5, 1.0)   # ε = 0.5 — healthy across the 12× budget
+    spike = (base * 0.5 * 20.0, 1.0)  # parser 20× nominal this round → ε = 10
+    # 1 spiked + 4 healthy rounds: the median (3rd-smallest of 5) is healthy.
+    eps, speedup, idx = mb._median_verdict([normal] * 4 + [spike], base)
+    assert idx != 4  # reports a healthy (normal) round, not the spike
+    assert speedup == 1.0
+    assert eps < limit and eps == pytest.approx(0.5)
+    # All rounds genuinely slow (ε = 1.5×LIMIT): the median still fails.
+    slow = (base * 1.5 * limit, 1.0)
+    epss, _, _ = mb._median_verdict([slow] * 5, base)
+    assert epss > limit
 
 
 def test_speedup_override_passthrough(mb, monkeypatch):
