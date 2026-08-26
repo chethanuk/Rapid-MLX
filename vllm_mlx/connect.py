@@ -285,10 +285,12 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     host = split.hostname
     if not host:
         raise ValueError(f"base-url has no host, got {base_url!r}")
-    # Empty path (``http://host:port``) and ``/v1`` (OpenAI form) are the only
-    # ones the SSOT can render losslessly; anything else is a proxied endpoint
-    # whose path this local-server tool does not model.
-    path = split.path or ""
+    # Empty path (``http://host:port``), a bare trailing slash (``/``), and
+    # ``/v1`` (+ trailing slash) are the only paths the SSOT renders losslessly;
+    # a trailing slash is a common, semantics-free spelling from SDK/config
+    # tooling, so it is normalized away before comparing. Anything else is a
+    # proxied endpoint whose path-prefix this local-server tool does not model.
+    path = (split.path or "").rstrip("/")
     if path not in ("", "/v1"):
         raise ValueError(f"base-url path must be empty or /v1, got {base_url!r}")
     # unquote canonicalizes a percent-encoded scoped IPv6 zone-id back to the

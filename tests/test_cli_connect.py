@@ -522,8 +522,8 @@ def test_parse_base_url_default_port_and_errors():
     assert connect._parse_base_url("http://server.local/v1") == ("server.local", 8000)
     # Non-http scheme (incl. https, which the http-only connect SSOT would
     # silently downgrade), malformed URL, no host, an out-of-range/zero
-    # explicit port, and an unexpected path (a proxied endpoint the SSOT does
-    # not model) are all rejected rather than retargeting the snippet.
+    # explicit port, and an unexpected path-prefix (a proxied endpoint the
+    # SSOT does not model) are all rejected rather than retargeting the snippet.
     for bad in (
         "ftp://localhost:8123",
         "https://localhost:8123/v1",
@@ -536,8 +536,11 @@ def test_parse_base_url_default_port_and_errors():
     ):
         with pytest.raises(ValueError):
             connect._parse_base_url(bad)
-    # The one non-empty path the SSOT can render losslessly is allowed.
+    # The SSOT-renderable paths — empty, bare/trailing slash, `/v1` (+ trailing
+    # slash) — are all accepted losslessly.
     assert connect._parse_base_url("http://localhost:8123/v1") == ("localhost", 8123)
+    assert connect._parse_base_url("http://localhost:8123/") == ("localhost", 8123)
+    assert connect._parse_base_url("http://localhost:8123/v1/") == ("localhost", 8123)
 
 
 def test_connect_base_url_partial_override_keeps_other_coordinate(monkeypatch):
