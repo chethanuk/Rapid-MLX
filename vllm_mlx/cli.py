@@ -1598,6 +1598,8 @@ class _StatusSpinner:
 def _try_mirror_prefetch(
     model_name: str,
     on_pull_start: Callable[[], None] | None = None,
+    *,
+    out: dict | None = None,
 ) -> bool:
     """Pre-fetch a HuggingFace repo via R2-first / HF-fallback (per file).
 
@@ -1640,7 +1642,10 @@ def _try_mirror_prefetch(
         # deliberately removed). Use the legacy HF path.
         return False
     return download_with_mirror_fallback(
-        model_name, on_pull_start=on_pull_start, allow_patterns=allow_patterns
+        model_name,
+        on_pull_start=on_pull_start,
+        allow_patterns=allow_patterns,
+        out=out,
     )
 
 
@@ -6361,40 +6366,6 @@ def _format_pull_duration(seconds: float) -> str:
     return f"{minutes}m {secs}s"
 
 
-def _resolve_pull_snapshot_dir(repo_id: str):
-    """Resolve the HF-cache snapshot dir a ``pull`` would populate, or ``None``.
-
-    Mirrors how ``pull_command`` derives ``repo_root/snapshots/<rev>`` after a
-    mirror/HF transfer (including the catalog subfolder narrowing applied in
-    :func:`_print_pull_summary`). Used to capture the snapshot's pre-pull size
-    so the summary can tell "nothing transferred" from a real download without
-    relying on bare local presence (a moved ``main`` can advance the snapshot
-    even when some local rev is already complete — issue #2349, codex round:
-    derive the label from the actual transfer, not pre-pull cache presence).
-    Returns ``None`` when the cache has no resolved snapshot yet (a fresh pull).
-    """
-    from pathlib import Path
-
-    from huggingface_hub.constants import HF_HUB_CACHE
-
-    from vllm_mlx.model_aliases import resolve_subfolder
-
-    owner, _, repo = repo_id.partition("/")
-    repo_root = Path(HF_HUB_CACHE) / f"models--{owner}--{repo}"
-    refs_main = repo_root / "refs" / "main"
-    try:
-        rev = refs_main.read_text().strip()
-    except OSError:
-        return None
-    snap = repo_root / "snapshots" / rev
-    sub = resolve_subfolder(repo_id)
-    if sub:
-        cand = snap / sub
-        if cand.is_dir():
-            snap = cand
-    return snap
-
-
 def _snapshot_size_bytes(path) -> int:
     """Sum file sizes under ``path`` (recursively, following symlinks).
 
@@ -6443,25 +6414,55 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
+def _hf_bytes_bar_class():
+    """Return a ``tqdm_class`` for ``snapshot_download`` that records bytes.
+
+    huggingface_hub accepts ``snapshot_download(..., tqdm_class=...)`` and
+    instantiates it exactly like ``tqdm``, calling ``update(n)`` per chunk and
+    setting ``total`` when the size is known. Subclassing the real bar keeps
+    the progress UX identical while we expose the aggregate bytes actually
+    fetched (issue #2349 — label the pull from the downloader's own transfer
+    result, not a filesystem guess). A fully-cached pull performs no file
+    transfer, so it records zero bytes and the summary says "nothing to
+    download" truthfully. Defined lazily to avoid a module-scope ``tqdm``
+    import (the mirror path never needs it).
+    """
+    from tqdm import tqdm
+
+    class _HFBytesBar(tqdm):
+        def __init__(self, *args, **kwargs):
+            self._recorded: list[int] = []
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            if n:
+                self._recorded.append(int(n))
+            super().update(n)
+
+        @property
+        def transferred_bytes(self) -> int:
+            return sum(self._recorded)
+
+    return _HFBytesBar
+
+
 def _print_pull_summary(
     repo_id: str,
     snapshot_dir,
     elapsed: float,
     *,
-    pre_dir=None,
-    pre_size: int | None = None,
+    transferred_bytes: int | None = None,
 ) -> None:
     """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
 
-    ``pre_dir``/``pre_size`` describe the resolved snapshot before this pull
-    began (:func:`_resolve_pull_snapshot_dir` + :func:`_snapshot_size_bytes`);
-    both are ``None`` for a fresh pull with no pre-existing snapshot. The
-    summary is labelled "Already cached ... verified (nothing to download)"
-    only when the pull transferred no new bytes — i.e. the post-pull snapshot
-    resolves to the SAME directory AND is byte-for-byte the same size as
-    before. Comparing path+size (not bare presence, and not size alone) is what
-    distinguishes a true no-op from a ``main`` that advanced to another rev of
-    equal or different size (issue #2349; see codex: label from actual transfer).
+    ``transferred_bytes`` is the authoritative count of bytes the downloader
+    (R2 mirror or HuggingFace) actually fetched over the wire this pull, or
+    ``None`` when unknown. The summary is labelled "Already cached ... verified
+    (nothing to download)" only when the transfer account says zero bytes were
+    fetched. This is derived from the downloader's own transfer result, never
+    inferred from pre/post filesystem state — a moved ``main`` that fetches
+    new blobs reports a real download (issue #2349; see codex: label from
+    actual transfer).
     """
     import os as _os
 
@@ -6476,16 +6477,11 @@ def _print_pull_summary(
         if _os.path.isdir(_candidate):
             snapshot_dir = _candidate
     size = _snapshot_size_bytes(snapshot_dir)
-    # Nothing was transferred iff the post-pull snapshot is the SAME resolved
-    # directory as before AND byte-for-byte the same size. ``pre_dir=None``
-    # marks a fresh pull (no prior snapshot). Path equality catches a ``main``
-    # that advanced to a different revision even when the byte count happens to
-    # match; size equality guards against in-place growth of the same rev.
-    _post_dir = _os.path.normpath(_os.path.abspath(str(snapshot_dir)))
-    _same_dir = pre_dir is not None and _post_dir == _os.path.normpath(
-        _os.path.abspath(str(pre_dir))
-    )
-    was_cached = _same_dir and pre_size is not None and size == pre_size
+    # Nothing was transferred iff the downloader reports it fetched zero bytes
+    # this pull. ``transferred_bytes`` comes from the mirror/HF transfer
+    # account; ``None`` (unknown, e.g. an unfiltered fallback) defaults to a
+    # download rather than over-claiming a cache hit.
+    was_cached = transferred_bytes is not None and transferred_bytes == 0
     if was_cached:
         print(
             f"  Already cached {repo_id} — {_format_bytes(size)} verified "
@@ -6626,17 +6622,11 @@ def pull_command(args):
         )
         sys.exit(1)
 
-    # Capture the resolved snapshot's dir + size BEFORE the transfer. The
-    # post-pull summary is labelled "verified (nothing to download)" only when
-    # the pull transferred no new bytes — same resolved dir AND same size —
-    # not merely because some stale local rev was already complete (issue
-    # #2349; a moved ``main`` can fetch new files despite a pre-existing rev).
-    try:
-        _pre_dir = _resolve_pull_snapshot_dir(repo_id)
-        _pre_size = _snapshot_size_bytes(_pre_dir) if _pre_dir else None
-    except Exception:
-        _pre_dir = None
-        _pre_size = None
+    # The pull summary says "already cached / nothing to download" only from
+    # the DOWNLOADER's own transfer account (mirror/HF bytes fetched), never
+    # from a filesystem guess. ``transferred`` is threaded to the summary.
+    transferred: int | None = None
+    _mirror_out: dict = {}
 
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
     # before adding more. huggingface_hub gives each attempt a uniquely-named
@@ -6670,7 +6660,7 @@ def pull_command(args):
             "  R2 mirror skipped: a --bits/--format variant was requested "
             "(the mirror cannot narrow to one variant yet)."
         )
-    if variant_allow is None and _try_mirror_prefetch(repo_id):
+    if variant_allow is None and _try_mirror_prefetch(repo_id, out=_mirror_out):
         from pathlib import Path
 
         try:
@@ -6688,12 +6678,12 @@ def pull_command(args):
         except OSError:
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
+        transferred = _mirror_out.get("transferred_bytes")
         _print_pull_summary(
             repo_id,
             snapshot_dir,
             time.monotonic() - t0,
-            pre_dir=_pre_dir,
-            pre_size=_pre_size,
+            transferred_bytes=transferred,
         )
         return
     # Mirror returned False — fall through to plain snapshot_download.
@@ -6758,11 +6748,26 @@ def pull_command(args):
                     f"fetching only {_subfolder}/ (the folder rapid-mlx serves)."
                 )
             _allow = [f"{_subfolder}/*"] if _subfolder else None
+        _bar_cls = _hf_bytes_bar_class()
+        _bars: list = []
+
+        def _make_bar(*a, **k):
+            b = _bar_cls(*a, **k)
+            _bars.append(b)
+            return b
+
         path = (
-            snapshot_download(repo_id, allow_patterns=_allow)
+            snapshot_download(repo_id, allow_patterns=_allow, tqdm_class=_make_bar)
             if _allow
-            else snapshot_download(repo_id)
+            else snapshot_download(repo_id, tqdm_class=_make_bar)
         )
+        # ``_bars`` is populated only if the downloader actually constructed a
+        # progress bar. When it did, its byte count is the authoritative
+        # "bytes transferred this pull" truth; when it did NOT (a mocked or
+        # anomalous downloader), we cannot prove zero transfer, so leave
+        # ``transferred`` unknown and report a download rather than a lie.
+        if _bars:
+            transferred = sum(b.transferred_bytes for b in _bars)
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
@@ -6790,7 +6795,10 @@ def pull_command(args):
         raise
     print(f"  Cached at: {path}")
     _print_pull_summary(
-        repo_id, path, time.monotonic() - t0, pre_dir=_pre_dir, pre_size=_pre_size
+        repo_id,
+        path,
+        time.monotonic() - t0,
+        transferred_bytes=transferred,
     )
 
 
