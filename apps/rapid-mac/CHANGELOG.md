@@ -55,6 +55,12 @@ can actually understand.
   validation now requires image-dependent answers from two cached vision
   families before the sidecar can ship. ([#2384](https://github.com/raullenchai/Rapid-MLX/pull/2384),
   [#2380](https://github.com/raullenchai/Rapid-MLX/issues/2380))
+- **Vision-capable Qwen checkpoints choose the working lane by default.** With
+  mlx-vlm 0.6.16 or newer (included in the Desktop sidecar), Qwen3.5, Qwen3.6,
+  and Qwen3.8 vision-capable checkpoints serve on the vision lane so photos
+  work directly in chat. Use `--no-mllm` in the CLI or the per-model
+  Performance override in Desktop to force text-only serving; MTP and
+  speculative decoding automatically retain the text lane.
 - **API validation fails early with actionable fields.** Requests accept scalar
   or array `stop`, reject invalid timeouts and non-boolean residency controls,
   and identify the exact invalid load field. ([#2367](https://github.com/raullenchai/Rapid-MLX/pull/2367),
