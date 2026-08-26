@@ -112,7 +112,6 @@ vllm_mlx/spec_decode/mtp/quantized_argmax.py 2
 vllm_mlx/spec_decode/mtp/qwen3_5_inject.py 5
 vllm_mlx/speculative/ddtree/runtime.py 2
 vllm_mlx/speculative/ddtree/server.py 3
-vllm_mlx/speculative/dflash/eligibility.py 1
 vllm_mlx/speculative/dflash/server.py 5
 vllm_mlx/telemetry/transport.py 2
 vllm_mlx/tool_parsers/abstract_tool_parser.py 2
