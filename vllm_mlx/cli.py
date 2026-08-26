@@ -1645,15 +1645,46 @@ def _try_mirror_prefetch(
 
 
 def _offline_hub_mode_active() -> bool:
-    """True when the HF/transformers offline switches force local-only hub
-    access, making a download impossible regardless of connectivity.
+    """True when the HF/transformers offline switches pin hub access local-only.
 
-    Mirrors huggingface_hub's own semantics: ``HF_HUB_OFFLINE`` /
-    ``TRANSFORMERS_OFFLINE`` are truthy when set to any non-empty value.
+    Reproduces huggingface_hub's ``constants`` computation exactly (same
+    ``_is_true`` truthiness — ``1``/``ON``/``YES``/``TRUE`` only, so ``0``/
+    ``false`` leave offline disabled) and folds ``TRANSFORMERS_OFFLINE`` in the
+    same way the download layer does. Unlike ``constants.HF_HUB_OFFLINE`` (a
+    value baked once at import), this reads the environment live so it stays
+    truthful when tests monkeypatch the switches.
     """
-    hf_offline: str | None = os.environ.get("HF_HUB_OFFLINE")
-    transformers_offline: str | None = os.environ.get("TRANSFORMERS_OFFLINE")
-    return bool(hf_offline) or bool(transformers_offline)
+    from huggingface_hub.constants import _is_true
+
+    return _is_true(
+        os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
+    )
+
+
+def _offline_uncached_error(model_name: str) -> str:
+    """Render the offline + uncached refusal body (one actionable message).
+
+    Reused verbatim by the ``main()`` confirmation gate (so the refusal fires
+    BEFORE any "About to download" notice) and by ``_ensure_model_downloaded``
+    (the belt-and-suspenders defense). A lane override is never recommended:
+    no ``--mllm``/``--no-mllm`` flag can supply a checkpoint that is simply
+    absent from the cache.
+    """
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    return (
+        f"\n  Error: {model_name} is not cached and the network is "
+        "unavailable (offline mode is enabled).\n"
+        f"  After connectivity is restored, download it with "
+        f"`rapid-mlx pull {model_name}`, then serve again.\n"
+        f"  Expected cache location: {HF_HUB_CACHE}\n"
+    )
+
+
+def _refuse_offline_uncached(model_name: str) -> None:
+    """Print the offline + uncached refusal and exit(1)."""
+    print(_offline_uncached_error(model_name), file=sys.stderr)
+    sys.exit(1)
 
 
 def _ensure_model_downloaded(
@@ -1680,7 +1711,12 @@ def _ensure_model_downloaded(
     # shards still in flight), letting the spawned ``serve`` quietly
     # finish the download inside its logfile. Codex round-3 BLOCKING #2.
     try:
-        from vllm_mlx._download_gate import is_repo_cached, mflux_missing_weights
+        from vllm_mlx._download_gate import (
+            _snapshot_is_complete_split_model,
+            _snapshot_is_complete_whisper_model,
+            is_repo_cached,
+            mflux_missing_weights,
+        )
 
         if is_repo_cached(model_name):
             return
@@ -1694,6 +1730,14 @@ def _ensure_model_downloaded(
         # while the UI shows "Starting" forever. Verified-complete component
         # weights are just as cached as a verified-complete root checkpoint.
         if mflux_missing_weights(model_name) == []:
+            return
+        # Non-text layouts ``is_repo_cached`` cannot see are just as runnable
+        # offline: a fully-cached component-split video (CogVideoX / LTX) or a
+        # Whisper snapshot. Without these, the offline refusal below would
+        # wrongly block a model that IS cached (codex #2357-R1 split-video P1).
+        if _snapshot_is_complete_split_model(model_name) or (
+            _snapshot_is_complete_whisper_model(model_name)
+        ):
             return
     except Exception:
         # Probe failed (filesystem permission error, unexpected layout) —
@@ -1712,17 +1756,7 @@ def _ensure_model_downloaded(
     # lane advice when the checkpoint is simply absent. This mirrors the
     # TimeoutError / disk-space exits: refuse before server initialization.
     if _offline_hub_mode_active():
-        from huggingface_hub.constants import HF_HUB_CACHE
-
-        print(
-            f"\n  Error: {model_name} is not cached and the network is "
-            "unavailable (offline mode is enabled).\n"
-            f"  After connectivity is restored, download it with "
-            f"`rapid-mlx pull {model_name}`, then serve again.\n"
-            f"  Expected cache location: {HF_HUB_CACHE}\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _refuse_offline_uncached(model_name)
 
     # Disk-space gate + mirror pull. Both the disk probe (HF ``model_info``)
     # and the mirror's own metadata + ``/api/models`` catalog round-trips run
@@ -8255,16 +8289,21 @@ def chat_command(args):
                         )
                         return
 
-        # 1. Pre-download the new model (this also runs the disk-space
-        #    gate). The current server keeps running while we do this so
-        #    a download failure leaves the user where they were.
+        # 1. Pre-download the new model (this also runs the disk-space gate
+        #    and the offline+uncached refusal). The current server keeps
+        #    running while we do this so a download failure leaves the user
+        #    where they were.
         try:
             _ensure_model_downloaded(resolved)
         except SystemExit:
-            # Disk gate aborted via sys.exit(1); old server is untouched.
+            # A fatal pre-download condition aborted via sys.exit(1) — disk
+            # gate, offline+uncached, or resolve timeout. Each path printed
+            # its own specific reason to stderr, so this summary deliberately
+            # does NOT re-attribute it as the disk gate (#2357). Old server
+            # is untouched.
             print(
                 f"  {RED}Model switch aborted{RESET} "
-                f"{DIM}(disk gate); previous server still running.{RESET}\n"
+                f"{DIM}(reason above); previous server still running.{RESET}\n"
             )
             return
         except RuntimeError as exc:
@@ -11762,6 +11801,16 @@ def main():
             )
 
             if not is_repo_cached(args.model):
+                # Offline + uncached (#2357): short-circuit BEFORE the size
+                # estimate + ``confirm_or_abort``. ``estimate_repo_size_bytes``
+                # makes a silent HF ``model_info`` round-trip that returns None
+                # under offline mode, which ``confirm_or_abort`` treats as
+                # "about to download … proceed" — so without this, the user
+                # would see a contradictory "About to download / Proceeding
+                # anyway" pair right before the refusal below. Refuse once here,
+                # identically to ``_ensure_model_downloaded``.
+                if _offline_hub_mode_active():
+                    _refuse_offline_uncached(args.model)
                 # The size estimate is a silent HF ``model_info`` round-trip
                 # (up to 5s). Cover it with a "Resolving…" spinner so the
                 # first-run cold start doesn't read as a hang here — the same

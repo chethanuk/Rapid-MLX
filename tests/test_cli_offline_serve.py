@@ -16,6 +16,9 @@ is never recommended when the checkpoint is simply absent.
 
 from __future__ import annotations
 
+import sys
+from unittest.mock import patch
+
 import pytest
 
 from vllm_mlx import cli
@@ -98,6 +101,48 @@ def test_offline_local_path_is_noop_not_refused(monkeypatch, capsys):
     assert "is not cached" not in capsys.readouterr().err
 
 
+def test_offline_cached_repo_is_noop_not_refused(monkeypatch, capsys):
+    """A fully-cached repo never hits the offline refusal."""
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: True)
+    cli._ensure_model_downloaded("acme/already-cached")
+    assert "is not cached" not in capsys.readouterr().err
+
+
+def test_offline_cached_split_video_is_noop_not_refused(monkeypatch, capsys):
+    """A fully-cached component-split video (CogVideoX/LTX) that
+    ``is_repo_cached`` cannot see (no root ``model*.safetensors``) must NOT be
+    refused — the split-model probe marks it complete (codex #2357-R1 P1)."""
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(
+        gate, "mflux_missing_weights", lambda name: ["model.safetensors"]
+    )
+    monkeypatch.setattr(gate, "_snapshot_is_complete_split_model", lambda name: True)
+    cli._ensure_model_downloaded("acme/cogvideox-cached")
+    assert "is not cached" not in capsys.readouterr().err
+
+
+def test_offline_cached_whisper_is_noop_not_refused(monkeypatch, capsys):
+    """A fully-cached Whisper snapshot is runnable offline — not refused."""
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(
+        gate, "mflux_missing_weights", lambda name: ["model.safetensors"]
+    )
+    monkeypatch.setattr(
+        gate, "_snapshot_is_complete_whisper_model", lambda name: True
+    )
+    cli._ensure_model_downloaded("openai/whisper-cached")
+    assert "is not cached" not in capsys.readouterr().err
+
+
 def test_online_uncached_still_attempts_download(monkeypatch, capsys):
     """Without offline switches, an uncached model still proceeds to the
     download path (no refusal) — connectivity may be available."""
@@ -114,3 +159,41 @@ def test_online_uncached_still_attempts_download(monkeypatch, capsys):
     with pytest.raises(StopIteration):
         cli._ensure_model_downloaded("badorg/offline-missing-model")
     assert "is not cached and the network is unavailable" not in capsys.readouterr().err
+
+
+def test_gate_refuses_offline_uncached_before_notices(monkeypatch, capsys):
+    """``main()``'s B2 confirmation gate must refuse an offline + uncached
+    serve BEFORE printing any "Resolving"/"About to download"/"Proceeding"
+    notice. ``main()`` drives the gate with a patched isatty()==True and an
+    uncached repo id; the offline refusal fires first (SystemExit 1), and the
+    size-estimate + ``confirm_or_abort`` path is never reached (#2357-P2).
+    """
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    # Interactive so the gate's confirmation branch is active.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    # Auto-pull off by default; explicit in case a vendor sets it.
+    monkeypatch.delenv("RAPID_MLX_AUTO_PULL", raising=False)
+
+    # The gate refuses first and exits(1), so serve_command is never reached
+    # (nor is the spinner'd size estimate / confirm path, which live below the
+    # offline short-circuit in main()). Guard both to catch a regression.
+    with (
+        patch.object(sys, "argv", ["rapid-mlx", "serve", "badorg/offline-missing-model"]),
+        patch.object(
+            cli, "serve_command", side_effect=AssertionError("must not dispatch")
+        ),
+        pytest.raises(SystemExit) as exc,
+    ):
+        cli.main()
+    assert exc.value.code == 1
+
+    out = capsys.readouterr()
+    assert "badorg/offline-missing-model is not cached" in out.err
+    assert "network is unavailable (offline mode is enabled)" in out.err
+    # No contradictory download notice precedes the single refusal.
+    assert "About to download" not in out.out
+    assert "Proceeding" not in out.out
