@@ -425,14 +425,20 @@ def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkey
 def test_completions_stream_echo_latches_ttft_at_echo_yield(telemetry_on, monkeypatch):
     """In `echo=True` streaming, the echoed prompt is the client-visible first
     content, so TTFT is latched at the echo yield (completions.py:754) rather
-    than at the first generated token later in the loop. Captured ttft_ms must
-    be positive and small — a total-latency fallback (latch never set) would
-    fail to reflect the echo-first-token semantics. This pins diff-cover on the
-    echo latch line and the codex r4-B#2 fix."""
+    than at the first generated token later in the loop.
+
+    The fake engine injects a 0.2s post-first-generated-chunk gap, so total
+    stream latency dwarfs the echo-yield TTFT. Asserting ``ttft_ms < 0.5 *
+    total`` proves the echo latch fires (a total-latency None-fallback would
+    blow past the ratio). Pins diff-cover on the echo latch + codex r4-B#2.
+    """
+    import time
+
     calls: list[dict] = []
     _capture_request(monkeypatch, calls)
 
     client = _completions_client(monkeypatch)
+    t0 = time.perf_counter()
     resp = client.post(
         "/v1/completions",
         headers={"user-agent": "OpenAI/Python 1.30.1"},
@@ -444,13 +450,19 @@ def test_completions_stream_echo_latches_ttft_at_echo_yield(telemetry_on, monkey
             "echo": True,
         },
     )
+    total_ms = (time.perf_counter() - t0) * 1000.0
     assert resp.status_code == 200, resp.text
     assert len(calls) == 1, f"expected one request emit, got {calls!r}"
     kw = calls[0]
     assert kw["endpoint"] == "/v1/completions"
     assert kw["stream"] is True
     assert kw["caller_agent"] == "OpenAI/Python 1.30.1"
-    # With echo, the latch at the echo yield must set _first_token_ts, so
-    # emit reports a real first-token TTFT (positive, not the None fallback).
+    # The echo latch fires at the echo yield, so TTFT is a small fraction of
+    # total latency (which includes the 0.2s post-derived-gap). A None
+    # fallback (latch deleted) would report total-latency and fail this.
     assert kw["ttft_ms"] > 0.0
+    assert kw["ttft_ms"] < 0.5 * total_ms, (
+        f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
+        f"latency {total_ms:.1f}ms — it must reflect the echo-yield latency"
+    )
     assert kw["status"] == 200
