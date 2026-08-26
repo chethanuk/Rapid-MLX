@@ -258,7 +258,21 @@ struct SessionModelRestoreTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
-        let catalog = SequencedCatalogLoader([[chat], []])
+        var authoritativeChat = ModelEntry(
+            alias: "qwen3.5-4b-8bit",
+            hfRepo: "mlx-community/Qwen3.5-4B-MLX-8bit",
+            sizeOnDisk: "4.5 GB",
+            cached: true,
+            kind: .chat
+        )
+        authoritativeChat.isBuiltinProfile = true
+        authoritativeChat.isTextOnly = false
+        #expect(ModelBrandStyle.supportsImageInput(
+            forAlias: authoritativeChat.alias,
+            isBuiltinProfile: authoritativeChat.isBuiltinProfile,
+            isTextOnly: authoritativeChat.isTextOnly
+        ))
+        let catalog = SequencedCatalogLoader([[authoritativeChat], []])
         let server = ServerManager(
             testingState: .idle,
             binaryPath: fakeServer,
@@ -270,22 +284,27 @@ struct SessionModelRestoreTests {
         }
 
         let firstReady = await server.ensureServing(
-            alias: chat.alias,
-            hfPath: chat.hfRepo
+            alias: authoritativeChat.alias,
+            hfPath: authoritativeChat.hfRepo
         )
         #expect(firstReady)
-        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        #expect(server.launchedImageInputLane == true)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == authoritativeChat.alias)
 
         await server.stop()
         defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
 
         let restarted = await server.ensureServing(
-            alias: chat.alias,
-            hfPath: chat.hfRepo
+            alias: authoritativeChat.alias,
+            hfPath: authoritativeChat.hfRepo
         )
         #expect(restarted)
-        #expect(server.servingAlias == chat.alias)
-        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        #expect(server.servingAlias == authoritativeChat.alias)
+        #expect(server.launchedImageInputLane == false,
+                "retained chat-lane proof must not retain stale launch capabilities")
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == authoritativeChat.alias)
         await server.stop()
     }
 

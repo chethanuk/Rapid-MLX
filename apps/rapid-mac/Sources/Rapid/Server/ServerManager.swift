@@ -688,9 +688,13 @@ final class ServerManager {
     private let sessionDefaults: UserDefaults?
     /// Catalog provenance supplied by UI start paths. Retained by alias so a
     /// memory-confirmation re-entry does not lose the proof carried by the
-    /// original Start action, or an earlier authoritative catalog lookup, when
-    /// a later catalog subprocess fails.
+    /// original Start action when a later catalog subprocess fails.
     private var catalogProvenStartEntries: [String: ModelEntry] = [:]
+    /// Lane-only provenance learned from an authoritative start-time lookup.
+    /// This intentionally retains no launch capabilities: a later empty probe
+    /// may preserve chat persistence, but must not reuse stale image/runtime
+    /// metadata when assembling a new serve command.
+    private var catalogProvenChatAliases: Set<String> = []
     /// Catalog dependency shared by the residency decision and spawn path.
     /// Production uses the process-wide cache; lifecycle tests replace only
     /// this boundary so successive authoritative/transient results are fully
@@ -1035,12 +1039,14 @@ final class ServerManager {
     /// in isolation.
     internal func recordReadySelection(
         alias: String,
-        catalogEntry: ModelEntry?
+        catalogEntry: ModelEntry?,
+        retainedChatProof: Bool = false
     ) {
         guard let sessionDefaults else { return }
         SessionModelRestore.persistReadyAlias(
             alias,
             catalogEntry: catalogEntry,
+            retainedChatProof: retainedChatProof,
             defaults: sessionDefaults
         )
     }
@@ -1984,12 +1990,13 @@ final class ServerManager {
         ).first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
+        let provenanceKey = trimmedAlias.lowercased()
         if let probedCatalogEntry {
-            // An authoritative match is durable provenance for this app
-            // session. Keep it across the corresponding stop/restart so a
-            // transiently empty later catalog result cannot make a known chat
-            // model lose its lane-owned persistence contract.
-            catalogProvenStartEntries[trimmedAlias.lowercased()] = probedCatalogEntry
+            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
+                catalogProvenChatAliases.insert(provenanceKey)
+            } else {
+                catalogProvenChatAliases.remove(provenanceKey)
+            }
         }
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
@@ -2453,7 +2460,12 @@ final class ServerManager {
                 // overwrite the previous good-known value, so a
                 // crashed launch attempt doesn't strand the resume
                 // logic on a model the user can't actually load.
-                recordReadySelection(alias: trimmedAlias, catalogEntry: catalogEntry)
+                recordReadySelection(
+                    alias: trimmedAlias,
+                    catalogEntry: catalogEntry,
+                    retainedChatProof: catalogEntry == nil
+                        && catalogProvenChatAliases.contains(provenanceKey)
+                )
                 await refreshResidency()
                 // v0.6 audit P1 (silent-crash detection): now that
                 // the child is ready, start the runtime health
