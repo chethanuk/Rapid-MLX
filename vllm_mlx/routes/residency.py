@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from ..config import get_config
 from ..middleware.auth import verify_api_key
+from ..middleware.exception_handlers import (
+    register_request_model,
+    register_request_path,
+)
 from ..model_aliases import resolve_profile
 from ..runtime.resident_models import (
     ResidentModelBusyError,
@@ -59,6 +63,19 @@ class ModelLoadRequest(BaseModel):
 
 class ModelPinRequest(BaseModel):
     pinned: StrictBool = True
+
+
+# Register the load-endpoint request model with the safe error-location
+# contract (D-ENVELOPE-FIELD-LEAK) so a validation 400 on a schema-owned
+# `performance` / `estimated_size_gb` / `replace_group` setting reports the
+# real field path in `error.message` and mirrors it into `error.param`,
+# exactly as the chat endpoints do for their request models. Without this,
+# every string loc component collapses to the `<field>` placeholder and
+# `error.param` stays null (VAL-2361). The plugin-style registration is
+# called at import time and stays idempotent; the middleware module itself
+# deliberately avoids importing this engine-heavy route module.
+register_request_model(ModelLoadRequest)
+register_request_path("/v1/models/load", ModelLoadRequest)
 
 
 def _manager():
