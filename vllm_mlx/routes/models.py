@@ -208,17 +208,17 @@ def _engine_is_mllm_or_none(engine: object | None) -> bool | None:
     return is_mllm if isinstance(is_mllm, bool) else None
 
 
-def _served_lane_fields(model_id: str) -> dict[str, str | None]:
+def _served_lane_fields(model_id: str) -> tuple[str | None, str | None]:
     """Return lane truth from the matching live engine, never static guesses."""
     engine = _engine_for(model_id)
     if engine is None:
-        return {"serving_lane": None, "serving_lane_reason": None}
+        return None, None
     lane = getattr(engine, "serving_lane", None)
     reason = getattr(engine, "serving_lane_reason", None)
-    return {
-        "serving_lane": lane if isinstance(lane, str) else None,
-        "serving_lane_reason": reason if isinstance(reason, str) else None,
-    }
+    return (
+        lane if isinstance(lane, str) else None,
+        reason if isinstance(reason, str) else None,
+    )
 
 
 def _served_engine_is_mllm(model_id: str) -> bool | None:
@@ -900,7 +900,7 @@ def _build_model_info(model_id: str) -> ModelInfo:
     # SERVER-WIDE backend health, not per-model audio capability
     # (which would require a separate dry-run per audio alias).
     audio_lanes = _audio_lane_snapshot()
-    lane_fields = _served_lane_fields(model_id)
+    serving_lane, serving_lane_reason = _served_lane_fields(model_id)
 
     # R11-B-F4 (Bo 0.8.12 dogfood): audio aliases get an audio-shaped
     # ModelInfo regardless of whether the registry has a text profile
@@ -1007,7 +1007,8 @@ def _build_model_info(model_id: str) -> ModelInfo:
                     context_window=context_window,
                     max_model_len=max_model_len,
                     audio_lanes=audio_lanes,
-                    **lane_fields,
+                    serving_lane=serving_lane,
+                    serving_lane_reason=serving_lane_reason,
                 )
         except Exception:  # noqa: BLE001
             pass
@@ -1020,7 +1021,8 @@ def _build_model_info(model_id: str) -> ModelInfo:
             context_window=context_window,
             max_model_len=max_model_len,
             audio_lanes=audio_lanes,
-            **lane_fields,
+            serving_lane=serving_lane,
+            serving_lane_reason=serving_lane_reason,
         )
     # ``recommended_sampling`` lives on the dataclass as a tuple of
     # ``(key, value)`` pairs (frozen-dataclass requirement); convert
@@ -1062,7 +1064,8 @@ def _build_model_info(model_id: str) -> ModelInfo:
         context_window=context_window,
         max_model_len=max_model_len,
         audio_lanes=audio_lanes,
-        **lane_fields,
+        serving_lane=serving_lane,
+        serving_lane_reason=serving_lane_reason,
     )
 
 

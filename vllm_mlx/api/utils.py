@@ -1333,7 +1333,7 @@ def mllm_hybrid_runtime_supported() -> bool:
         installed = Version(version("mlx-vlm"))
     except (PackageNotFoundError, InvalidVersion):
         return False
-    return installed >= _HYBRID_VISION_RUNTIME_MIN_VERSION
+    return bool(installed >= _HYBRID_VISION_RUNTIME_MIN_VERSION)
 
 
 def mllm_backbone_is_hybrid(model_name: str) -> bool:
@@ -1846,7 +1846,10 @@ def extract_multimodal_content(
 
                     tool_calls_list.append(tc_copy)
 
-                msg_dict = {"role": role, "content": _content_to_text(content)}
+                msg_dict: dict[str, object] = {
+                    "role": role,
+                    "content": _content_to_text(content),
+                }
                 if tool_calls_list:
                     msg_dict["tool_calls"] = tool_calls_list
                 processed_messages.append(msg_dict)

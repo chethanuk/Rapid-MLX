@@ -25,7 +25,7 @@ vllm_mlx/api/responses_adapter.py 4
 vllm_mlx/api/responses_models.py 2
 vllm_mlx/api/tool_calling.py 22
 vllm_mlx/api/tool_grammar.py 1
-vllm_mlx/api/utils.py 6
+vllm_mlx/api/utils.py 5
 vllm_mlx/audio/processor.py 4
 vllm_mlx/audio/stt.py 10
 vllm_mlx/audio/tts.py 7

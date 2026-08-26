@@ -223,7 +223,11 @@ def test_materialized_checkpoint_keeps_catalog_vision_memory_floor(monkeypatch):
     ],
 )
 async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(
-    monkeypatch, auto_text_fallback, lane_reason, expected_force_text
+    monkeypatch,
+    scheduler_config_stub,
+    auto_text_fallback,
+    lane_reason,
+    expected_force_text,
 ):
     """Startup and residency must hand the same resolved path/lane to engine."""
     from vllm_mlx import server
@@ -456,7 +460,9 @@ def test_load_model_infers_programmatic_max_tokens_explicit(monkeypatch):
     assert cfg.default_max_tokens_is_explicit is False
 
 
-def test_load_model_mtp_kwarg_translates_to_scheduler_config(monkeypatch):
+def test_load_model_mtp_kwarg_translates_to_scheduler_config(
+    monkeypatch, scheduler_config_stub
+):
     from vllm_mlx import server
 
     monkeypatch.setattr(server, "BatchedEngine", _StubEngine)
@@ -479,11 +485,10 @@ def test_load_model_mtp_kwarg_translates_to_scheduler_config(monkeypatch):
     assert cfg.enable_mtp is True
 
 
-def test_load_model_mtp_kwarg_rejects_conflicting_spec_decode():
+def test_load_model_mtp_kwarg_rejects_conflicting_spec_decode(scheduler_config_stub):
     from vllm_mlx import server
-    from vllm_mlx.scheduler import SchedulerConfig
 
-    cfg = SchedulerConfig()
+    cfg = scheduler_config_stub()
     cfg.spec_decode = "suffix"
 
     with pytest.raises(ValueError, match="mtp=True.*spec_decode='suffix'"):
@@ -494,26 +499,28 @@ def test_load_model_mtp_kwarg_rejects_conflicting_spec_decode():
         )
 
 
-def test_load_model_mtp_kwarg_rejects_conflicting_suffix_config():
+def test_load_model_mtp_kwarg_rejects_conflicting_suffix_config(
+    scheduler_config_stub,
+):
     from vllm_mlx import server
-    from vllm_mlx.scheduler import SchedulerConfig
 
     with pytest.raises(ValueError, match="enable_suffix_decoding=True"):
         server.load_model(
             "mlx-community/Qwen3.5-9B-4bit",
-            scheduler_config=SchedulerConfig(enable_suffix_decoding=True),
+            scheduler_config=scheduler_config_stub(enable_suffix_decoding=True),
             mtp=True,
         )
 
 
-def test_load_model_mtp_kwarg_rejects_conflicting_dflash_config():
+def test_load_model_mtp_kwarg_rejects_conflicting_dflash_config(
+    scheduler_config_stub,
+):
     from vllm_mlx import server
-    from vllm_mlx.scheduler import SchedulerConfig
 
     with pytest.raises(ValueError, match="dflash_drafter_path"):
         server.load_model(
             "mlx-community/Qwen3.5-9B-4bit",
-            scheduler_config=SchedulerConfig(dflash_drafter_path="local/draft"),
+            scheduler_config=scheduler_config_stub(dflash_drafter_path="local/draft"),
             mtp=True,
         )
 
@@ -583,18 +590,19 @@ def test_load_model_response_cache_reconfigure_failure_forces_disabled(monkeypat
     rc.reset_response_cache_for_tests()
 
 
-def test_load_model_mtp_kwarg_rejects_legacy_optimistic_config():
+def test_load_model_mtp_kwarg_rejects_legacy_optimistic_config(
+    scheduler_config_stub,
+):
     """PR #1050 hard-reject: server.load_model(mtp=True) with a
     scheduler_config carrying ``mtp_optimistic=True`` must fail because
     the direct mutation of ``spec_decode='mtp'`` below would bypass
     ``__post_init__`` and silently drop the flag under the vendored path."""
     from vllm_mlx import server
-    from vllm_mlx.scheduler import SchedulerConfig
 
     # SchedulerConfig(mtp_optimistic=True) alone (spec_decode="none") is
     # legal — the reject is triggered only once mtp=True elevates the
     # config into the unified spec-decode interface path.
-    cfg = SchedulerConfig(mtp_optimistic=True)
+    cfg = scheduler_config_stub(mtp_optimistic=True)
 
     with pytest.raises(
         ValueError, match="mtp_optimistic.*not supported under the unified"
