@@ -1191,7 +1191,16 @@ def _detect_metadata_config(
     # classification even when served from a local snapshot path.
     is_qwen38 = bool(re.search(r"qwen[._-]?3[._]8", model_path, re.IGNORECASE))
 
-    if "qwen3_5_moe" in model_types:
+    if "qwen4_exp" in model_types:
+        settings.update(
+            is_hybrid=True,
+            is_hybrid_explicit=True,
+            is_moe=True,
+            supports_spec_decode=False,
+            experimental=True,
+        )
+        reasons.append("experimental Qwen4-Exp hybrid MoE architecture")
+    elif "qwen3_5_moe" in model_types:
         settings.update(
             is_hybrid=True,
             is_hybrid_explicit=True,

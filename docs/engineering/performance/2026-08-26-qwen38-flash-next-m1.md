@@ -74,10 +74,12 @@ swap. The four long prefills completed in 130.209, 130.739, 145.181, and 136.935
 seconds. Answers included the exact four recall facts and well-formed tool calls
 for weather, stock price, meeting scheduling, and local-document search.
 
-The experimental alias is explicitly resolvable but hidden from default model
-catalogs, advertises the `experimental` capability when served, and declares a
-128 GB minimum memory tier. The measured peak means 128 GB is a tight operator
-tier; 192 GB remains the recommended tier for evaluation headroom.
+An explicitly served local checkpoint advertises the `experimental` capability
+from its `qwen4_exp` architecture metadata. M1 deliberately publishes no alias,
+catalog row, or model-size entry: there is no immutable public artifact for
+those surfaces to resolve yet. The measured peak means 128 GB is a tight
+operator tier; 192 GB remains the recommended tier for local evaluation
+headroom.
 
 ## Remaining milestones
 
@@ -86,5 +88,6 @@ tier; 192 GB remains the recommended tier for evaluation headroom.
 - M2: MTP head extraction and batched-consistent lossless verification before
   choosing any speculative-token default.
 - M3: vision tower/processor integration and real-image correctness.
-- M4: publish only with an explicit release guard, then catalog/Desktop/mirror
-  integration. Until then the alias stays hidden and experimental.
+- M4: publish only with an explicit release guard, then add the alias,
+  model-size row, >=128 GB catalog profile, Desktop, and mirror integration as
+  one immutable-artifact contract.

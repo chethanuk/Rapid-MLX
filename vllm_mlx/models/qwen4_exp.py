@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from functools import cache
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -123,11 +123,12 @@ class TextModelArgs(BaseModelArgs):
         self._validate()
 
     def _validate(self) -> None:
-        if len(self.layer_types) != self.num_hidden_layers:
+        layer_types = cast(list[str], self.layer_types)
+        if len(layer_types) != self.num_hidden_layers:
             raise ValueError(
                 "Qwen4-Exp layer_types must have one entry per decoder layer"
             )
-        unsupported = set(self.layer_types) - {
+        unsupported = set(layer_types) - {
             "linear_attention",
             "qwen_sparse_attention",
         }
@@ -152,21 +153,23 @@ class TextModelArgs(BaseModelArgs):
         )
         if any(value is None for value in qsa):
             raise ValueError("Qwen4-Exp QSA requires the complete indexer contract")
-        if any(int(value) <= 0 for value in qsa if value is not None):
+        qsa_values = cast(tuple[int, int, int, int, int], qsa)
+        if any(value <= 0 for value in qsa_values):
             raise ValueError("Qwen4-Exp indexer values must be positive")
         if self.indexer_kv_heads != 1:
             raise ValueError("Qwen4-Exp QSA requires one indexer KV head")
-        if self.indexer_budget % self.indexer_compress_ratio:
+        if qsa_values[3] % qsa_values[4]:
             raise ValueError(
                 "indexer_budget must be divisible by indexer_compress_ratio"
             )
         rotary_dim = int(self.head_dim * self.partial_rotary_factor)
-        if rotary_dim > self.indexer_head_dim:
+        if rotary_dim > qsa_values[2]:
             raise ValueError("attention rotary dimensions must fit the QSA index head")
         if not 0 < self.num_experts_per_tok <= self.num_experts:
             raise ValueError("num_experts_per_tok must be within num_experts")
         ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
-        if self.ple_layer_ids and self.ple_embed_dim % ngram_heads:
+        ple_embed_dim = cast(int, self.ple_embed_dim)
+        if self.ple_layer_ids and ple_embed_dim % ngram_heads:
             raise ValueError(
                 "PLE embedding width must divide evenly across n-gram heads"
             )
@@ -175,8 +178,7 @@ class TextModelArgs(BaseModelArgs):
         ):
             raise ValueError("ple_layer_ids are one-indexed decoder layer ids")
         if any(
-            self.layer_types[layer - 1] != "linear_attention"
-            for layer in self.ple_layer_ids
+            layer_types[layer - 1] != "linear_attention" for layer in self.ple_layer_ids
         ):
             raise ValueError("PLE is only valid on linear-attention layers")
         if self.ple_layer_ids and self.eos_token_id is None:
@@ -576,11 +578,11 @@ class QSAIndexer(nn.Module):
 
     def __init__(self, args: TextModelArgs):
         super().__init__()
-        self.num_heads = int(args.indexer_n_heads)
-        self.num_kv_heads = int(args.indexer_kv_heads)
-        self.head_dim = int(args.indexer_head_dim)
-        self.token_budget = int(args.indexer_budget)
-        self.compress_ratio = int(args.indexer_compress_ratio)
+        self.num_heads = cast(int, args.indexer_n_heads)
+        self.num_kv_heads = cast(int, args.indexer_kv_heads)
+        self.head_dim = cast(int, args.indexer_head_dim)
+        self.token_budget = cast(int, args.indexer_budget)
+        self.compress_ratio = cast(int, args.indexer_compress_ratio)
         self.block_topk = self.token_budget // self.compress_ratio
         self.rotary_dim = int(args.head_dim * args.partial_rotary_factor)
         self.rope_theta = args.rope_theta
@@ -682,6 +684,10 @@ class QSAIndexer(nn.Module):
                     if complete_blocks <= self.block_topk:
                         blocks = list(range(complete_blocks))
                     else:
+                        if selected_blocks is None:
+                            raise RuntimeError(
+                                "QSA sparse selection was not materialized"
+                            )
                         blocks = [
                             int(value)
                             for value in selected_blocks[query_index].tolist()
@@ -1029,7 +1035,7 @@ class PLELayer(nn.Module):
         self.hidden_size = args.hidden_size
         self.hc_count = args.hc_count
         hc_width = args.hc_count * args.hidden_size
-        embed_dim = int(args.ple_embed_dim)
+        embed_dim = cast(int, args.ple_embed_dim)
         self.ple_embedding = NGramEmbedding(
             args,
             embedding_dim=embed_dim,
@@ -1037,13 +1043,15 @@ class PLELayer(nn.Module):
         )
         self.key_proj = nn.Linear(embed_dim, hc_width, bias=False)
         self.value_proj = nn.Linear(embed_dim, args.hidden_size, bias=False)
-        norm_kwargs = {
-            "group_size": args.hidden_size,
-            "eps": args.rms_norm_eps,
-        }
-        self.norm_key = ZeroCenteredRMSNorm(hc_width, **norm_kwargs)
-        self.norm_query = ZeroCenteredRMSNorm(hc_width, **norm_kwargs)
-        self.norm_conv = ZeroCenteredRMSNorm(hc_width, **norm_kwargs)
+        self.norm_key = ZeroCenteredRMSNorm(
+            hc_width, group_size=args.hidden_size, eps=args.rms_norm_eps
+        )
+        self.norm_query = ZeroCenteredRMSNorm(
+            hc_width, group_size=args.hidden_size, eps=args.rms_norm_eps
+        )
+        self.norm_conv = ZeroCenteredRMSNorm(
+            hc_width, group_size=args.hidden_size, eps=args.rms_norm_eps
+        )
         self.conv_state_len = (args.ple_conv_kernel_size - 1) * args.ngram_size
         self.conv1d = nn.Conv1d(
             hc_width,
@@ -1104,7 +1112,7 @@ class PLELayer(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_index: int):
         super().__init__()
-        self.layer_type = args.layer_types[layer_index]
+        self.layer_type = cast(list[str], args.layer_types)[layer_index]
         self.is_linear = self.layer_type == "linear_attention"
         if self.is_linear:
             self.linear_attn = GatedDeltaNet(args)

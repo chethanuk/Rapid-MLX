@@ -4392,6 +4392,10 @@ class Scheduler:
                         from vllm_mlx.memory_cache import _vendored_cache_registry
 
                         vendored = _vendored_cache_registry()
+                        if not isinstance(meta_state, tuple) or len(meta_state) != 2:
+                            raise ValueError(
+                                "CacheList metadata must be a (names, metadata) tuple"
+                            )
                         names, nested_meta = meta_state
                         if not (len(state) == len(names) == len(nested_meta)):
                             raise ValueError(

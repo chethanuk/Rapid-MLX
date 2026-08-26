@@ -2381,6 +2381,32 @@ class TestCheckpointMetadataFallback:
         assert config.is_hybrid_explicit is True
         assert config.supports_spec_decode is False
 
+    def test_qwen4_exp_metadata_marks_local_checkpoint_experimental(self, monkeypatch):
+        """The typed architecture, never a repository label, owns M1 status."""
+        monkeypatch.setattr(
+            auto_config_mod,
+            "read_model_metadata",
+            lambda name: self._metadata(
+                {
+                    "model_type": "qwen4_exp",
+                    "text_config": {
+                        "model_type": "qwen4_exp_text",
+                        "layer_types": ["linear_attention", "full_attention"],
+                    },
+                },
+                None,
+            ),
+        )
+
+        config = detect_model_config("/models/operator-converted-checkpoint")
+
+        assert config is not None
+        assert config.is_hybrid is True
+        assert config.is_hybrid_explicit is True
+        assert config.is_moe is True
+        assert config.supports_spec_decode is False
+        assert config.experimental is True
+
     def test_metadata_detection_logs_when_called_directly(self, monkeypatch):
         log = mock.Mock()
         monkeypatch.setattr(

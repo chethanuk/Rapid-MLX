@@ -564,16 +564,27 @@ class TestIsTextOnlyOverride:
         assert "vision" not in caps, caps
         assert "text" in caps and "tools" in caps
 
-    def test_experimental_profile_emits_machine_readable_capability(self):
+    def test_local_qwen4_exp_entry_emits_machine_readable_capability(self, monkeypatch):
+        from vllm_mlx.config import get_config
         from vllm_mlx.routes import models as models_route
+        from vllm_mlx.runtime.model_registry import ModelEntry, ModelRegistry
 
-        caps = models_route._detect_capabilities(
-            "qwen3.8-flash-next-4bit-experimental",
-            profile_modality="text",
-            profile_tool_parser="qwen3_coder_xml",
-            experimental=True,
+        model_id = "/models/local-qwen4-exp"
+        registry = ModelRegistry()
+        registry.add(
+            ModelEntry(
+                engine=object(),
+                model_name=model_id,
+                model_path=model_id,
+                experimental=True,
+            ),
+            is_default=True,
         )
-        assert caps == ["text", "tools", "experimental"]
+        monkeypatch.setattr(get_config(), "model_registry", registry)
+        monkeypatch.setattr(models_route, "is_mllm_model", lambda _mid: False)
+
+        info = models_route._build_model_info(model_id)
+        assert info.capabilities == ["text", "experimental"]
 
     def test_build_model_info_forwards_is_text_only_for_bonsai_alias(self, monkeypatch):
         """Integration guard (codex #1116 NIT): the direct-helper tests

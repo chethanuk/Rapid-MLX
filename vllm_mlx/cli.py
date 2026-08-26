@@ -6115,11 +6115,7 @@ def _available_models_json_payload() -> dict:
     from vllm_mlx.model_aliases import list_builtin_aliases, list_profiles
     from vllm_mlx.model_sizes import size_bytes
 
-    all_profiles = {
-        alias: profile
-        for alias, profile in list_profiles().items()
-        if not profile.hidden
-    }
+    all_profiles = list_profiles()
     builtin_aliases = set(list_builtin_aliases())
 
     def _modality(p) -> str:
@@ -6213,11 +6209,7 @@ def models_command(args):
         _print_cached_models()
         return
 
-    all_profiles = {
-        alias: profile
-        for alias, profile in list_profiles().items()
-        if not profile.hidden
-    }
+    all_profiles = list_profiles()
     # Video-generation aliases are not chat models: they have no
     # tokenizer and no ``stream_chat``, so ``/v1/chat/completions`` on one
     # is an AttributeError, and ``serve`` exits 2 before binding a port
