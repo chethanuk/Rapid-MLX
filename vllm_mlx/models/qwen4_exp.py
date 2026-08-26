@@ -183,6 +183,8 @@ class TextModelArgs(BaseModelArgs):
             raise ValueError("PLE is only valid on linear-attention layers")
         if self.ple_layer_ids and self.eos_token_id is None:
             raise ValueError("PLE requires eos_token_id for segment-local n-grams")
+        if isinstance(self.eos_token_id, list) and not self.eos_token_id:
+            raise ValueError("PLE eos_token_id list must not be empty")
 
 
 @dataclass
@@ -919,11 +921,12 @@ class NGramEmbedding(nn.Module):
         self.context_len = self.ngram_size - 1
         self.heads_per_ngram = args.heads_per_ngram
         self.ngram_heads = self.context_len * self.heads_per_ngram
-        self.eos_token_id = (
-            args.eos_token_id[0]
+        self.eos_token_ids = tuple(
+            args.eos_token_id
             if isinstance(args.eos_token_id, list)
-            else args.eos_token_id
+            else [cast(int, args.eos_token_id)]
         )
+        self.eos_token_id = self.eos_token_ids[0]
         sizes = [
             find_nth_prime_after(
                 args.ngram_vocab_size_base - 1,
@@ -960,7 +963,10 @@ class NGramEmbedding(nn.Module):
             return token_ids
         _, length = token_ids.shape
         positions = mx.arange(length, dtype=mx.int64)
-        eos_positions = mx.where(token_ids == self.eos_token_id, positions, -1)
+        is_eos = token_ids == self.eos_token_ids[0]
+        for eos_token_id in self.eos_token_ids[1:]:
+            is_eos = is_eos | (token_ids == eos_token_id)
+        eos_positions = mx.where(is_eos, positions, -1)
         previous_eos_inclusive = mx.cummax(eos_positions, axis=1)
         previous_eos = mx.concatenate(
             [

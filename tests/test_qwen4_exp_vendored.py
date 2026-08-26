@@ -196,16 +196,21 @@ def test_ngram_multipliers_match_released_reference_constants():
     ]
 
 
-def _ple_args():
-    return _args(
-        layer_types=["linear_attention", "qwen_sparse_attention"],
-        ple_layer_ids=[1],
-        ple_embed_dim=16,
-        ngram_vocab_size_base=17,
-        make_ngram_vocab_size_divisible_by=4,
-        split_ngram_parts=4,
-        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
-    )
+def _ple_args(**overrides):
+    values = {
+        "layer_types": ["linear_attention", "qwen_sparse_attention"],
+        "ple_layer_ids": [1],
+        "ple_embed_dim": 16,
+        "ngram_vocab_size_base": 17,
+        "make_ngram_vocab_size_divisible_by": 4,
+        "split_ngram_parts": 4,
+        "rope_parameters": {
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.5,
+        },
+    }
+    values.update(overrides)
+    return _args(**values)
 
 
 def test_ngram_cache_matches_one_shot_across_request_chunks():
@@ -226,6 +231,17 @@ def test_ngram_context_resets_at_eos_boundary():
     args = _ple_args()
     embedding = NGramEmbedding(args, embedding_dim=16, ple_layer_index=0)
     with_history = embedding.compute_ids(mx.array([[7, 8, 31, 9]]))
+    fresh_segment = embedding.compute_ids(mx.array([[9]]))
+    mx.eval(with_history, fresh_segment)
+    np.testing.assert_array_equal(
+        np.array(with_history[:, -1]), np.array(fresh_segment[:, -1])
+    )
+
+
+def test_ngram_context_resets_at_every_declared_eos_boundary():
+    args = _ple_args(eos_token_id=[31, 32])
+    embedding = NGramEmbedding(args, embedding_dim=16, ple_layer_index=0)
+    with_history = embedding.compute_ids(mx.array([[7, 8, 32, 9]]))
     fresh_segment = embedding.compute_ids(mx.array([[9]]))
     mx.eval(with_history, fresh_segment)
     np.testing.assert_array_equal(
