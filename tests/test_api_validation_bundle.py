@@ -690,6 +690,12 @@ class TestPsCommandServedNameDisplay:
         assert "lfm2.5-1b-4bit" in out, out
         assert "studio-assistant" not in out
 
+    def test_served_model_name_equals_form(self, capsys):
+        """The ``--served-model-name=NAME`` syntax must produce the same MODEL
+        cell as the split form."""
+        out = self._serve(capsys, "--served-model-name=studio-assistant")
+        assert "studio-assistant (lfm2.5-1b-4bit)" in out, out
+
 
 class TestCompletionsSuffixRejection:
     def _build_completions_app(self, patch_cfg, monkeypatch):
