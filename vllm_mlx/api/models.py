@@ -112,6 +112,58 @@ def _reject_nonfinite_float(v: float | None) -> float | None:
     return v
 
 
+def _validate_timeout(v: float | None) -> float | None:
+    """Reject a non-positive / non-finite request ``timeout`` at the
+    schema layer so both OpenAI surfaces share one contract.
+
+    ``timeout`` feeds ``asyncio.wait_for``-style guards in the routes
+    (the non-streaming path and the disconnect watcher). A value that is
+    ``<= 0`` or NaN/±inf makes those guards fire an immediate timeout →
+    a 504 the client can't diagnose. Rejecting here (4xx naming the
+    ``timeout`` field) surfaces the malformed field instead. ``None``
+    passes through so the server-default path is preserved.
+    """
+    if v is None:
+        return None
+    if not math.isfinite(v):
+        raise ValueError("timeout must be a finite number of seconds (not NaN or inf)")
+    if v <= 0:
+        raise ValueError(
+            "timeout must be > 0 seconds when set (got "
+            f"{v}); omit the field to use the server default."
+        )
+    return v
+
+
+def _normalize_stop(v):
+    """Accept ``stop`` as either a scalar string or a sequence of
+    strings, normalizing to a list once at the schema layer
+    (mirrors the OpenAI request shape, where ``stop`` is
+    ``str | list[str]``). A bare string becomes a one-element list so
+    downstream code (``SamplingParams.stop: list[str]``) never has to
+    handle both shapes -- the normalization happens exactly once, at
+    the request schema, on both chat and legacy completions.
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, (list, tuple)):
+        out = []
+        for item in v:
+            if isinstance(item, bool) or not isinstance(item, str):
+                raise ValueError(
+                    "stop must be a string or a list of strings "
+                    f"(got non-string element {item!r})."
+                )
+            out.append(item)
+        return out
+    raise ValueError(
+        "stop must be a string or a list of strings "
+        f"(got {type(v).__name__})."
+    )
+
+
 # =============================================================================
 # Shared finite-range guard (H-10) — one source of truth
 # =============================================================================
@@ -549,6 +601,7 @@ _FINITE_SAMPLING_FIELDS: tuple[str, ...] = (
     "repetition_penalty",
     "presence_penalty",
     "frequency_penalty",
+    "timeout",
 )
 
 
@@ -1848,6 +1901,21 @@ class ChatCompletionRequest(BaseModel):
     def _validate_max_completion_tokens(cls, v) -> int | None:
         return _validate_positive_int(v, field_name="max_completion_tokens")
 
+    # ``mode="before"`` so a scalar string is wrapped into a list BEFORE
+    # Pydantic tries to validate it against the ``list[str]`` field type
+    # (a bare ``"END"`` would otherwise 422 as "not a list"). Mirrors the
+    # OpenAI request shape (``stop`` is ``str | list[str]``) while keeping
+    # the normalized value a list for the engine contract.
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _normalize_stop(cls, v):
+        return _normalize_stop(v)
+
+    @field_validator("timeout")
+    @classmethod
+    def _validate_timeout(cls, v: float | None) -> float | None:
+        return _validate_timeout(v)
+
     @model_validator(mode="after")
     def _normalize_max_completion_tokens(self) -> "ChatCompletionRequest":
         if self.max_completion_tokens is not None:
@@ -2264,6 +2332,19 @@ class CompletionRequest(BaseModel):
     @classmethod
     def _validate_max_tokens(cls, v) -> int | None:
         return _validate_positive_int(v, field_name="max_tokens")
+
+    # ``_normalize_stop`` + ``_validate_timeout`` mirror the chat
+    # surface so /v1/completions and /v1/chat/completions share one
+    # schema contract -- same helpers, same wire acceptance rules.
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _normalize_stop(cls, v):
+        return _normalize_stop(v)
+
+    @field_validator("timeout")
+    @classmethod
+    def _validate_timeout(cls, v: float | None) -> float | None:
+        return _validate_timeout(v)
 
     # F-155: enforce ``n == 1`` at parse time, mirroring the chat
     # surface. The route already 400's ``n > 1``; the schema layer
