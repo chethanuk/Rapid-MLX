@@ -517,6 +517,17 @@ def test_parse_base_url_ipv6_bracketing():
     )
 
 
+def test_parse_base_url_does_not_decode_non_zone_host_escapes():
+    # Only the zone-id `%25` is decoded back to `%`; other percent-escapes in a
+    # hostname are genuine octets and must survive, else the host would corrupt
+    # into a malformed URL (codex #2348-R2).
+    assert connect._parse_base_url("http://%2Fexample.com:8000/v1") == (
+        "%2Fexample.com",
+        8000,
+    )
+    assert connect._parse_base_url("http://%20host:8000/v1") == ("%20host", 8000)
+
+
 def test_parse_base_url_default_port_and_errors():
     # No port → the rapid-mlx default.
     assert connect._parse_base_url("http://server.local/v1") == ("server.local", 8000)
@@ -533,11 +544,13 @@ def test_parse_base_url_default_port_and_errors():
         "http://localhost:70000/v1",
         "http://server/proxy/v1",
         "http://localhost:8123/custom",
+        "http://localhost:8123//",
+        "http://localhost:8123/v1//",
     ):
         with pytest.raises(ValueError):
             connect._parse_base_url(bad)
-    # The SSOT-renderable paths — empty, bare/trailing slash, `/v1` (+ trailing
-    # slash) — are all accepted losslessly.
+    # The SSOT-renderable paths — empty, bare/trailing slash, `/v1` (+ one
+    # trailing slash) — are all accepted losslessly.
     assert connect._parse_base_url("http://localhost:8123/v1") == ("localhost", 8123)
     assert connect._parse_base_url("http://localhost:8123/") == ("localhost", 8123)
     assert connect._parse_base_url("http://localhost:8123/v1/") == ("localhost", 8123)

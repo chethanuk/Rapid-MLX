@@ -276,7 +276,7 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     Raises ``ValueError`` on a non-http scheme, a URL with no host, an
     unexpected path, or an explicit out-of-range port.
     """
-    from urllib.parse import unquote, urlsplit
+    from urllib.parse import urlsplit
 
     split = urlsplit(base_url, scheme="http")
     scheme = split.scheme or "http"
@@ -286,17 +286,24 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     if not host:
         raise ValueError(f"base-url has no host, got {base_url!r}")
     # Empty path (``http://host:port``), a bare trailing slash (``/``), and
-    # ``/v1`` (+ trailing slash) are the only paths the SSOT renders losslessly;
-    # a trailing slash is a common, semantics-free spelling from SDK/config
-    # tooling, so it is normalized away before comparing. Anything else is a
-    # proxied endpoint whose path-prefix this local-server tool does not model.
-    path = (split.path or "").rstrip("/")
+    # ``/v1`` (+ a single trailing slash) are the only paths the SSOT renders
+    # losslessly; one trailing slash is a semantics-free spelling from SDK/config
+    # tooling and is normalized away before comparing. Repeated slashes
+    # (``//``, ``/v1//``) and real path-prefixes are rejected since they are
+    # path-significant and this local-server tool does not model them.
+    path = ""
+    raw = split.path or ""
+    if raw:
+        path = raw[:-1] if raw.endswith("/") else raw
     if path not in ("", "/v1"):
         raise ValueError(f"base-url path must be empty or /v1, got {base_url!r}")
-    # unquote canonicalizes a percent-encoded scoped IPv6 zone-id back to the
-    # raw form (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then
-    # re-encodes it consistently when rendering, so the round-trip is stable.
-    host = unquote(host)
+    # Decode ONLY the ``%25`` that represents a scoped IPv6 zone-id separator
+    # (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then re-encodes
+    # it consistently when rendering, so the round-trip is stable. Other
+    # percent-escapes inside a hostname (``%2F``, ``%20``, …) are genuine octets
+    # and must NOT be blanket-unquoted or the host would be corrupted into a
+    # malformed URL (codex #2348-R2).
+    host = host.replace("%25", "%")
     port = split.port if split.port is not None else 8000
     if not (1 <= port <= 65535):
         raise ValueError(f"base-url port must be between 1 and 65535, got {port}")
