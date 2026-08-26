@@ -174,6 +174,20 @@ struct QuickstartStarterPolicyTests {
         #expect(QuickstartCoordinator.lowMemoryChoice.alias == "lfm2.5-1b-4bit")
     }
 
+    @Test("An older authoritative catalog falls back to its 1.2B ladder entry")
+    func oldCatalogCompatibilityFallback() {
+        let catalog = [entry("lfm2.5-1b-4bit")]
+
+        #expect(QuickstartCoordinator.defaultChoice(
+            hardware: hardware(8),
+            catalog: catalog
+        ).alias == "lfm2.5-1b-4bit")
+        #expect(QuickstartCoordinator.defaultChoice(
+            hardware: hardware(16),
+            catalog: catalog
+        ).alias == "lfm2.5-1b-4bit")
+    }
+
     @Test("A later cache refresh never overrides an explicit user choice")
     func explicitSelectionWins() {
         let coordinator = QuickstartCoordinator()

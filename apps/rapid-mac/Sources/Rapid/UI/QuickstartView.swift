@@ -338,7 +338,17 @@ final class QuickstartCoordinator {
             hardware: hardware,
             bucketedDefault: baseline.alias,
             excludedAliases: excluded
-        ) else { return baseline }
+        ) else {
+            // An older sidecar may not know the new starter aliases yet. The
+            // authored 1.2B ladder entry remains a catalog-proven compatibility
+            // fallback; it is not considered while either current baseline or
+            // another eligible cached choice can be resolved.
+            if !eligibleCatalog.isEmpty,
+               eligibleCatalog.contains(where: { $0.alias == lowMemoryChoice.alias }) {
+                return lowMemoryChoice
+            }
+            return baseline
+        }
         return choice(forAlias: alias)
     }
 
