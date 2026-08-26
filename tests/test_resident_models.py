@@ -1564,6 +1564,54 @@ async def test_restore_publication_failure_clears_partially_published_primary():
     assert manager.snapshot()["models"] == []
 
 
+@pytest.mark.asyncio
+async def test_restore_publication_failure_tolerates_cleanup_failures(caplog):
+    """Cleanup failures cannot mask the original replacement error."""
+    registry = ModelRegistry()
+    primary = entry("chat")
+    registry.add(primary, is_default=True)
+
+    class FailingStopEngine(FakeEngine):
+        async def stop(self):
+            raise RuntimeError("cleanup stop failed")
+
+    async def loader(name: str, path: str | None, performance=None):
+        del path
+        if performance is not None:
+            raise RuntimeError("replacement failed")
+        return entry(name, FailingStopEngine())
+
+    publications: list[ModelEntry | None] = []
+
+    def publish(value: ModelEntry | None) -> None:
+        publications.append(value)
+        if len(publications) == 1 and value is None:
+            return
+        if value is not None:
+            raise RuntimeError("restore publication failed")
+        raise RuntimeError("clear publication failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_changed=publish,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        await manager.load(
+            "chat",
+            performance=ResidentPerformanceConfig(kv_cache_dtype="int4"),
+            reload_if_changed=True,
+        )
+
+    assert registry.list_entries() == []
+    assert registry.default_name is None
+    assert "Failed to stop partially restored resident model" in caplog.text
+    assert "Failed to clear serving-layer primary" in caplog.text
+
+
 def test_clearing_resident_primary_disables_legacy_routing_and_readiness(monkeypatch):
     from types import SimpleNamespace
 
