@@ -162,6 +162,12 @@ final class MemoryLoadConfirmationQueue {
         _ old: ModelSizing.MemoryWarning,
         snapshot: MemoryProbe.Snapshot
     ) -> ModelSizing.MemoryWarning {
+        // Replacement admission reaches this queue only after `ensureServing`
+        // has awaited `stop()`. The fresh host sample therefore already
+        // reflects whatever memory macOS has reclaimed from the old process;
+        // subtracting `plannedReleaseGB` again would understate live use. Keep
+        // the value solely to explain which release the initial projection
+        // accounted for.
         ModelSizing.MemoryWarning(
             id: old.id,
             alias: old.alias,

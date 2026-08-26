@@ -605,6 +605,32 @@ struct ModelResidencyTests {
         #expect(performance["cache_memory_mb"] as? Int == 4096)
     }
 
+    @Test("A typed 507 replacement projection reaches the user-facing rejection")
+    func loadDecodesReplacementProjectionRejection() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ResidencyLoadProjectionRejectProtocol.self]
+        var client = ServerResidencyClient()
+        client.session = URLSession(configuration: configuration)
+
+        let result = await client.load(
+            alias: "qwen3.8-27b-4bit",
+            hfPath: nil,
+            estimatedSizeGB: 22,
+            replaceGroup: .assistant,
+            memoryPolicy: .evictFirstIfNeeded,
+            port: 8000,
+            bearer: nil
+        )
+
+        guard case .rejected(let message) = result else {
+            Issue.record("Expected the typed 507 to remain a rejected resident load")
+            return
+        }
+        #expect(message.contains("release about 6 GB"))
+        #expect(message.contains("26 GB"))
+        #expect(message.contains("24 GB model-memory budget"))
+    }
+
     @Test("Image residency estimate uses catalog bytes plus runtime margin")
     func imageEstimateUsesDownloadSize() {
         let estimate = ModelSizing.residentEstimateGB(
@@ -691,4 +717,21 @@ private final class ResidencyLoadCaptureProtocol: URLProtocol, @unchecked Sendab
             if count < 0 { return nil }
         }
     }
+}
+
+private final class ResidencyLoadProjectionRejectProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let payload = #"{"detail":{"error":{"message":"insufficient capacity","type":"insufficient_capacity_error","code":"insufficient_capacity_error","param":"estimated_size_gb"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 507, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

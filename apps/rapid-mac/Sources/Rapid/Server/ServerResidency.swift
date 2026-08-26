@@ -346,13 +346,35 @@ struct ServerResidencyClient {
     }
 
     private struct ErrorEnvelope: Decodable {
-        let detail: String?
-        let replacementProjection: ResidentReplacementProjection?
+        struct StructuredDetail: Decodable {
+            struct Error: Decodable {
+                let message: String?
+            }
 
-        enum CodingKeys: String, CodingKey {
-            case detail
-            case replacementProjection = "replacement_projection"
+            let error: Error?
+            let replacementProjection: ResidentReplacementProjection?
+
+            enum CodingKeys: String, CodingKey {
+                case error
+                case replacementProjection = "replacement_projection"
+            }
         }
+
+        enum Detail: Decodable {
+            case message(String)
+            case structured(StructuredDetail)
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.singleValueContainer()
+                if let message = try? container.decode(String.self) {
+                    self = .message(message)
+                } else {
+                    self = .structured(try container.decode(StructuredDetail.self))
+                }
+            }
+        }
+
+        let detail: Detail?
     }
 
     var session: URLSession = {
@@ -425,8 +447,16 @@ struct ServerResidencyClient {
                 return .unsupported
             }
             let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
-            let detail = envelope?.detail
-                ?? envelope?.replacementProjection?.rejectionMessage(alias: alias)
+            let detail: String?
+            switch envelope?.detail {
+            case .message(let message):
+                detail = message
+            case .structured(let structured):
+                detail = structured.replacementProjection?.rejectionMessage(alias: alias)
+                    ?? structured.error?.message
+            case nil:
+                detail = nil
+            }
             return .rejected(detail ?? "The model could not be kept resident (HTTP \(http.statusCode)).")
         } catch {
             return .rejected("The model server could not load another resident model.")
