@@ -421,7 +421,9 @@ Open the picker any time to switch models.
     /// RAM-only starter identity for this launch. Unlike ``choice.tier``, this
     /// is contextual: 1.2B is the starter below 16 GB and remains the explicit
     /// low-memory fallback everywhere else.
-    private var baselineStarterAlias = QuickstartCoordinator.defaultChoice.alias
+    private var baselineStarterAlias = QuickstartCoordinator.defaultChoice.alias {
+        didSet { defaults.set(baselineStarterAlias, forKey: Self.baselineStarterAliasKey) }
+    }
     /// False after the user or persisted session chose a concrete model, so a
     /// later catalog refresh can never replace explicit intent.
     private var selectionUsesAutomaticPolicy = true
@@ -850,6 +852,7 @@ Open the picker any time to switch models.
     /// ``enterDownloading``, ``skipForNow``, selecting a different alias,
     /// and ``_testingReset``.
     static let pendingReadyAliasKey: String = "rapid.quickstart.v1.pendingReadyAlias"
+    static let baselineStarterAliasKey: String = "rapid.quickstart.v1.baselineStarterAlias"
 
     /// Provenance for "this install has been inside setup before and never
     /// finished it" (Paper 05.1 state 18 — "Relaunch, setup incomplete").
@@ -914,6 +917,8 @@ Open the picker any time to switch models.
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.baselineStarterAlias = defaults.string(forKey: Self.baselineStarterAliasKey)
+            ?? Self.defaultChoice.alias
         self.done = defaults.bool(forKey: Self.storageKey)
         self.legacyDone = defaults.bool(forKey: Self.legacyStorageKey)
         // History only. Nothing below reconstructs a phase, a selection or a
@@ -1006,6 +1011,7 @@ Open the picker any time to switch models.
         catalogSort = .familyThenSize
         catalogScrollID = nil
         selection = Self.defaultChoice
+        baselineStarterAlias = Self.defaultChoice.alias
         selectionUsesAutomaticPolicy = true
         hasSeededWelcome = false
         awaitingWelcomeSeed = false
@@ -1030,6 +1036,7 @@ Open the picker any time to switch models.
         defaults.removeObject(forKey: Self.awaitingSeedKey)
         defaults.removeObject(forKey: Self.awaitingSeedAliasKey)
         defaults.removeObject(forKey: Self.pendingReadyAliasKey)
+        defaults.removeObject(forKey: Self.baselineStarterAliasKey)
     }
 
     /// The name 44 call sites in the suite and ``DevSnapshot`` already use.

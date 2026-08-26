@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rapid
 
@@ -63,6 +64,22 @@ struct QuickstartStarterPolicyTests {
 
         #expect(coordinator.selection.alias == "lfm2.5-1b-4bit")
         #expect(coordinator.seedMessage.contains("a model picked so you can start"))
+    }
+
+    @Test("The 8 GB starter provenance survives a deferred-seed relaunch")
+    func baselineStarterSurvivesRelaunch() {
+        let suite = "QuickstartStarterPolicyTests.relaunch.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let first = QuickstartCoordinator(defaults: defaults)
+        first.applyDefaultChoice(hardware: hardware(8), catalog: [])
+        defaults.set(true, forKey: QuickstartCoordinator.awaitingSeedKey)
+        defaults.set(first.selection.alias, forKey: QuickstartCoordinator.awaitingSeedAliasKey)
+
+        let relaunched = QuickstartCoordinator(defaults: defaults)
+        #expect(relaunched.selection.alias == "lfm2.5-1b-4bit")
+        #expect(relaunched.seedMessage.contains("a model picked so you can start"))
     }
 
     @Test("The 1.2B choice remains a fallback, not a starter, on a 16 GB Mac")
