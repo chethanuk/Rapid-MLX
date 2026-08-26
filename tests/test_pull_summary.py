@@ -529,6 +529,108 @@ def test_hf_cache_root_resolves_owner_and_single_component(
     assert cli._hf_cache_root("Qwen3-0.6B") == Path(tmp_path / "models--Qwen3-0.6B")
 
 
+def test_hf_cache_root_prefers_repo_name_to_id_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_hf_cache_root`` uses HF's ``repo_name_to_id`` when the installed
+    version exposes it (Codex #2392 success branch). The concurrent no-MLX
+    matrix's huggingface_hub usually lacks this symbol, so the fallback
+    (``repo_id.replace``) is what the other tests exercise; this pins the
+    preferred branch so diff-cover sees it and a future HF upgrade that adds
+    the symbol can't regress the path silently.
+    """
+    import huggingface_hub.utils as _hf_utils
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
+    # The current huggingface_hub lacks ``repo_name_to_id`` (that's exactly
+    # why the fallback branch is what other tests exercise). Inject it on the
+    # real module so ``_hf_cache_root``'s ``from huggingface_hub.utils import
+    # repo_name_to_id`` resolves and runs the success branch.
+    monkeypatch.setattr(
+        _hf_utils,
+        "repo_name_to_id",
+        lambda repo_id: repo_id.replace("/", "--").upper(),
+        raising=False,
+    )
+    # ``owner/repo`` is normalized by the monkeypatched repo_name_to_id.
+    assert cli._hf_cache_root("mlx-community/Qwen3-0.6B-4bit") == Path(
+        tmp_path / "models--MLX-COMMUNITY--QWEN3-0.6B-4BIT"
+    )
+
+
+def test_hf_cache_root_returns_none_when_hf_constants_unimportable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_hf_cache_root`` returns None when ``HF_HUB_CACHE`` cannot be
+    imported (Codex #2392 OSError/import-failure branch) — the caller treats
+    this as "no cache configured" rather than crashing.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _guard(name, *args, **kwargs):
+        if name == "huggingface_hub.constants":
+            raise ImportError("simulated missing HF_HUB_CACHE")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _guard)
+    assert cli._hf_cache_root("mlx-community/Qwen3-0.6B-4bit") is None
+
+
+def test_blob_identifier_listdir_oserror_returns_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_blob_identifier`` returns ``()`` when listing ``blobs/`` raises
+    OSError (EACCES / a permissive mount) instead of propagating — an empty
+    inventory is a safe no-transfer baseline (Codex #2392).
+    """
+    import os
+
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "cafe").write_bytes(b"\x00" * 512)
+
+    original_listdir = os.listdir
+
+    def _raising_listdir(path):
+        if str(path) == str(blobs):
+            raise OSError("simulated listdir failure")
+        return original_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", _raising_listdir)
+    assert cli._blob_identifier(tmp_path) == ()
+
+
+def test_blob_identifier_stat_oserror_skips_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_blob_identifier`` skips (does not crash on) a blob whose ``stat()``
+    raises OSError (e.g. a vanished/transiently-locked file) and still returns
+    the rest of the inventory (Codex #2392).
+    """
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    good = blobs / "good"
+    good.write_bytes(b"\x00" * 64)
+    bad = blobs / "bad"
+    bad.write_bytes(b"\x00" * 32)
+
+    original_stat = Path.stat
+    bad_s = f"{bad}"
+
+    def _raising_stat(self, *args, **kwargs):
+        if str(self) == bad_s:
+            raise OSError("simulated stat failure")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _raising_stat)
+    ident = cli._blob_identifier(tmp_path)
+    # "bad" is skipped; "good" still fingerprints.
+    assert ("good", 64, ident[0][2]) in ident
+    assert all(row[0] != "bad" for row in ident)
+
+
 def test_print_pull_summary_was_cached_branch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

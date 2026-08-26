@@ -1382,6 +1382,75 @@ def test_r2_lfs_sha256_mismatch_falls_back_to_hf(
     assert leftovers == []
 
 
+def test_lfs_blob_probe_oserror_falls_through_to_hf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The per-file LFS blob-locality probe wraps ``is_file()`` in OSError
+    protection (Codex #2392): an exotic FS that raises on ``stat`` must not
+    crash the pull — it degrades to "blob not local" and lets the HF fallback
+    proceed. (pathlib normally swallows OSError in ``is_file``, so this is a
+    defensive branch exercised by making ``is_file`` raise on the probe path.)
+    """
+    import hashlib
+
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    revision = "11ee" * 10
+    payload_correct = b"x" * 200
+    correct_sha = hashlib.sha256(payload_correct).hexdigest()
+    files = [("model.safetensors", 200, correct_sha)]
+    catalog = _catalog_payload([("qwen3-0.6b-4bit", repo_id, "mirrored")])
+
+    router = _UrlRouter()
+    router.add(
+        "https://models.rapidmlx.com/api/models",
+        _FakeResponse(200, json.dumps(catalog).encode()),
+    )
+    router.add(
+        "https://models.rapidmlx.com/mlx-community/Qwen3-0.6B-4bit/model.safetensors",
+        _FakeResponse(200, b"z" * 200),
+    )
+
+    def _fake_hf(repo_id, filename, revision, cache_dir=None, **kwargs):
+        snap = (
+            Path(cache_dir)
+            / f"models--{repo_id.replace('/', '--')}"
+            / "snapshots"
+            / revision
+        )
+        snap.mkdir(parents=True, exist_ok=True)
+        target = snap / filename
+        target.write_bytes(payload_correct)
+        return str(target)
+
+    blob_path_suffix = f"blobs/{correct_sha}"
+    original_is_file = Path.is_file
+
+    def _raising_is_file(self):
+        if str(self).endswith(blob_path_suffix):
+            raise OSError("simulated stat failure on blob probe")
+        return original_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", _raising_is_file)
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")
+    with (
+        patch("urllib.request.urlopen", side_effect=router),
+        patch(
+            "huggingface_hub.model_info",
+            return_value=_mk_model_info(revision, files),
+        ),
+        patch("huggingface_hub.hf_hub_download", side_effect=_fake_hf) as hf_mock,
+    ):
+        ok = _mirror.download_with_mirror_fallback(repo_id, cache_dir=tmp_path)
+
+    # The OSError on the blob probe must not abort the pull — HF still serves
+    # the file and the pull reports success.
+    assert ok
+    assert hf_mock.call_count == 1
+    snap = tmp_path / "models--mlx-community--Qwen3-0.6B-4bit" / "snapshots" / revision
+    assert (snap / "model.safetensors").read_bytes() == payload_correct
+
+
 def test_r2_lfs_sha256_match_accepts_download(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
