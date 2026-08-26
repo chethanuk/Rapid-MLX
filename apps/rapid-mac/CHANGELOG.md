@@ -17,6 +17,35 @@ can actually understand.
 
 ## [Unreleased]
 
+### Added
+
+- **Assistant changes are explicit, safe transactions.** Desktop and API
+  clients can choose whether a busy text or vision model switch should reject,
+  wait, or abort active assistant work, without evicting auxiliary speech
+  models or leaving request ownership ambiguous. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
+- **Large multi-variant repositories can download one serving format.** The CLI
+  accepts `--bits` or `--format`, so users do not need to fetch every
+  quantization in a repository. ([#2145](https://github.com/raullenchai/Rapid-MLX/issues/2145),
+  [#2338](https://github.com/raullenchai/Rapid-MLX/pull/2338))
+
+### Fixed
+
+- **Mirrored subfolder quantizations download from the fast path.** Models such
+  as LFM2.5 2.6B 4-bit no longer fall back to a slow or unreachable upstream
+  route merely because the quantization lives in a repository subfolder.
+  ([#2279](https://github.com/raullenchai/Rapid-MLX/pull/2279))
+- **Explicit weather requests stay on the Weather tool.** Evaluation coverage
+  prevents models from selecting general web search or claiming the advertised
+  Weather tool is unavailable. ([#2222](https://github.com/raullenchai/Rapid-MLX/issues/2222),
+  [#2327](https://github.com/raullenchai/Rapid-MLX/pull/2327))
+
+### Documentation
+
+- Corrected the 0.13.0 Nemotron Labs Diffusion description to identify its
+  supported text-model path. ([#2376](https://github.com/raullenchai/Rapid-MLX/pull/2376))
+- Published a reproducible M2 Pro comparison of 0.13.0 and 0.12.18.
+  ([#2375](https://github.com/raullenchai/Rapid-MLX/pull/2375))
+
 ## [0.13.0] — 2026-08-26
 
 Rapid-MLX 0.13.0 makes first setup clearer, expands local model support, keeps
