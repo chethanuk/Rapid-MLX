@@ -36,9 +36,9 @@ can actually understand.
   as LFM2.5 2.6B 4-bit no longer fall back to a slow or unreachable upstream
   route merely because the quantization lives in a repository subfolder.
   ([#2279](https://github.com/raullenchai/Rapid-MLX/pull/2279))
-- **Explicit weather requests stay on the Weather tool.** Evaluation coverage
-  prevents models from selecting general web search or claiming the advertised
-  Weather tool is unavailable. ([#2222](https://github.com/raullenchai/Rapid-MLX/issues/2222),
+- **Explicit weather requests have dedicated regression coverage.** Evaluation
+  scenarios detect models selecting general web search or claiming the
+  advertised Weather tool is unavailable. ([#2222](https://github.com/raullenchai/Rapid-MLX/issues/2222),
   [#2327](https://github.com/raullenchai/Rapid-MLX/pull/2327))
 - **Desktop photo input uses the updated bundled vision runtime.** Release
   validation now requires image-dependent answers from two cached vision
