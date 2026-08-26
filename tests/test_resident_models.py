@@ -1195,6 +1195,94 @@ async def test_evict_first_primary_callback_failure_reopens_old_admission():
 
 
 @pytest.mark.asyncio
+async def test_evict_first_partial_target_publication_is_cleared_on_failure():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    published: list[ModelEntry | None] = [primary]
+    loaded: list[FakeEngine] = []
+    handoff = Mock()
+
+    async def loader(name: str, path: str | None, performance=None):
+        replacement = entry(name)
+        loaded.append(replacement.engine)
+        return replacement
+
+    def publish_then_fail(replacement):
+        published[0] = replacement
+        if replacement is not None:
+            raise RuntimeError("parser construction failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=publish_then_fail,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="parser construction failed"):
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    assert loaded[0].stopped is True
+    assert published == [None]
+    assert registry.default_name is None
+    assert manager.snapshot()["models"] == []
+    handoff.commit.assert_called_once_with(None)
+    handoff.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evict_first_cleanup_callback_failure_does_not_mask_publish_error(caplog):
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    none_calls = 0
+
+    async def loader(name: str, path: str | None, performance=None):
+        return entry(name)
+
+    def fail_publish_and_cleanup(replacement):
+        nonlocal none_calls
+        if replacement is None:
+            none_calls += 1
+            if none_calls == 2:
+                raise RuntimeError("cleanup clear failed")
+            return
+        raise RuntimeError("original publish failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: Mock(),
+        on_primary_changed=fail_publish_and_cleanup,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="original publish failed"):
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    assert "Failed to clear rejected replacement primary" in caplog.text
+    assert manager.snapshot()["models"] == []
+
+
+@pytest.mark.asyncio
 async def test_replacement_rejects_before_eviction_when_target_still_does_not_fit():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()

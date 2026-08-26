@@ -647,6 +647,7 @@ class ResidentModelManager:
             paused_engines: list[object] = []
             destructive_handoff: PrimaryHandoffLease | None = None
             destructive_primary = False
+            destructive_primary_publish_attempted = False
             destructive_replacement = False
             projection: ReplacementProjection | None = None
             try:
@@ -743,6 +744,7 @@ class ResidentModelManager:
                 self._index_record(record)
                 self.loads_total += 1
                 if destructive_primary and self._on_primary_changed is not None:
+                    destructive_primary_publish_attempted = True
                     self._on_primary_changed(entry)
                 await self._evict_for_locked(
                     0,
@@ -781,6 +783,16 @@ class ResidentModelManager:
                                 await result
                         _release_allocator_cache()
                 finally:
+                    if (
+                        destructive_primary_publish_attempted
+                        and self._on_primary_changed is not None
+                    ):
+                        try:
+                            self._on_primary_changed(None)
+                        except BaseException:
+                            logger.exception(
+                                "Failed to clear rejected replacement primary"
+                            )
                     if destructive_handoff is not None:
                         destructive_handoff.commit(None)
                     if not destructive_replacement:
