@@ -4278,9 +4278,12 @@ def test_mirror_hf_relink_of_local_blob_is_not_a_fetch(
         snap.mkdir(parents=True, exist_ok=True)
         target = snap / filename
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Only link the pre-existing blob — no bytes written (HF re-link of a
-        # local blob), mirroring hf_hub_download on a warm local cache.
-        target.write_bytes(b"x" * 100)
+        # HF re-link of a local blob creates the snapshot SYMLINK to the
+        # pre-existing blob — it writes no bytes (warm local cache). Real HF
+        # snapshot links are relative ``blobs/<sha>`` symlinks; assert the
+        # blob stays byte-identical and the (unchanged) link is the only
+        # addition.
+        target.symlink_to(f"../../blobs/{sha}")  # HF-style relative symlink
         return str(target)
 
     monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")

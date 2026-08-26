@@ -437,8 +437,17 @@ def test_snapshot_identifier_is_a_stable_transfer_seam(tmp_path: Path) -> None:
     (snap / "empty.bin").write_bytes(b"")
     assert cli._snapshot_identifier(str(snap)) != before
 
-    # Empty vs populated: a fresh pull's before (()) differs from after.
-    assert before == () or after != ()
+    # The authentic fresh-pull transition: an ABSENT snapshot fingerprints
+    # empty (()) before, and the populated dir fingerprints non-empty after —
+    # a genuine download (not a tautological assertion).
+    fresh = tmp_path / "fresh-snap"
+    assert cli._snapshot_identifier(str(fresh)) == ()
+    fresh.mkdir()
+    (fresh / "model.safetensors").write_bytes(b"\x00" * 2048)
+    fresh_after = cli._snapshot_identifier(str(fresh))
+    assert fresh_after != () and fresh_after != cli._snapshot_identifier(
+        str(tmp_path / "fresh-snap-does-not-exist")
+    )
 
 
 def test_hf_snapshot_dir_for_resolves_cached_snapshot(

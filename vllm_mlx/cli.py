@@ -6461,8 +6461,18 @@ def _hf_snapshot_dir_for(repo_id: str):
     except Exception:
         return None
     cache_root = Path(HF_HUB_CACHE)
-    owner, _, repo = repo_id.partition("/")
-    repo_root = cache_root / f"models--{owner}--{repo}"
+    # Stable cache-path construction that handles BOTH ``owner/repo`` and
+    # single-component repo ids (Codex #2392 #2): ``owner/repo`` maps to the
+    # ``models--owner--repo`` dir, while a bare ``repo`` (no ``/``) maps to
+    # ``models--repo`` — HF's real layout. Prefer HF's own constant when the
+    # installed version exposes it, else reconstruct it locally.
+    try:
+        from huggingface_hub.utils import repo_name_to_id  # type: ignore[attr-defined]
+
+        _cache_id = repo_name_to_id(repo_id)
+    except Exception:
+        _cache_id = repo_id.replace("/", "--")
+    repo_root = cache_root / f"models--{_cache_id}"
     try:
         rev = (repo_root / "refs" / "main").read_text().strip()
     except OSError:
@@ -6482,9 +6492,15 @@ def _snapshot_identifier(directory) -> tuple[tuple[str, int, int], ...]:
     wire (cache hit); any new/changed file means bytes were fetched this pull
     (including a fetched zero-byte file, which still adds a new inventory row).
     ``directory`` may be None (nothing cached yet) -> empty fingerprint.
-    Symlinks are fingerprinted via ``lstat`` (their own metadata, not the
-    blob target), so a warm pull that leaves the snapshot untouched is
-    identical while a fetch adds/rewrites entries.
+
+    Entries are fingerprinted with ``stat`` (FOLLOWING symlinks to their blob
+    targets), NOT ``lstat``: HF stores snapshot files as symlinks into
+    ``blobs/<sha>``, and restoring a missing/corrupt BLOCK changes only the
+    blob (its size/mtime) while leaving the snapshot symlink itself
+    unchanged. Fingerprinting the resolved target is what makes that repair
+    visible as a transfer rather than a false "Already cached". A warm pull
+    that re-links an existing, unchanged blob leaves both the link and the
+    blob untouched, so its fingerprint is identical.
     """
     import os as _os
 
@@ -6495,7 +6511,10 @@ def _snapshot_identifier(directory) -> tuple[tuple[str, int, int], ...]:
         for name in files:
             p = _os.path.join(dirpath, name)
             try:
-                st = _os.lstat(p)
+                # Follow symlinks: capture the blob target's size/mtime so a
+                # blob repair (which the lstat of the symlink would hide) is
+                # still detected as a transfer (Codex #2392).
+                st = _os.stat(p)
             except OSError:
                 continue
             rows.append((_os.path.relpath(p, directory), st.st_size, st.st_mtime_ns))
