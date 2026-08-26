@@ -55,6 +55,15 @@ can actually understand.
 - **Share CLI contracts use supported invocation forms and run in CI.**
   ([#2377](https://github.com/raullenchai/Rapid-MLX/issues/2377),
   [#2382](https://github.com/raullenchai/Rapid-MLX/pull/2382))
+- **Environment diagnosis identifies the CLI that is actually running.**
+  `rapid-mlx doctor` reports both the active-environment executable and a
+  different installation found on `PATH`, with actionable mismatch guidance.
+  ([#2352](https://github.com/raullenchai/Rapid-MLX/issues/2352),
+  [#2402](https://github.com/raullenchai/Rapid-MLX/pull/2402))
+- **Offline serving failures are concise and actionable.** An uncached model
+  now stops after one cache and connectivity explanation instead of repeating
+  download work or recommending an unrelated serving lane.
+  ([#2357](https://github.com/raullenchai/Rapid-MLX/issues/2357))
 - **First run chooses a hardware-fit starter and photos use the correct lane.**
   Eligible cached models remain preferred, and supported hybrid vision models
   route automatically. ([#2385](https://github.com/raullenchai/Rapid-MLX/pull/2385),
@@ -90,6 +99,10 @@ can actually understand.
   [#2350](https://github.com/raullenchai/Rapid-MLX/issues/2350),
   [#2392](https://github.com/raullenchai/Rapid-MLX/pull/2392),
   [#2349](https://github.com/raullenchai/Rapid-MLX/issues/2349))
+- **Cached speech checkpoints are recognized by their real layouts.** Complete
+  Kokoro and Whisper Turbo snapshots count as runnable when their verified
+  family-specific weights are present. ([#2406](https://github.com/raullenchai/Rapid-MLX/issues/2406),
+  [#2417](https://github.com/raullenchai/Rapid-MLX/pull/2417))
 - **System-prompt settings explain what is actually sent.** Saved and effective
   prompts are distinguished, and optional credentials are read only when
   needed. ([#2341](https://github.com/raullenchai/Rapid-MLX/pull/2341))
