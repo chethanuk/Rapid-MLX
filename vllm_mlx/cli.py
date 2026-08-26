@@ -8194,7 +8194,7 @@ def chat_command(args):
             if not _auto_yes and _interactive:
                 from vllm_mlx._download_gate import (
                     confirm_or_abort,
-                    estimate_repo_size_bytes,
+                    estimate_download_size_bytes,
                     is_repo_cached,
                 )
 
@@ -8202,7 +8202,7 @@ def chat_command(args):
                     try:
                         confirm_or_abort(
                             resolved,
-                            estimate_repo_size_bytes(resolved),
+                            estimate_download_size_bytes(resolved),
                         )
                     except SystemExit:
                         # User said no — keep the current server up.
@@ -11677,7 +11677,7 @@ def main():
         if not _auto_yes and _interactive:
             from vllm_mlx._download_gate import (
                 confirm_or_abort,
-                estimate_repo_size_bytes,
+                estimate_download_size_bytes,
                 is_repo_cached,
             )
 
@@ -11692,9 +11692,14 @@ def main():
                 # including the auto-selected starter: it is an unpinned HF repo
                 # whose declared size we must actually verify, never assume,
                 # before waiving consent.
+                #
+                # ``estimate_download_size_bytes`` (not the raw
+                # ``estimate_repo_size_bytes``) so a catalog model's checked-in
+                # footprint still gates when the Hub can't be reached offline
+                # (issue #2350).
                 _short = args.model.split("/")[-1]
                 with _StatusSpinner(f"Resolving {_short} …"):
-                    _size = estimate_repo_size_bytes(args.model)
+                    _size = estimate_download_size_bytes(args.model)
                 confirm_or_abort(args.model, _size)
     # --- END B2 --------------------------------------------------------
 
