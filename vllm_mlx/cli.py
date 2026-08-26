@@ -1644,24 +1644,29 @@ def _try_mirror_prefetch(
     )
 
 
+def _env_flag_active(raw: str | None) -> bool:
+    """True when an HF/transformers offline-style env flag is enabled.
+
+    Bounded local truth-value predicate reproducing huggingface_hub's
+    ``_is_true`` semantics exactly (only ``1``/``ON``/``YES``/``TRUE`` count;
+    ``0``/``false``/empty leave it off) without depending on the library's
+    private ``constants._is_true`` helper, whose return type is untyped.
+    """
+    return raw is not None and str(raw).lower() in {"1", "on", "yes", "true"}
+
+
 def _offline_hub_mode_active() -> bool:
     """True when the HF/transformers offline switches pin hub access local-only.
 
-    Reproduces huggingface_hub's ``constants`` computation exactly (same
-    ``_is_true`` truthiness — ``1``/``ON``/``YES``/``TRUE`` only, so ``0``/
-    ``false`` leave offline disabled) and folds ``TRANSFORMERS_OFFLINE`` in the
-    same way the download layer does. Unlike ``constants.HF_HUB_OFFLINE`` (a
-    value baked once at import), this reads the environment live so it stays
-    truthful when tests monkeypatch the switches.
+    Reads both offline switches live (so tests monkeypatching them stay
+    truthful) and treats each **independently** before OR-ing: folding them
+    with ``os.environ.get(...) or os.environ.get(...)`` into one string lets a
+    ``HF_HUB_OFFLINE=0`` mask ``TRANSFORMERS_OFFLINE=1`` (or vice-versa), which
+    the download layer does not do.
     """
-    from huggingface_hub.constants import _is_true
-
-    # huggingface_hub's `_is_true` is untyped (returns Any); narrow to bool so
-    # this helper stays on the shrink-only mypy budget (no-any-return).
-    offline: bool = _is_true(
-        os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
+    return _env_flag_active(os.environ.get("HF_HUB_OFFLINE")) or _env_flag_active(
+        os.environ.get("TRANSFORMERS_OFFLINE")
     )
-    return offline
 
 
 def _offline_uncached_error(model_name: str) -> str:
@@ -5736,8 +5741,19 @@ def _cache_entry_is_runnable(repo: str) -> bool:
             or _snapshot_is_complete_mflux_model(repo)
             or resolve_unreferenced_cached_snapshot(repo) is not None
         )
-    except Exception:
-        return False
+    except (OSError, KeyError, ValueError) as exc:
+        # A probe fault (cache-dir permission, malformed index/header) is not
+        # evidence the model is absent: we could not establish cachedness at
+        # all. Refuse offline only when uncachedness is established, so treat
+        # probe faults as runnable (fail open) here and let the caller's
+        # offline gate NOT refuse. Unexpected exceptions are genuine bugs and
+        # still propagate.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not probe cachedness of %r: %s", repo, exc
+        )
+        return True
 
 
 def _print_cached_models() -> None:

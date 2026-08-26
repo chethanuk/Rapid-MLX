@@ -384,3 +384,46 @@ def test_gate_skips_offline_refusal_for_attached_client(monkeypatch, capsys):
     out = capsys.readouterr()
     assert "is not cached and the network is unavailable" not in out.err
     assert dispatched != []  # attached client proceeded to chat_command
+
+
+def test_offline_hub_mode_flags_parsed_independently(monkeypatch):
+    """HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE are parsed independently and
+    OR-ed: one switch being disabled must NOT mask the other being enabled.
+
+    Regression for the parser folding both into a single string
+    (``_is_true(get(A) or get(B))``) which turned ``HF_HUB_OFFLINE=0`` +
+    ``TRANSFORMERS_OFFLINE=1`` into offline-INACTIVE.
+    """
+    # HF=0 would short-circuit the fold to "0"; TRANSFORMERS=1 must still win.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    assert cli._offline_hub_mode_active() is True
+
+    # And the mirror: TRANSFORMERS=0 must not mask HF=1.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "yes")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
+    assert cli._offline_hub_mode_active() is True
+
+    # Only when BOTH are disabled is offline truly inactive (no masking).
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "false")
+    assert cli._offline_hub_mode_active() is False
+
+
+def test_cache_probe_fault_fails_open_for_offline(monkeypatch):
+    """A typed cachedness-probe fault (permission / malformed) must NOT
+    conclude 'uncached': _cache_entry_is_runnable returns True (fail open) so
+    the offline gate refuses only when uncachedness is established."""
+    # Induce an expected probe fault in resolve_audio_alias.
+    monkeypatch.setattr(
+        "vllm_mlx.audio.registry.resolve_audio_alias",
+        lambda repo: (_ for _ in ()).throw(OSError("denied")),
+    )
+    assert cli._cache_entry_is_runnable("any/repo") is True
+
+    # Same for a malformed-cache KeyError / structural ValueError.
+    monkeypatch.setattr(
+        "vllm_mlx.audio.registry.resolve_audio_alias",
+        lambda repo: (_ for _ in ()).throw(KeyError("hdr")),
+    )
+    assert cli._cache_entry_is_runnable("any/repo") is True
