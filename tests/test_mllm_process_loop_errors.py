@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -64,6 +65,8 @@ def test_batch_generator_prefill_enters_owned_stream(monkeypatch) -> None:
     """Vision prefill executes under the generator-owned stream context."""
     from contextlib import contextmanager
 
+    from mlx_lm.models import cache as cache_module
+
     from vllm_mlx import mllm_batch_generator as module
 
     owned_stream = object()
@@ -85,6 +88,9 @@ def test_batch_generator_prefill_enters_owned_stream(monkeypatch) -> None:
         RuntimeError("prefill reached")
     )
     request = SimpleNamespace(input_ids=SimpleNamespace(size=1))
+    monkeypatch.setattr(
+        cache_module, "make_prompt_cache", lambda _model: object(), raising=False
+    )
     monkeypatch.setattr(module.mx, "stream", stream_context)
     monkeypatch.setattr(module, "_prefill_cap_violation", lambda *_args: None)
 
@@ -115,6 +121,26 @@ def test_batch_generator_next_uses_owned_stream(monkeypatch) -> None:
 
     assert generator.next() == ["token"]
     assert entered == [owned_stream]
+
+
+def test_mllm_scheduler_rejects_duplicate_public_ids() -> None:
+    """A duplicate cannot replace the MLLM request cancellation addresses."""
+    public_id = "chatcmpl-" + "a" * 32
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._generation_paused = False
+    scheduler._paused_admission_tokens = set()
+    scheduler._paused_add_allowance = 0
+    scheduler.requests = {}
+    scheduler.waiting = deque()
+    scheduler._cancelled_request_ids = set()
+    scheduler._disconnect_abort_ids = set()
+    request = SimpleNamespace(request_id=public_id, lifecycle_admission_token=None)
+
+    scheduler._commit_request(request)
+
+    with pytest.raises(ValueError, match="already exists"):
+        scheduler._commit_request(request)
+    assert scheduler.requests[public_id] is request
 
 
 @pytest.mark.asyncio

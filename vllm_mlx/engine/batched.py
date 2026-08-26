@@ -2302,6 +2302,8 @@ class BatchedEngine(BaseEngine):
         stop: list[str] | None = None,
         images: list[str] | None = None,
         videos: list[str] | None = None,
+        request_id: str | None = None,
+        request_admitted_event: asyncio.Event | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         """
@@ -2315,6 +2317,11 @@ class BatchedEngine(BaseEngine):
             stop: Stop sequences
             images: Optional image URLs/paths (for MLLM)
             videos: Optional video URLs/paths (for MLLM)
+            request_id: Optional caller-provided request identity. Streaming
+                API routes use the public response id so cancellation and
+                scheduler admission address the same request.
+            request_admitted_event: Optional route notification set after
+                scheduler admission, before waiting for the first output.
             **kwargs: Additional model-specific parameters. C-01:
                 ``request_id_holder`` (``list[str | None]``) — when
                 provided, the engine writes the admitted scheduler
@@ -2367,6 +2374,7 @@ class BatchedEngine(BaseEngine):
             }
             try:
                 request_id = await self._mllm_scheduler.add_request_async(
+                    request_id=request_id,
                     prompt=prompt,
                     images=images,
                     videos=videos,
@@ -2393,6 +2401,8 @@ class BatchedEngine(BaseEngine):
                         "[stream_generate] request_id_holder publish failed",
                         exc_info=True,
                     )
+            if request_admitted_event is not None:
+                request_admitted_event.set()
 
             async for output in self._mllm_scheduler.stream_outputs(request_id):
                 # ``logprobs`` is now wired through from
@@ -2467,6 +2477,7 @@ class BatchedEngine(BaseEngine):
                 "suppressed_tokens_logits_processor", None
             )
             request_id = await self._engine.add_request(
+                request_id=request_id,
                 prompt=prompt,
                 sampling_params=sampling_params,
                 prefix_boundary=prefix_boundary,
@@ -2492,6 +2503,8 @@ class BatchedEngine(BaseEngine):
                     "[stream_generate] request_id_holder publish failed",
                     exc_info=True,
                 )
+        if request_admitted_event is not None:
+            request_admitted_event.set()
 
         # F-012 belt-and-suspenders: ``stream_outputs.finally`` already
         # aborts on any abnormal exit AFTER it enters its ``try`` block.
@@ -3440,6 +3453,15 @@ class BatchedEngine(BaseEngine):
             videos=all_videos if all_videos else None,
             **kwargs,
         )
+        # Prime scheduler admission before exposing any synthetic prefix. The
+        # route publishes the public request id with its first SSE frame; if a
+        # forced prefix were yielded first, an immediate cancel could race the
+        # scheduler registration and return 404 for a live request.
+        routed_stream = self._stream_with_output_router(stream, router)
+        try:
+            first_output = await anext(routed_stream)
+        except StopAsyncIteration:
+            first_output = None
         # On the streaming path inject the forced prefix as a synthetic
         # first chunk so the route layer's streaming tool-call parser
         # sees the wire envelope opener from the very first delta.
@@ -3452,7 +3474,9 @@ class BatchedEngine(BaseEngine):
                 finished=False,
                 finish_reason=None,
             )
-        async for output in self._stream_with_output_router(stream, router):
+        if first_output is not None:
+            yield first_output
+        async for output in routed_stream:
             yield output
 
     def get_stats(self) -> dict[str, Any]:
