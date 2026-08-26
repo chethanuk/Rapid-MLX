@@ -3519,12 +3519,14 @@ def test_line1_route_threads_predicate_into_offload_build():
     # NOT on the shared default executor before admission. The route no longer runs
     # a separate pre-admission probe — it passes ``messages`` / ``resolved_thinking``
     # into the offload so the in-slot probe can render.
-    offload_pos = src.find(
-        "_offload_tool_grammar_build(\n        engine, cfg, request, messages, resolved_thinking"
-    )
+    offload_pos = src.find("_offload_tool_grammar_build(")
     assert offload_pos != -1, (
         "route must thread messages/resolved_thinking into the admission-gated build "
         "so the seed render runs in-slot (r3 #5)"
+    )
+    offload_call = src[offload_pos : offload_pos + 180]
+    assert "engine, cfg, request, messages, resolved_thinking" in offload_call, (
+        "route must pass messages/resolved_thinking to the admission-gated build"
     )
     assert "_line1_probe_seed_offloaded(" not in src, (
         "the pre-admission offloaded probe must be gone (r3 #5 DoS)"

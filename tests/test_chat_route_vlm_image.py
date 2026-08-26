@@ -147,23 +147,28 @@ def test_forced_named_tool_on_mllm_uses_prefix_not_dropped_processors(
 ):
     """MLLM generation must retain a real enforcement lever for forced tools.
 
-    The text route may successfully build a grammar processor, but the current
-    MLLM scheduler cannot consume it.  The route must therefore discard that
-    processor, restore the parser-derived assistant prefix, and avoid building
-    the equally unsupported reasoning-budget processor.
+    The current MLLM scheduler cannot consume text-lane logits processors.  The
+    route must therefore avoid grammar validation/compilation, restore the
+    parser-derived assistant prefix, and avoid building the equally unsupported
+    reasoning-budget processor.
     """
     from vllm_mlx.routes import chat as chat_route
 
-    class _GrammarProcessor:
-        reasoning_gate_id = None
+    async def _unexpected_grammar(*_args, **_kwargs):
+        raise AssertionError("MLLM requests must not compile a tool grammar")
 
-    async def _built_grammar(*_args, **_kwargs):
-        return _GrammarProcessor()
+    def _unexpected_bounds(*_args, **_kwargs):
+        raise AssertionError("MLLM requests must not enter grammar-only validation")
 
     def _unexpected_reasoning_budget(*_args, **_kwargs):
         raise AssertionError("MLLM requests must not build logits processors")
 
-    monkeypatch.setattr(chat_route, "_offload_tool_grammar_build", _built_grammar)
+    monkeypatch.setattr(
+        chat_route, "_offload_tool_grammar_build", _unexpected_grammar
+    )
+    monkeypatch.setattr(
+        chat_route, "_enforce_tool_grammar_bounds_or_400", _unexpected_bounds
+    )
     monkeypatch.setattr(
         chat_route,
         "_build_reasoning_budget_processor",

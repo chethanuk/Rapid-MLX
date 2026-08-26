@@ -4328,7 +4328,13 @@ async def _create_chat_completion_impl(
     # before ``_offload_tool_grammar_build`` — the offload treats an oversized
     # schema as ineligible and returns ``None`` (silent free-form), which under
     # default-on would drop the structural guarantee the operator asked for.
-    _enforce_tool_grammar_bounds_or_400(cfg, request)
+    # The serialized MLLM scheduler cannot consume text-lane logits processors.
+    # Detect that capability boundary before schema validation / compilation so
+    # an MLLM request cannot spend CPU or occupy a shared grammar-build slot for
+    # a processor that generation would silently drop.
+    _mllm_ignores_logits_processors = bool(getattr(engine, "is_mllm", False))
+    if not _mllm_ignores_logits_processors:
+        _enforce_tool_grammar_bounds_or_400(cfg, request)
     # LINE① (#558): decide reasoning-gated forced-grammar eligibility. Engage only
     # when a thinking budget is set AND the template PREFILLS an unclosed
     # ``<think>`` (seed state "open") — the exact condition under which the coupled
@@ -4342,23 +4348,11 @@ async def _create_chat_completion_impl(
     # where a request flood could queue unbounded render work. When the gate engages
     # the build stashes the rendered prefix on the processor (``_line1_seed_prefix``)
     # and the coupled budget reuses it below (no second render).
-    _glp = await _offload_tool_grammar_build(
-        engine, cfg, request, messages, resolved_thinking
-    )
-    # The serialized MLLM scheduler does not currently accept any of the
-    # text-lane logits processors.  Keeping a processor here is worse than a
-    # no-op: it suppresses the forced-assistant-prefix fallback below even
-    # though ``BatchedEngine`` cannot forward the processor to generation.
-    # Restore the established prefix contract until MLLMScheduler grows an
-    # explicit logits-processor capability (tracked separately).
-    _mllm_ignores_logits_processors = bool(getattr(engine, "is_mllm", False))
-    if _mllm_ignores_logits_processors and _glp is not None:
-        logger.warning(
-            "MLLM %s chat request cannot apply logits processors; discarding "
-            "the tool grammar and restoring the forced-assistant-prefix fallback",
-            "streaming" if request.stream else "non-streaming",
+    _glp = None
+    if not _mllm_ignores_logits_processors:
+        _glp = await _offload_tool_grammar_build(
+            engine, cfg, request, messages, resolved_thinking
         )
-        _glp = None
     # LINE① (#558) Option B — COUPLE the generation-time thinking budget to the
     # gated grammar. ``reasoning_gate_id is not None`` means the grammar's mask is
     # held OFF until ``</think>`` (runtime token-id gate), so a budget that
@@ -4410,6 +4404,14 @@ async def _create_chat_completion_impl(
         _forced_prefix = _compute_forced_tool_prefix(cfg, request)
     if _forced_prefix:
         chat_kwargs["forced_assistant_prefix"] = _forced_prefix
+    if _mllm_ignores_logits_processors and (
+        _forced_prefix or getattr(request, "reasoning_max_tokens", None) is not None
+    ):
+        logger.warning(
+            "MLLM %s chat request cannot apply logits processors; using the "
+            "forced-assistant-prefix fallback where available",
+            "streaming" if request.stream else "non-streaming",
+        )
 
     # PFlash routing (#287): structured-output prompts are
     # prompt-integrity-sensitive — lossy compression would corrupt the
