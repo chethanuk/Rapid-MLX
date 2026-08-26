@@ -270,6 +270,7 @@ struct SessionModelRestoreTests {
             sessionDefaults: defaults
         )
         server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in [] }
 
         let ready = await server.ensureServing(
             alias: chat.alias,
@@ -390,7 +391,10 @@ struct SessionModelRestoreTests {
 
         let firstReady = await server.ensureServing(
             alias: removedChat.alias,
-            hfPath: removedChat.hfRepo
+            hfPath: removedChat.hfRepo,
+            estimatedMemoryGB: nil,
+            replacementGroup: .assistant,
+            catalogEntryHint: removedChat
         )
         #expect(firstReady)
         #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)

@@ -1991,15 +1991,19 @@ final class ServerManager {
         let probedCatalogEntry = probedCatalogEntries.first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
+        let retainedCatalogHint = catalogEntryHint
+            ?? catalogProvenStartEntries[trimmedAlias.lowercased()]
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
             probed: probedCatalogEntry,
-            hint: catalogEntryHint
-                ?? catalogProvenStartEntries[trimmedAlias.lowercased()]
+            hint: probedCatalogEntries.isEmpty ? retainedCatalogHint : nil
         )
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }
         let provenanceKey = trimmedAlias.lowercased()
+        if !probedCatalogEntries.isEmpty {
+            catalogProvenStartEntries.removeValue(forKey: provenanceKey)
+        }
         if let probedCatalogEntry {
             if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
                 catalogProvenChatAliases.insert(provenanceKey)
