@@ -46,6 +46,32 @@ def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
     assert early_exit < union_check
 
 
+def test_linux_coverage_lane_has_template_support_and_deselects_known_baseline_failures() -> (
+    None
+):
+    _, workflow = _workflow()
+    linux = workflow["jobs"]["test-matrix"]
+    install = next(
+        step for step in linux["steps"] if step.get("name") == "Install dependencies"
+    )["run"]
+    run = next(
+        step
+        for step in linux["steps"]
+        if step.get("name") == "Run unit tests (no MLX required)"
+    )["run"]
+
+    assert "jinja2" in install.split()
+    assert (
+        "--deselect=tests/test_cohere_command_reasoning_parser.py::"
+        "test_prompt_priming_detects_command_markers_and_mixed_templates"
+    ) in run
+    assert (
+        "--deselect=tests/test_postprocessor.py::"
+        "TestStreamingPostProcessorReasoning::"
+        "test_1570_distill_parser_stays_active_when_thinking_flag_is_false"
+    ) in run
+
+
 def test_apple_coverage_roster_contains_only_tracked_tests() -> None:
     _, workflow = _workflow()
     apple_run = workflow["jobs"]["test-apple-silicon"]["steps"][-2]["run"]
