@@ -565,7 +565,13 @@ class ResidentModelManager:
                 await self._evict_locked(record, reason="idle_ttl")
             return evicted
 
-    async def _evict_for_locked(self, incoming_bytes: int, exclude: set[str]) -> None:
+    async def _evict_for_locked(
+        self,
+        incoming_bytes: int,
+        exclude: set[str],
+        *,
+        requested_role: str = "assistant",
+    ) -> None:
         if self.memory_limit_bytes <= 0:
             return
         while self._accounted_usage() + incoming_bytes > self.memory_limit_bytes:
@@ -585,11 +591,11 @@ class ResidentModelManager:
             if not candidates:
                 usage = self._accounted_usage()
                 raise ResidentModelCapacityError(
-                    reason="role_capacity_assistant",
+                    reason=f"role_capacity_{requested_role.replace('-', '_')}",
                     requested_bytes=incoming_bytes,
                     limit_bytes=self.memory_limit_bytes,
                     used_bytes=usage,
-                    requested_role="assistant",
+                    requested_role=requested_role,
                 )
             await self._evict_locked(candidates[0], reason="memory_pressure")
 
@@ -617,17 +623,11 @@ class ResidentModelManager:
                     requested_role=role,
                 )
             reserved_bytes = max(0, int(requested_bytes or 0))
-            if (
-                self.memory_limit_bytes > 0
-                and used + reserved_bytes > self.memory_limit_bytes
-            ):
-                raise ResidentModelCapacityError(
-                    reason=f"role_capacity_{role.replace('-', '_')}",
-                    requested_bytes=reserved_bytes,
-                    limit_bytes=self.memory_limit_bytes,
-                    used_bytes=used,
-                    requested_role=role,
-                )
+            await self._evict_for_locked(
+                reserved_bytes,
+                exclude=set(),
+                requested_role=role,
+            )
             record = ResidentRoleReservation(
                 role=role,
                 model_id=model_id,

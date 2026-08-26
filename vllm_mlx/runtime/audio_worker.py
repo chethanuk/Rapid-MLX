@@ -14,7 +14,7 @@ _T = TypeVar("_T")
 
 LANE_ROLES = {
     "stt": "speech-input",
-    "alignment": "speech-input",
+    "alignment": "alignment",
     "tts": "speech-output",
 }
 

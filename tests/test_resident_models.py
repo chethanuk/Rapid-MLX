@@ -512,6 +512,24 @@ async def test_speech_input_admission_rejects_unknown_and_over_budget_capacity()
 
 
 @pytest.mark.asyncio
+async def test_speech_input_admission_reuses_eligible_secondary_eviction():
+    manager, registry, loaded, _clock = manager_fixture(limit_gib=10)
+    secondary = await manager.load("secondary", estimated_bytes=3 * GIB)
+
+    async with manager.admit_role(
+        role="speech-input",
+        model_id="repo/whisper",
+        requested_bytes=4 * GIB,
+        capacity_source="catalog",
+    ):
+        assert "secondary" not in registry
+        assert secondary.entry.engine.stopped is True
+        assert manager.snapshot()["memory_used_bytes"] == 8 * GIB
+
+    assert "secondary" in loaded
+
+
+@pytest.mark.asyncio
 async def test_role_reservation_exact_boundary_and_failed_load_rollback():
     manager, _registry, _loaded, _clock = manager_fixture(limit_gib=6)
 

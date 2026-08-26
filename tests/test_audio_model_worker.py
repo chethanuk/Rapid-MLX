@@ -930,6 +930,16 @@ async def test_residency_snapshot_includes_audio_lane_truth(monkeypatch):
     }
 
 
+def test_alignment_lane_does_not_claim_dictation_role():
+    from vllm_mlx.runtime.audio_worker import AudioWorkerDispatcher
+
+    dispatcher = AudioWorkerDispatcher()
+    dispatcher.execute_sync("alignment", "aligner", "load", lambda: None)
+
+    assert dispatcher.snapshot()[0]["role"] == "alignment"
+    dispatcher.bind(None)
+
+
 @pytest.mark.asyncio
 async def test_primary_replacement_rebinds_after_audio_work_finishes(monkeypatch):
     import vllm_mlx.server as server
