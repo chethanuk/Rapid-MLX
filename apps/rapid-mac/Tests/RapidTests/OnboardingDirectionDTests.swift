@@ -787,21 +787,37 @@ struct OnboardingDirectionDTests {
             sizeOnDisk: nil,
             cached: true
         )
-        let starterBadges = QuickstartView.catalogRowBadges(entry: starter, available: true)
+        let starterBadges = QuickstartView.catalogRowBadges(
+            entry: starter,
+            available: true,
+            recommendedAlias: starter.alias
+        )
         #expect(starterBadges.map { $0.text } == ["RECOMMENDED", "ON THIS MAC"])
 
-        let plain = ModelEntry(alias: "qwen3.5-4b-4bit", hfRepo: "r", sizeOnDisk: nil, cached: false)
-        #expect(QuickstartView.catalogRowBadges(entry: plain, available: true).isEmpty,
+        let plain = ModelEntry(alias: "qwen3.5-9b-4bit", hfRepo: "r", sizeOnDisk: nil, cached: false)
+        #expect(QuickstartView.catalogRowBadges(
+            entry: plain,
+            available: true,
+            recommendedAlias: starter.alias
+        ).isEmpty,
                 "an ordinary uncached row makes no claim at all")
 
-        let cached = ModelEntry(alias: "qwen3.5-4b-4bit", hfRepo: "r", sizeOnDisk: nil, cached: true)
-        #expect(QuickstartView.catalogRowBadges(entry: cached, available: true)
+        let cached = ModelEntry(alias: "qwen3.5-9b-4bit", hfRepo: "r", sizeOnDisk: nil, cached: true)
+        #expect(QuickstartView.catalogRowBadges(
+            entry: cached,
+            available: true,
+            recommendedAlias: starter.alias
+        )
             .map { $0.text } == ["ON THIS MAC"])
 
         // WON'T FIT replaces the cached badge rather than stacking with it:
         // whether it is on disk stops being the useful fact once it cannot run.
         let tooBig = ModelEntry(alias: "llama3.1-70b-4bit", hfRepo: "r", sizeOnDisk: nil, cached: true)
-        #expect(QuickstartView.catalogRowBadges(entry: tooBig, available: false)
+        #expect(QuickstartView.catalogRowBadges(
+            entry: tooBig,
+            available: false,
+            recommendedAlias: starter.alias
+        )
             .map { $0.text } == ["WON'T FIT"])
     }
 

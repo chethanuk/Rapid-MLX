@@ -10,7 +10,7 @@ import SwiftUI
 /// card can still one-click install the demo model from the picker:
 ///
 ///   ┌── Quickstart ─────────────────────────────────┐
-///   │  lfm2.5-1b-4bit · Smallest model — fastest   │ ← RAM-blind, F-LWT-1
+///   │  qwen3.5-4b-4bit · Recommended first model   │ ← standard starter
 ///   │  first install                                │
 ///   ├── Recommended for your 18 GB Mac ─────────────┤
 ///   │  Recommended qwen3.5-9b-4bit   [amber row     │ ← the RAM tier's
@@ -86,7 +86,7 @@ struct ModelPickerBar: View {
 
     /// The alias the Quickstart flow is currently aimed at — the wizard's
     /// live selection (#1524) while a coordinator is attached, else the
-    /// fixed starter (lfm2.5-1b-4bit). This is the target the in-flight
+    /// standard starter when no coordinator is attached. This is the target the in-flight
     /// picker breadcrumb mirrors onto so the picker never shows a model
     /// that disagrees with what's downloading. The picker's *own*
     /// persistent "Quickstart" demo row is a separate, always-starter
@@ -644,15 +644,14 @@ struct ModelPickerBar: View {
         }
     }
 
-    /// F-LWT-1: dedicated single-row "Quickstart" section above the
-    /// RAM-aware Recommended section. RAM-blind by design — the
-    /// Quickstart alias is the same on every Mac (lfm2.5-1b-4bit is
-    /// the smallest first-impression install). Persists
+    /// Dedicated single-row "Quickstart" section above the RAM-aware
+    /// Recommended section. It exposes the standard starter after onboarding;
+    /// the first-run wizard itself applies the hardware/cache-aware policy. Persists
     /// across all Quickstart phases including ``.dismissed`` so a
     /// user who closed the Quickstart card can still come back and
     /// one-click install the demo model from the picker.
     ///
-    /// Row subtitle ("Smallest model — fastest first install") is
+    /// Row subtitle ("Recommended first model") is
     /// pinned by ``ModelPickerBar.quickstartSubtitle`` so the test
     /// suite catches accidental drift (the section's whole purpose
     /// is to be the bottom-anchored "I just want to try the app"
@@ -732,11 +731,9 @@ struct ModelPickerBar: View {
     /// Subtitle pinned to a single short phrase (~30 chars) so the
     /// "Quickstart" section copy stays anchored even if the file is
     /// later edited around it. The two candidates considered in
-    /// F-LWT-1 ("~1.5 min cold install" / "Smallest model — fastest
-    /// first impression") collapse to the second because the timing
-    /// promise depends on link speed — calling out "smallest /
-    /// fastest" is honest regardless of the user's bandwidth.
-    static let quickstartSubtitle: String = "Smallest model — fastest first install"
+    /// The row makes the product recommendation without promising a download
+    /// duration or claiming this quality-floor starter is the smallest model.
+    static let quickstartSubtitle: String = "Recommended first model"
 
     /// Resolve the safe picker default while the current user is still
     /// eligible for Quickstart. Kept pure so the retired-starter regression

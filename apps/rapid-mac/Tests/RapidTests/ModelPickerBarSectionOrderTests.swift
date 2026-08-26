@@ -6,7 +6,7 @@ import Testing
 /// a pinned order:
 ///
 ///   ┌── Quickstart ──────────────────────────────────────┐
-///   │  lfm2.5-1b-4bit · Smallest model — fastest first   │ ← RAM-blind during first run
+///   │  qwen3.5-4b-4bit · Recommended first model          │ ← standard starter
 ///   ├── Recommended for your <RAM> GB Mac ───────────────┤
 ///   │  Recommended <smart pick> · Faster <light pick>     │ ← RAM-tier measured pair
 ///   ├── All models (alphabetical) ───────────────────────┤
@@ -84,7 +84,7 @@ struct ModelPickerBarSectionOrderTests {
             eligible: true
         )
 
-        #expect(pick == "lfm2.5-1b-4bit")
+        #expect(pick == QuickstartCoordinator.defaultChoice.alias)
         #expect(pick != "bonsai-1.7b-2bit")
     }
 
