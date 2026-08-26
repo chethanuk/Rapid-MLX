@@ -1110,6 +1110,11 @@ class TextModel(nn.Module):
     @property
     def quant_predicate(self):
         def predicate(path, _module):
+            if ".ple.ple_embedding.ngram_embedding.shards." in path:
+                # The checkpoint's PLE tables have width 160.  Group 32 is the
+                # largest established MLX group that divides that width, so it
+                # preserves the source shape without a padding/slicing format.
+                return {"group_size": 32, "bits": 4}
             if path.endswith("mlp.gate") or path.endswith("shared_expert_gate"):
                 return {"group_size": 64, "bits": 8}
             return True

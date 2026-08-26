@@ -501,3 +501,23 @@ def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():
         in sanitized
     )
     assert all("visual" not in key and not key.startswith("mtp") for key in sanitized)
+
+
+def test_quantization_contract_uses_shape_exact_ple_groups_and_q8_routing():
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=_ple_args().__dict__))
+    predicate = model.quant_predicate
+
+    assert predicate(
+        "language_model.model.layers.1.ple.ple_embedding."
+        "ngram_embedding.shards.3",
+        object(),
+    ) == {"group_size": 32, "bits": 4}
+    assert predicate(
+        "language_model.model.layers.1.mlp.gate", object()
+    ) == {"group_size": 64, "bits": 8}
+    assert predicate(
+        "language_model.model.layers.1.mlp.shared_expert_gate", object()
+    ) == {"group_size": 64, "bits": 8}
+    assert predicate(
+        "language_model.model.layers.1.self_attn.q_proj", object()
+    ) is True
