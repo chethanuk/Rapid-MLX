@@ -66,6 +66,22 @@ struct QuickstartStarterPolicyTests {
         #expect(coordinator.seedMessage.contains("a model picked so you can start"))
     }
 
+    @Test("The automatic 8 GB choice keeps its lowest-memory spoken category")
+    func lowMemoryStarterAccessibilityCategory() {
+        let lowMemoryLabel = QuickstartRecommendedCard.accessibilityText(
+            for: QuickstartCoordinator.lowMemoryChoice,
+            sizeText: "720 MB"
+        )
+        let standardLabel = QuickstartRecommendedCard.accessibilityText(
+            for: QuickstartCoordinator.defaultChoice,
+            sizeText: "2.9 GB"
+        )
+
+        #expect(lowMemoryLabel.contains("Lowest memory"))
+        #expect(lowMemoryLabel.contains("recommended starter"))
+        #expect(!standardLabel.contains("Lowest memory"))
+    }
+
     @Test("The 8 GB starter provenance survives a deferred-seed relaunch")
     func baselineStarterSurvivesRelaunch() {
         let suite = "QuickstartStarterPolicyTests.relaunch.\(UUID().uuidString)"
