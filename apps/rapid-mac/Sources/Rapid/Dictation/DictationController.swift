@@ -326,22 +326,24 @@ final class DictationController {
     func serverStateDidChange(_ newState: ServerState) {
         guard isEnabled, !modelPreparationDeferred else { return }
         switch newState {
-        case .starting(let alias) where alias != modelAlias:
+        case .starting(let alias):
+            // `prewarmModel` owns an audio-only fallback while its flight is
+            // present. A same-alias transition with no such flight is an
+            // external restart (for example ServerManager auto-respawn) and
+            // must reconcile just like a chat-process replacement.
+            guard alias != modelAlias || prewarmTask == nil else { break }
             cancelActiveSessionForModelChange()
             cancelModelPreparation()
             hotkey.stop()
             phase = .preparingModel
-        case .ready(let alias) where alias != modelAlias:
+        case .ready(let alias):
+            guard alias != modelAlias || prewarmTask == nil else { break }
             cancelActiveSessionForModelChange()
             hotkey.stop()
             phase = .preparingModel
             Task { [weak self] in
                 await self?.enable(replacingCurrentPrewarm: true)
             }
-        case .starting, .ready:
-            // This controller initiated its audio-only fallback; its in-flight
-            // preparation owns the transition and must not cancel itself.
-            break
         case .crashed, .stopped, .idle, .missing:
             cancelActiveSessionForModelChange()
             cancelModelPreparation()

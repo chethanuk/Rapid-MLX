@@ -460,23 +460,63 @@ struct DictationTests {
     }
 
     @MainActor
-    @Test("audio-only fallback transitions do not cancel their own preparation")
-    func audioFallbackDoesNotSelfCancel() {
+    @Test("audio-only fallback transitions do not cancel their owning preparation flight")
+    func audioFallbackDoesNotSelfCancel() async {
+        var warmupContinuation: CheckedContinuation<Bool, Never>?
         var prewarmCount = 0
         let controller = readinessController(
-            phase: .preparingModel,
             prewarm: {
                 prewarmCount += 1
-                return true
+                return await withCheckedContinuation { warmupContinuation = $0 }
             },
             hotkeyStart: { true }
         )
 
+        let enabling = Task { await controller.enable() }
+        while warmupContinuation == nil { await Task.yield() }
         controller.serverStateDidChange(.starting(alias: "whisper-small"))
         controller.serverStateDidChange(.ready(alias: "whisper-small"))
 
         #expect(controller.phase == .preparingModel)
-        #expect(prewarmCount == 0)
+        #expect(prewarmCount == 1)
+        warmupContinuation?.resume(returning: true)
+        await enabling.value
+        #expect(controller.phase == .idle)
+    }
+
+    @MainActor
+    @Test("audio-only auto-respawn re-arms enabled dictation")
+    func audioFallbackAutoRespawnRearms() async {
+        var warmupContinuation: CheckedContinuation<Bool, Never>?
+        var prewarmCount = 0
+        var hotkeyStartCount = 0
+        let controller = readinessController(
+            phase: .idle,
+            prewarm: {
+                prewarmCount += 1
+                return await withCheckedContinuation { warmupContinuation = $0 }
+            },
+            hotkeyStart: {
+                hotkeyStartCount += 1
+                return true
+            }
+        )
+
+        controller.serverStateDidChange(.crashed(
+            alias: "whisper-small",
+            message: "fixture crash"
+        ))
+        controller.serverStateDidChange(.starting(alias: "whisper-small"))
+        #expect(controller.phase == .preparingModel)
+        controller.serverStateDidChange(.ready(alias: "whisper-small"))
+        while warmupContinuation == nil { await Task.yield() }
+        #expect(prewarmCount == 1)
+        #expect(hotkeyStartCount == 0)
+
+        warmupContinuation?.resume(returning: true)
+        for _ in 0..<20 where controller.phase != .idle { await Task.yield() }
+        #expect(controller.phase == .idle)
+        #expect(hotkeyStartCount == 1)
     }
 
     @MainActor
