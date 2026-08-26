@@ -197,7 +197,7 @@ struct MemoryLoadConfirmationQueueTests {
         queue.enqueue(warning: original, requestID: nil)
 
         let result = queue.refreshCurrentWarning(
-            snapshot: .init(totalBytes: 32 * gib, usedBytes: 2 * gib)
+            snapshot: .init(totalBytes: 32 * gib, usedBytes: 7 * gib)
         )
         let refreshed = try #require(result)
 

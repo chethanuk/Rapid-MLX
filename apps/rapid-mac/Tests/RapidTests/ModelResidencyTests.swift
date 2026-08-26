@@ -28,10 +28,19 @@ struct ModelResidencyTests {
                 "estimated_bytes": 6335076761,
                 "measured_bytes": 5905580032,
                 "idle_seconds": 12.5,
-                "performance": {
+              "performance": {
                   "kv_cache_turboquant": "k8v4",
                   "prefix_cache_enabled": true,
                   "cache_memory_mb": 4096
+                },
+                "replacement_projection": {
+                  "strategy": "evict_first_if_needed",
+                  "models_to_free": [{"id": "old-chat", "estimated_bytes": 6335076761}],
+                  "current_bytes": 10737418240,
+                  "requested_bytes": 6335076761,
+                  "projected_bytes": 10737418240,
+                  "limit_bytes": 34359738368,
+                  "reason": "role_capacity_evict_first_required"
                 }
               }]
             }
@@ -56,6 +65,8 @@ struct ModelResidencyTests {
                 cacheMemoryMB: 4096
             )
         ))
+        #expect(snapshot.models.first?.replacementProjection?.modelsToFree.first?.id == "old-chat")
+        #expect(snapshot.models.first?.replacementProjection?.reason == "role_capacity_evict_first_required")
         #expect(snapshot.audioLanes.isEmpty, "older snapshots remain compatible")
     }
 
@@ -364,6 +375,195 @@ struct ModelResidencyTests {
         #expect(ModelSizing.residentMemoryCeilingGB(on: mockMac(ramGB: 4)) == 4)
     }
 
+    @Test("18 GB smart-to-fast replacement credits the measured resident chat model")
+    func smartToFastReplacementDoesNotWarn() throws {
+        let picks = RAMBucketedDefault.picks(forPhysicalRAMGB: 18)
+        let smart = try #require(picks.first)
+        let fast = try #require(picks.last)
+        #expect(smart.alias == "qwen3.5-9b-4bit")
+        #expect(fast.alias == "qwen3.5-4b-4bit")
+
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14.6),
+            residency: residency(
+                alias: smart.alias,
+                measuredGB: 6.3,
+                modality: "text"
+            ),
+            plan: .releaseResidentModels
+        ))
+        let safety = ModelSizing.memorySafety(
+            footprintGB: ModelSizing.estimate(alias: fast.alias).totalGB,
+            usedBytes: admission.snapshot.usedBytes,
+            totalBytes: admission.snapshot.totalBytes
+        )
+
+        #expect(admission.plannedReleaseBytes == UInt64(6.3 * Double(UInt64(1) << 30)))
+        #expect(!ModelSizing.requiresMemoryConfirmation(safety))
+    }
+
+    @Test("Replacing a smaller chat model with 27B still warns")
+    func smallerToLargerReplacementStillWarns() throws {
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 32, usedGB: 20),
+            residency: residency(
+                alias: "qwen3.5-4b-4bit",
+                measuredGB: 4,
+                modality: "text"
+            ),
+            plan: .releaseResidentModels
+        ))
+        let safety = ModelSizing.memorySafety(
+            footprintGB: ModelSizing.estimate(alias: "qwen3.8-27b-4bit").totalGB,
+            usedBytes: admission.snapshot.usedBytes,
+            totalBytes: admission.snapshot.totalBytes
+        )
+
+        #expect(ModelSizing.requiresMemoryConfirmation(safety))
+    }
+
+    @Test("Chat-to-image replacement credits the outgoing chat model")
+    func chatToImageReplacementDoesNotWarn() throws {
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14.6),
+            residency: residency(
+                alias: "qwen3.5-9b-4bit",
+                measuredGB: 6.3,
+                modality: "text"
+            ),
+            plan: .releaseResidentModels
+        ))
+        let safety = ModelSizing.memorySafety(
+            footprintGB: ModelSizing.estimate(alias: "flux2-klein-4b").totalGB,
+            usedBytes: admission.snapshot.usedBytes,
+            totalBytes: admission.snapshot.totalBytes
+        )
+
+        #expect(!ModelSizing.requiresMemoryConfirmation(safety))
+    }
+
+    @Test("Image-to-chat replacement credits the outgoing image model")
+    func imageToChatReplacementDoesNotWarn() throws {
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14),
+            residency: residency(
+                alias: "flux2-klein-4b",
+                measuredGB: 5.9,
+                modality: "image-gen"
+            ),
+            plan: .releaseResidentModels
+        ))
+        let safety = ModelSizing.memorySafety(
+            footprintGB: ModelSizing.estimate(alias: "qwen3.5-4b-4bit").totalGB,
+            usedBytes: admission.snapshot.usedBytes,
+            totalBytes: admission.snapshot.totalBytes
+        )
+
+        #expect(!ModelSizing.requiresMemoryConfirmation(safety))
+    }
+
+    @Test("Process replacement also credits an outgoing audio-only lane")
+    func processReplacementCreditsAudioLane() throws {
+        let host = memorySnapshot(totalGB: 18, usedGB: 14.6)
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: host,
+            residency: residency(alias: "qwen3-asr", measuredGB: 6, modality: "audio"),
+            plan: .releaseResidentModels
+        ))
+
+        #expect(admission.plannedReleaseBytes == 6 * UInt64(1 << 30))
+        #expect(admission.snapshot.usedBytes < host.usedBytes)
+    }
+
+    @Test("No resident evidence preserves the ordinary live admission probe")
+    func noResidentLeavesAdmissionUnchanged() {
+        #expect(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14.6),
+            residency: .empty,
+            plan: .releaseResidentModels
+        ) == nil)
+    }
+
+    @Test("Engine replacement projection produces a truthful insufficient-budget reason")
+    func replacementProjectionRejectionCopy() {
+        let gib = UInt64(1) << 30
+        let projection = ResidentReplacementProjection(
+            strategy: "evict_first_if_needed",
+            modelsToFree: [.init(id: "old-chat", estimatedBytes: 6 * gib)],
+            currentBytes: 12 * gib,
+            requestedBytes: 20 * gib,
+            projectedBytes: 26 * gib,
+            limitBytes: 24 * gib,
+            reason: "role_capacity_insufficient_after_eviction"
+        )
+
+        let message = projection.rejectionMessage(alias: "qwen3.8-27b-4bit")
+        #expect(message?.contains("release about 6 GB") == true)
+        #expect(message?.contains("26 GB") == true)
+        #expect(message?.contains("24 GB model-memory budget") == true)
+        #expect(message?.contains("close some apps") == false)
+    }
+
+    @Test("A keep-resident plan receives no release credit when both models fit")
+    func keepBothFitsWithoutEvictionCredit() throws {
+        let host = memorySnapshot(totalGB: 32, usedGB: 10)
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: host,
+            residency: residency(
+                alias: "qwen3.5-4b-4bit",
+                measuredGB: 4,
+                modality: "text"
+            ),
+            plan: .keepResidentModels
+        ))
+        #expect(admission.snapshot == host)
+        #expect(admission.plannedReleaseBytes == 0)
+        #expect(ModelSizing.memorySafety(
+            footprintGB: 4,
+            usedBytes: admission.snapshot.usedBytes,
+            totalBytes: admission.snapshot.totalBytes
+        ) == .safe)
+    }
+
+    private func memorySnapshot(totalGB: Double, usedGB: Double) -> MemoryProbe.Snapshot {
+        let gib = Double(UInt64(1) << 30)
+        return MemoryProbe.Snapshot(
+            totalBytes: UInt64(totalGB * gib),
+            usedBytes: UInt64(usedGB * gib)
+        )
+    }
+
+    private func residency(
+        alias: String,
+        measuredGB: Double,
+        modality: String
+    ) -> ModelResidencySnapshot {
+        let gib = Double(UInt64(1) << 30)
+        let measuredBytes = UInt64(measuredGB * gib)
+        let status = ResidentModelStatus(
+            id: alias,
+            modelPath: "repo/\(alias)",
+            aliases: [alias],
+            modality: modality,
+            state: "resident",
+            pinned: false,
+            primary: true,
+            activeRequests: 0,
+            estimatedBytes: measuredBytes,
+            measuredBytes: measuredBytes,
+            idleSeconds: 0
+        )
+        return ModelResidencySnapshot(
+            memoryLimitBytes: UInt64(18 * gib),
+            memoryUsedBytes: measuredBytes,
+            memoryAvailableBytes: nil,
+            idleTTLSeconds: 0,
+            loadsTotal: 1,
+            evictionsTotal: 0,
+            models: [status]
+        )
+    }
+
     @Test("Residency load sends typed performance config and reload intent")
     func loadRequestCarriesPerformance() async throws {
         ResidencyLoadCaptureProtocol.capturedBody = nil
@@ -376,6 +576,8 @@ struct ModelResidencyTests {
             alias: "qwen3.5-4b-4bit",
             hfPath: "mlx-community/Qwen3.5-4B-MLX-4bit",
             estimatedSizeGB: 4,
+            replaceGroup: .assistant,
+            memoryPolicy: .evictFirstIfNeeded,
             imageMode: .editing,
             performance: ModelPerfConfig(
                 kvCacheMode: .turboquantK8V4,
@@ -394,6 +596,8 @@ struct ModelResidencyTests {
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let performance = try #require(json["performance"] as? [String: Any])
         #expect(json["reload_if_changed"] as? Bool == true)
+        #expect(json["replace_group"] as? String == "assistant")
+        #expect(json["memory_policy"] as? String == "evict_first_if_needed")
         #expect(json["image_mode"] as? String == "editing")
         #expect(performance["kv_cache_dtype"] == nil)
         #expect(performance["kv_cache_turboquant"] as? String == "k8v4")

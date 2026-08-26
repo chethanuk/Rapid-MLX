@@ -90,6 +90,26 @@ struct RAMBucketedDefaultTests {
         #expect(tier96[1].alias == "qwen3.6-35b-4bit")
     }
 
+    @Test("A tier's measured smart and fast picks never trigger the risky confirmation")
+    func tierPicksStayBelowBlockingGuardrail() {
+        let gib = Double(UInt64(1) << 30)
+        for tier in RAMBucketedDefault.tiers {
+            for pick in tier.picks {
+                // The transition plan has already released the outgoing model.
+                // Pin the boundary at exactly physical RAM: advisory is allowed,
+                // but a curated pick must not be blocked as "risky" there.
+                let baselineGB = max(0, tier.floorGB - pick.footprintGB)
+                let safety = ModelSizing.memorySafety(
+                    footprintGB: pick.footprintGB,
+                    usedBytes: UInt64(baselineGB * gib),
+                    totalBytes: UInt64(tier.floorGB * gib)
+                )
+                #expect(!ModelSizing.requiresMemoryConfirmation(safety),
+                        "\(pick.alias) must load on its own \(tier.floorGB) GB tier")
+            }
+        }
+    }
+
     // MARK: - Launch flags travel with the recommendation, gated by RAM
 
     @Test("Flags apply only when the alias IS the pick for that Mac's RAM")
