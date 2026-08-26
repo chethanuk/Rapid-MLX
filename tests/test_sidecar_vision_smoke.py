@@ -22,6 +22,11 @@ def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
     assert not _MODULE._completion_is_sensible("")
     assert not _MODULE._completion_is_sensible("Internal server error")
     assert not _MODULE._completion_is_sensible("A blue square is visible.")
+    assert not _MODULE._completion_is_sensible("I cannot identify the animal.")
+    assert not _MODULE._completion_is_sensible("I cannot identify the cat.")
+    assert not _MODULE._completion_is_sensible(
+        "The animal might be a cat, but I am unsure."
+    )
 
 
 def test_release_workflow_runs_content_addressed_real_image_gate() -> None:

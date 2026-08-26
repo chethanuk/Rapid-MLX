@@ -27,7 +27,18 @@ def _completion_is_sensible(text: object) -> bool:
     if not isinstance(text, str):
         return False
     words = {word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()}
-    return len(words) >= 3 and bool(words & {"cheetah", "cat", "feline", "animal"})
+    fixture_labels = {"cheetah", "leopard", "cat", "feline"}
+    uncertainty = {
+        "cannot",
+        "can't",
+        "unable",
+        "unclear",
+        "unknown",
+        "unsure",
+        "not",
+        "no",
+    }
+    return len(words) >= 3 and bool(words & fixture_labels) and not words & uncertainty
 
 
 def _request_json(url: str, payload: dict | None, timeout: float) -> dict:
