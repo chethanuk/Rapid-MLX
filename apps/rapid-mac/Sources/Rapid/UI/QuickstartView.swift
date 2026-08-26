@@ -336,6 +336,11 @@ final class QuickstartCoordinator {
         var excluded = CacheAwareDefault.retiredAutomaticAliases
         if baseline.alias != lowMemoryChoice.alias {
             excluded.insert(lowMemoryChoice.alias)
+        } else {
+            // Clean 8 GB validation puts the 2.6B option beyond the usable-RAM
+            // guard. A cached copy still avoids a download, but does not make
+            // that load safe enough to become the automatic first run.
+            excluded.insert(compactDefaultChoice.alias)
         }
         guard let alias = CacheAwareDefault.pick(
             catalog: eligibleCatalog,

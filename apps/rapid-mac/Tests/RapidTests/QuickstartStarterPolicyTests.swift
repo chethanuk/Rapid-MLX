@@ -131,6 +131,19 @@ struct QuickstartStarterPolicyTests {
         ).alias == "lfm2.5-1b-4bit")
     }
 
+    @Test("A cached 2.6B model cannot bypass the safe 8 GB automatic baseline")
+    func cachedCompactUpgradeRemainsManual() {
+        let catalog = [
+            entry("lfm2.5-1b-4bit"),
+            entry("lfm2.5-2.6b-4bit", cached: true),
+            entry("qwen3.5-4b-4bit"),
+        ]
+
+        #expect(QuickstartCoordinator.defaultChoice(
+            hardware: hardware(8), catalog: catalog
+        ).alias == "lfm2.5-1b-4bit")
+    }
+
     @Test("The chooser presents one hardware-fit starter, not two competing recommendations")
     func shortlistHasOneStarter() {
         let catalog = [
