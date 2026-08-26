@@ -858,6 +858,63 @@ def test_rapid_mlx_not_on_path_marks_fail(tmp_path: Path):
     assert "NOT on $PATH" in path_row.label
 
 
+def test_running_exe_mismatch_with_path_warns(tmp_path: Path):
+    """Issue #2352: PATH resolves a different rapid-mlx than the one actually
+    running this doctor (e.g. a venv/bin that precedes a global install) →
+    WARN with BOTH paths and an actionable fix, rather than a silently-green
+    PATH row that points troubleshooting at the wrong install."""
+    section = eh.section_shell_integration(
+        which=lambda name: (
+            "/Users/x/.local/bin/rapid-mlx" if name == "rapid-mlx" else None
+        ),
+        rcs=[tmp_path / "missing.zshrc"],
+        running_exe="/private/tmp/env/bin/rapid-mlx",
+    )
+    mismatch = next(c for c in section.checks if "differs from the $PATH" in c.label)
+    assert mismatch.status is eh.CheckStatus.WARN
+    assert "/private/tmp/env/bin/rapid-mlx" in mismatch.label
+    assert "/Users/x/.local/bin/rapid-mlx" in mismatch.label
+    assert "activate this environment" in mismatch.label
+    # The PATH row itself is still OK (it IS on PATH); only the divergence warns.
+    path_row = next(c for c in section.checks if "in $PATH" in c.label)
+    assert path_row.status is eh.CheckStatus.OK
+
+
+def test_running_exe_matching_path_has_no_mismatch_warn(tmp_path: Path):
+    """When the running CLI and the PATH-resolved CLI agree, no mismatch warn."""
+    section = eh.section_shell_integration(
+        which=lambda name: (
+            "/private/tmp/env/bin/rapid-mlx" if name == "rapid-mlx" else None
+        ),
+        rcs=[tmp_path / "missing.zshrc"],
+        running_exe="/private/tmp/env/bin/rapid-mlx",
+    )
+    assert not any("differs from the $PATH" in c.label for c in section.checks)
+
+
+def test_running_cli_exe_prefers_argv0(monkeypatch):
+    """``_running_cli_exe`` uses sys.argv[0] (the console-script path) when it
+    resolves to a `rapid-mlx` entry point."""
+    monkeypatch.setattr(eh.sys, "argv", ["/opt/venv/bin/rapid-mlx", "doctor"])
+    assert eh._running_cli_exe() == "/opt/venv/bin/rapid-mlx"
+
+
+def test_running_cli_exe_falls_back_to_executable_sibling(monkeypatch):
+    """When sys.argv[0] isn't a `rapid-mlx` script (e.g. python -m), fall back
+    to the `rapid-mlx` console script beside sys.executable."""
+    monkeypatch.setattr(eh.sys, "argv", ["-m", "rapid_mlx.doctor"])
+    monkeypatch.setattr(eh.sys, "executable", "/opt/venv/bin/python")
+    monkeypatch.setattr(eh.os.path, "exists", lambda p: p == "/opt/venv/bin/rapid-mlx")
+    assert eh._running_cli_exe() == "/opt/venv/bin/rapid-mlx"
+
+
+def test_running_cli_exe_uses_executable_when_named_rapid_mlx(monkeypatch):
+    """If sys.executable itself is `rapid-mlx` (rare direct exec), return it."""
+    monkeypatch.setattr(eh.sys, "argv", ["-m", "rapid_mlx.doctor"])
+    monkeypatch.setattr(eh.sys, "executable", "/opt/venv/bin/rapid-mlx")
+    assert eh._running_cli_exe() == "/opt/venv/bin/rapid-mlx"
+
+
 # ---------------------------------------------------------------------------
 # Exit-code aggregation
 # ---------------------------------------------------------------------------
