@@ -4329,12 +4329,13 @@ async def _create_chat_completion_impl(
     # schema as ineligible and returns ``None`` (silent free-form), which under
     # default-on would drop the structural guarantee the operator asked for.
     # The serialized MLLM scheduler cannot consume text-lane logits processors.
-    # Detect that capability boundary before schema validation / compilation so
-    # an MLLM request cannot spend CPU or occupy a shared grammar-build slot for
-    # a processor that generation would silently drop.
+    # Detect that capability boundary before compilation so an MLLM request
+    # cannot spend CPU or occupy a shared grammar-build slot for a processor
+    # that generation would silently drop. Keep the cheap schema bounds guard
+    # on every lane: it also prevents oversized client schemas from reaching
+    # prompt rendering even when constrained decoding is unavailable.
     _mllm_ignores_logits_processors = bool(getattr(engine, "is_mllm", False))
-    if not _mllm_ignores_logits_processors:
-        _enforce_tool_grammar_bounds_or_400(cfg, request)
+    _enforce_tool_grammar_bounds_or_400(cfg, request)
     # LINE① (#558): decide reasoning-gated forced-grammar eligibility. Engage only
     # when a thinking budget is set AND the template PREFILLS an unclosed
     # ``<think>`` (seed state "open") — the exact condition under which the coupled
