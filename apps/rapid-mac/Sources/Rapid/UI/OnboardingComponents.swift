@@ -167,9 +167,7 @@ struct QuickstartRecommendedCard: View {
                         Text(choice.displayName)
                             .scaledSystemFont(15, weight: .semibold)
                             .foregroundStyle(RapidTheme.textPrimary)
-                        if choice.isStarter {
-                            OnboardingBadge(text: "START HERE", tone: .ink)
-                        }
+                        OnboardingBadge(text: "START HERE", tone: .ink)
                         Spacer(minLength: 8)
                         if !sizeText.isEmpty {
                             Text(sizeText)
@@ -204,7 +202,7 @@ struct QuickstartRecommendedCard: View {
     /// and blurb only.
     private var accessibilityText: String {
         var parts = [choice.displayName]
-        if choice.isStarter { parts.append("recommended starter") }
+        parts.append("recommended starter")
         parts.append(choice.blurb)
         if !sizeText.isEmpty { parts.append("download \(sizeText)") }
         parts.append("on-device, fits this Mac")

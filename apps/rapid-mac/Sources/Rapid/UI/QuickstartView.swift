@@ -389,7 +389,7 @@ final class QuickstartCoordinator {
     /// manually selected alternative gets a plainer intro without implying it
     /// was downloaded specifically for setup.
     var seedMessage: String {
-        if selection.isStarter {
+        if selection.alias == baselineStarterAlias {
             return """
 You're chatting with \(selection.displayName) — a model picked so you can start \
 chatting in about a minute. Open the picker any time to trade up to a larger \
@@ -413,6 +413,10 @@ Open the picker any time to switch models.
     /// ContentView visibility gate's alias check) reads this instead of
     /// a pinned constant.
     private(set) var selection: QuickstartModelChoice = QuickstartCoordinator.defaultChoice
+    /// RAM-only starter identity for this launch. Unlike ``choice.tier``, this
+    /// is contextual: 1.2B is the starter below 16 GB and remains the explicit
+    /// low-memory fallback everywhere else.
+    private var baselineStarterAlias = QuickstartCoordinator.defaultChoice.alias
     /// False after the user or persisted session chose a concrete model, so a
     /// later catalog refresh can never replace explicit intent.
     private var selectionUsesAutomaticPolicy = true
@@ -734,6 +738,7 @@ Open the picker any time to switch models.
     /// the selection is still automatic.
     func applyDefaultChoice(hardware: MacHardware, catalog: [ModelEntry]) {
         guard case .idle = phase, selectionUsesAutomaticPolicy else { return }
+        baselineStarterAlias = Self.baselineChoice(hardware: hardware).alias
         selection = Self.defaultChoice(hardware: hardware, catalog: catalog)
     }
 
@@ -741,6 +746,7 @@ Open the picker any time to switch models.
     /// cache refreshes must not retarget a starter the chooser already shows.
     func settleDefaultChoice(hardware: MacHardware, catalog: [ModelEntry]) {
         guard case .idle = phase, selectionUsesAutomaticPolicy else { return }
+        baselineStarterAlias = Self.baselineChoice(hardware: hardware).alias
         selection = Self.defaultChoice(hardware: hardware, catalog: catalog)
         selectionUsesAutomaticPolicy = false
     }

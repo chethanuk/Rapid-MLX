@@ -62,6 +62,20 @@ struct QuickstartStarterPolicyTests {
         coordinator.applyDefaultChoice(hardware: hardware(8), catalog: [])
 
         #expect(coordinator.selection.alias == "lfm2.5-1b-4bit")
+        #expect(coordinator.seedMessage.contains("a model picked so you can start"))
+    }
+
+    @Test("The 1.2B choice remains a fallback, not a starter, on a 16 GB Mac")
+    func lowMemoryChoiceIsContextual() {
+        let coordinator = QuickstartCoordinator()
+        coordinator.applyDefaultChoice(
+            hardware: hardware(16),
+            catalog: [entry("qwen3.5-4b-4bit"), entry("lfm2.5-1b-4bit")]
+        )
+        coordinator.select(QuickstartCoordinator.lowMemoryChoice)
+
+        #expect(!coordinator.seedMessage.contains("a model picked so you can start"))
+        #expect(coordinator.seedMessage.contains("running entirely on your Mac"))
     }
 
     @Test("An eligible cached chat model wins without a download")
