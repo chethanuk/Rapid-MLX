@@ -65,6 +65,8 @@ def test_batch_generator_prefill_enters_owned_stream(monkeypatch) -> None:
     """Vision prefill executes under the generator-owned stream context."""
     from contextlib import contextmanager
 
+    from mlx_lm.models import cache as cache_module
+
     from vllm_mlx import mllm_batch_generator as module
 
     owned_stream = object()
@@ -86,6 +88,9 @@ def test_batch_generator_prefill_enters_owned_stream(monkeypatch) -> None:
         RuntimeError("prefill reached")
     )
     request = SimpleNamespace(input_ids=SimpleNamespace(size=1))
+    monkeypatch.setattr(
+        cache_module, "make_prompt_cache", lambda _model: object(), raising=False
+    )
     monkeypatch.setattr(module.mx, "stream", stream_context)
     monkeypatch.setattr(module, "_prefill_cap_violation", lambda *_args: None)
 
