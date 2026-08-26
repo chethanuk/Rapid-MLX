@@ -987,6 +987,7 @@ async def test_replacement_evicts_first_only_when_that_makes_target_fit():
         replace_group="assistant",
         replace_mode="wait",
         memory_policy="evict_first_if_needed",
+        resolved_group="assistant",
     )
 
     assert load_observations == [(True, None)]
@@ -1058,6 +1059,7 @@ async def test_evict_first_projection_reuses_idle_lru_for_remaining_capacity():
         estimated_bytes=10 * GIB,
         replace_group="assistant",
         memory_policy="evict_first_if_needed",
+        resolved_group="assistant",
     )
 
     assert replacement.replacement_projection is not None
@@ -1110,6 +1112,7 @@ async def test_evict_first_load_failure_reports_primary_absent_without_rollback(
             estimated_bytes=4 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     assert old_engine.stopped is True
@@ -1144,6 +1147,7 @@ async def test_evict_first_stop_failure_finishes_handoff_as_primary_absent():
             estimated_bytes=4 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     loader.assert_not_awaited()
@@ -1182,6 +1186,7 @@ async def test_evict_first_primary_callback_failure_reopens_old_admission():
             estimated_bytes=4 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     loader.assert_not_awaited()
@@ -1242,6 +1247,7 @@ async def test_evict_first_partial_target_publication_is_cleared_on_failure():
             estimated_bytes=4 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     assert loaded[0].stopped is True
@@ -1289,6 +1295,7 @@ async def test_evict_first_cleanup_callback_failure_does_not_mask_publish_error(
             estimated_bytes=4 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     assert "Failed to clear rejected replacement primary" in caplog.text
@@ -1317,6 +1324,7 @@ async def test_replacement_rejects_before_eviction_when_target_still_does_not_fi
             estimated_bytes=8 * GIB,
             replace_group="assistant",
             memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
         )
 
     projection = exc_info.value.replacement_projection
@@ -1337,6 +1345,53 @@ async def test_manager_rejects_unknown_memory_policy():
 
     with pytest.raises(ResidentModelError, match="unsupported memory policy"):
         await manager.load("chat-new", memory_policy="invented")
+
+
+@pytest.mark.asyncio
+async def test_evict_first_rejects_known_wrong_group_before_retiring_primary():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(ResidentModelError, match="image-gen.*not 'assistant'"):
+        await manager.load(
+            "image-model",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+            resolved_group="image-gen",
+        )
+
+    loader.assert_not_awaited()
+    assert old_engine.pauses == []
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+
+
+@pytest.mark.asyncio
+async def test_evict_first_falls_back_to_safe_admission_without_group_metadata():
+    manager, registry, loaded, _ = manager_fixture(limit_gib=6)
+
+    with pytest.raises(ResidentModelCapacityError):
+        await manager.load(
+            "unknown-model",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    assert loaded == {}
+    assert registry.default_name == "chat"
+    assert registry.get_engine("chat").stopped is False
 
 
 @pytest.mark.asyncio

@@ -127,6 +127,13 @@ async def load_resident_model(request: ModelLoadRequest):
         profile = resolve_profile(request.model) or (
             resolve_profile(request.model_path) if request.model_path else None
         )
+        resolved_group = None
+        if profile is not None:
+            resolved_group = (
+                "assistant"
+                if profile.modality in {"text", "vision"}
+                else profile.modality
+            )
         if (
             performance is not None
             and profile is not None
@@ -158,6 +165,7 @@ async def load_resident_model(request: ModelLoadRequest):
             reload_if_changed=request.reload_if_changed,
             replace_mode=request.replace_mode,
             memory_policy=request.memory_policy,
+            resolved_group=resolved_group,
         )
     except HTTPException:
         raise

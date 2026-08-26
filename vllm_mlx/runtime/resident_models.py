@@ -588,6 +588,7 @@ class ResidentModelManager:
         reload_if_changed: bool = False,
         replace_mode: str = "reject",
         memory_policy: str = "keep_then_commit",
+        resolved_group: str | None = None,
     ) -> ResidencyRecord:
         model_name = model_name.strip()
         if not model_name:
@@ -652,6 +653,11 @@ class ResidentModelManager:
             projection: ReplacementProjection | None = None
             try:
                 if replace_group is not None:
+                    if resolved_group is not None and resolved_group != replace_group:
+                        raise ResidentModelError(
+                            f"model {model_name!r} belongs to replacement group "
+                            f"{resolved_group!r}, not {replace_group!r}"
+                        )
                     if replace_mode == "reject":
                         # Preserve the established busy-before-capacity
                         # contract without evicting anything: the zero-timeout
@@ -670,7 +676,11 @@ class ResidentModelManager:
                     projection = self._replacement_projection_locked(
                         estimate,
                         candidates,
-                        memory_policy,
+                        (
+                            memory_policy
+                            if resolved_group == replace_group
+                            else "keep_then_commit"
+                        ),
                     )
                     if projection.reason == "role_capacity_insufficient_after_eviction":
                         raise ResidentModelCapacityError(
