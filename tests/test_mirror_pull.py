@@ -4363,3 +4363,81 @@ def test_mirror_hf_relink_of_local_blob_is_not_a_fetch(
         "re-linking a locally-cached blob is NOT a fetch (Codex #2392)"
     )
     assert out["transferred_bytes"] == 0
+
+
+def test_mirror_hf_nonnfs_relink_of_local_blob_is_not_a_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-LFS HF re-link from an ALREADY-LOCAL blob is not a fetch (Codex
+    #2392 R4 BLOCKING).
+
+    R2 misses the file; the HF fallback finds its blob already in HF's local
+    cache (no catalog sha256 exposed for non-LFS files) and only re-links the
+    snapshot symlink — zero bytes cross the wire. The old
+    ``expected_sha256``-only ``blob_already_local`` check left such files
+    always classified ``"hf"`` (over-counting ``transferred_bytes``). The
+    blob-store fingerprint before vs after the HF call catches this kind too:
+    unchanged store -> ``"cached"``.
+    """
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    revision = "0badf00d" * 5
+    # No sha256 — a non-LFS metadata file. Its blob key lives only in HF's
+    # own cache, not the catalog.
+    files = [("config.json", 100)]
+    catalog = _catalog_payload([("qwen3-0.6b-4bit", repo_id, "mirrored")])
+
+    router = _UrlRouter()
+    router.add(
+        "https://models.rapidmlx.com/api/models",
+        _FakeResponse(200, json.dumps(catalog).encode()),
+    )
+    # R2 misses the file — it falls back to HF.
+    router.add(
+        "https://models.rapidmlx.com/mlx-community/Qwen3-0.6B-4bit/config.json",
+        _FakeResponse(404, b""),
+    )
+
+    repo_root = Path(tmp_path) / f"models--{repo_id.replace('/', '--')}"
+    # A blob for this non-LFS file is ALREADY in HF's local cache before the
+    # pull (warm). We don't know its key from the catalog — but the store is
+    # non-empty, which is what the before/after fingerprint needs to rule out
+    # the "empty store forces a download" tautology.
+    blob_dir = repo_root / "blobs"
+    blob_dir.mkdir(parents=True, exist_ok=True)
+    (blob_dir / "already-local-blob").write_bytes(b"x" * 100)
+
+    def _fake_hf(repo_id, filename, revision, cache_dir=None, **kwargs):
+        snap = (
+            Path(cache_dir)
+            / f"models--{repo_id.replace('/', '--')}"
+            / "snapshots"
+            / revision
+        )
+        snap.mkdir(parents=True, exist_ok=True)
+        target = snap / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # HF re-links the snapshot symlink to the pre-existing local blob; it
+        # writes NO new blob (warm local cache). The store is unchanged across
+        # the call, so the file classifies "cached".
+        target.symlink_to("../../blobs/already-local-blob")
+        return str(target)
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")
+    out: dict[str, object] = {}
+    with (
+        patch("urllib.request.urlopen", side_effect=router),
+        patch(
+            "huggingface_hub.model_info",
+            return_value=_mk_model_info(revision, files),
+        ),
+        patch("huggingface_hub.hf_hub_download", side_effect=_fake_hf) as hf_mock,
+    ):
+        ok = _mirror.download_with_mirror_fallback(repo_id, cache_dir=tmp_path, out=out)
+
+    assert ok is True
+    assert hf_mock.call_count == 1  # HF re-linked the local non-LFS blob
+    assert out["network_fetch"] is False, (
+        "re-linking a locally-cached non-LFS blob is NOT a fetch (Codex #2392 R4)"
+    )
+    assert out["transferred_bytes"] == 0

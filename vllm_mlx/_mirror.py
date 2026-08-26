@@ -1972,20 +1972,22 @@ def download_with_mirror_fallback(
         # collide with our aggregate UI; keep it for weight/unknown-size
         # files (see ``_should_suppress_hf_bar``).
         #
-        # Stable transfer-account seam (Codex #2392): before the HF call,
-        # record whether this file's blob ALREADY exists in HF's local cache
-        # (``blobs/<sha>``). When it does, ``hf_hub_download`` only
-        # materializes the missing snapshot link from the local blob — zero
-        # bytes cross the wire — so the outcome is a "cached" no-transfer, not
-        # a fetch. When the blob is absent, a success IS a real network fetch.
-        # This keyed on the local file inventory (public, size/hash), never on
-        # huggingface_hub's tqdm progress internals.
-        blob_already_local = False
-        if expected_sha256 is not None:
-            try:
-                blob_already_local = (repo_root / "blobs" / expected_sha256).is_file()
-            except OSError:
-                blob_already_local = False
+        # Stable transfer-account seam (Codex #2392, R4 BLOCKING): before the
+        # HF call, fingerprint the local BLOB store (sorted name/size/mtime of
+        # every real blob under ``blobs/``). If ``hf_hub_download`` only
+        # re-links a blob that was ALREADY in HF's local cache, the store is
+        # unchanged — zero bytes cross the wire — so the outcome is a "cached"
+        # no-transfer, not a fetch. If it materializes or repairs a blob
+        # (bytes crossed the wire), the store changes -> "hf". Unlike the
+        # earlier ``blob_already_local`` check (which needed ``expected_sha256``
+        # and left non-LFS files always classified "hf"), this also classifies
+        # files whose blob key the catalog does not expose (config.json etc.).
+        # A worker that really downloads always writes its own blob, so a real
+        # fetch is never misread as cached; a relink racing an unrelated
+        # concurrent write can only over-count, never under-count. Keyed on the
+        # local file inventory (public size/mtime), never on huggingface_hub's
+        # tqdm progress internals.
+        blobs_before_file = _blob_fingerprint(repo_root)
         ok, hf_path = _hf_fallback_one(
             repo_id,
             fname,
@@ -2007,11 +2009,12 @@ def download_with_mirror_fallback(
                     size = (snap_dir / fname).stat().st_size
             except OSError:
                 size = 0
-            # If the blob was already in HF's local cache, hf_hub_download only
-            # linked it into the snapshot — no bytes were transferred. Classify
-            # as "cached", not "hf", so `network_fetch` doesn't mislabel a warm
-            # pull as a download (Codex #2392; stable local-file-inventory seam).
-            return fname, ("cached" if blob_already_local else "hf"), size
+            # If the blob store was unchanged across this HF call, the file was
+            # satisfied from HF's LOCAL blob cache (a warm re-link) — no bytes
+            # transferred (Codex #2392 R4). Classify as "cached", not "hf", so
+            # `network_fetch`/`transferred_bytes` don't mislabel a warm pull.
+            was_hf_fetch = blobs_before_file != _blob_fingerprint(repo_root)
+            return fname, ("hf" if was_hf_fetch else "cached"), size
 
         return fname, "miss", 0
 

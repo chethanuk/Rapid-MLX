@@ -176,15 +176,21 @@ def test_hf_fetch_zero_byte_file_counts_as_download(
     fetched zero-byte file creates a NEW blob (the file did not exist before),
     so the blob inventory changes even though the file carries no bytes, and
     the summary says ``Downloaded``.
+
+    The cache is seeded with ONE pre-existing blob so ``_before != ()`` —
+    otherwise an empty pre-pull fingerprint already forces ``_was_cached = False``
+    and the test would pass without ever exercising the blob transition.
     """
     revision = "abc123" * 6
     cache_root, blob_dir = _hf_snapshot_layout(
-        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=False
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=True
     )
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
     def _download(*_args, **_kwargs):
-        # The pull fetched a file that is 0 bytes: a NEW (empty) blob appears.
+        # The pull fetched a NEW file that is 0 bytes: a distinct empty blob
+        # appears (the store starts non-empty via the seeded blob). The
+        # transition is what must drive the "Downloaded" verdict.
         (blob_dir / "deadbeef").write_bytes(b"")
         return str(blob_dir.parent / "snapshots" / revision)
 
@@ -434,10 +440,15 @@ def test_blob_identifier_is_a_stable_transfer_seam(tmp_path: Path) -> None:
     assert cli._blob_identifier(tmp_path) != before
 
     # A REPAIR of an existing blob (mtime/size change) -> Download (the exact
-    # case a snapshot-symlink fingerprint would miss).
+    # case a snapshot-symlink fingerprint would miss). Snapshot the fingerprint
+    # immediately BEFORE the rewrite and compare against THAT, not the original
+    # ``before`` — the intervening ``config``/``empty`` additions already make
+    # ``before`` unequal, so comparing to ``before`` would not prove the
+    # modification itself is detected.
+    pre_repair = cli._blob_identifier(tmp_path)
     (blobs / "aabbcc").write_bytes(b"\x00" * 4096)
     repaired = cli._blob_identifier(tmp_path)
-    assert repaired != before
+    assert repaired != pre_repair
 
     # .incomplete* scratch churn must NOT change the transfer verdict.
     (blobs / ".incomplete-somehash").write_bytes(b"")
