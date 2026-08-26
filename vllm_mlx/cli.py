@@ -6427,17 +6427,23 @@ def _hf_bytes_bar_class():
     """Return a ``tqdm_class`` for ``snapshot_download`` that records bytes.
 
     huggingface_hub builds its ``snapshot_download`` progress from several
-    bars via ``tqdm_class``: two byte-oriented bars (``unit="B"`` —
-    "Download complete", "Reconstruction complete") and a FILE bar
-    (``unit="it"`` — "Fetching N files") that advances once per completed
-    file, cache hits included. Only the ``unit="B"`` bars measure actual
-    bytes transferred, so we record only those and exclude the file bar
-    (codex round-3/4 BLOCKING #2). A fully-cached online pull records zero
-    bytes on the byte bars -> "nothing to download" truthfully; a real
-    transfer records >0 -> "Downloaded". Returns a real ``tqdm`` subclass
-    (not a callable) because HF hands it to code that expects class methods
-    (e.g. ``get_lock``). Defined lazily to avoid a module-scope ``tqdm``
-    import (the mirror path never needs it).
+    bars via ``tqdm_class``: a network-transfer bar (``unit="B"``, desc
+    "Download complete"/"Downloading bytes"), a local-reconstruction bar
+    (``unit="B"``, desc "Reconstruction…"),
+    and a file bar (``unit="it"``, desc "Fetching N files") that advances once
+    per completed file, cache hits included.
+
+    Only the NETWORK-TRANSFER bar measures actual bytes fetched; the
+    reconstruction and file bars count local disk writes / file completions,
+    so they must NOT count as network traffic (codex round-4 BLOCKING #2).
+    We therefore track instances only for the transfer bar (desc starts with
+    "Download"), and additionally set ``_touched`` on ANY ``update()`` call —
+    including ``n=0`` — so a fetched zero-byte file is still recognized as a
+    network fetch even though it records no bytes (codex round-4 BLOCKING #3).
+
+    Returns a real ``tqdm`` subclass (not a callable) because HF hands it to
+    code that expects class methods (e.g. ``get_lock``). Defined lazily to
+    avoid a module-scope ``tqdm`` import (the mirror path never needs it).
     """
     from tqdm import tqdm
 
@@ -6446,11 +6452,16 @@ def _hf_bytes_bar_class():
 
         def __init__(self, *args, **kwargs):
             self._recorded: list[int] = []
+            self._touched = False
             super().__init__(*args, **kwargs)
-            if getattr(self, "unit", None) == "B":
+            desc = str(getattr(self, "desc", "") or "")
+            if getattr(self, "unit", None) == "B" and desc.startswith("Download"):
                 self._bar_instances.append(self)
 
         def update(self, n=1):
+            # Flag any update() call — even n=0 — as evidence a network fetch
+            # was orchestrated for this file (covers zero-byte files).
+            self._touched = True
             if n:
                 self._recorded.append(int(n))
             super().update(n)
@@ -6459,19 +6470,20 @@ def _hf_bytes_bar_class():
 
 
 def _hf_network_fetch(bar_cls) -> bool | None:
-    """Did the HF pull fetch bytes? True/False from byte bars, None if unknown.
+    """Did the HF pull fetch bytes over the network? True/False/None.
 
-    True if any ``unit="B"`` byte-bar recorded a positive update (a real
-    transfer, including a fetched zero-byte file); False if byte bars were
-    constructed but recorded zero (a clean no-op cache hit); None if no byte
-    bar was constructed at all (offline/anomalous downloader) — the caller
-    treats that as unknown and reports a download rather than over-claiming a
-    cache hit.
+    Considers only the network-transfer bar (see :func:`_hf_bytes_bar_class`).
+    True if that bar observed any ``update()`` — i.e. a file was fetched,
+    whether it carried bytes or was zero-byte (codex round-4 #3); False if the
+    transfer bar was constructed but never updated (a clean no-op cache hit);
+    None if no transfer bar was constructed at all (offline/anomalous
+    downloader) — the caller treats None as unknown and reports a download
+    rather than over-claiming a cache hit.
     """
-    byte_bars = bar_cls._bar_instances
-    if not byte_bars:
+    bars = bar_cls._bar_instances
+    if not bars:
         return None
-    return any(b._recorded for b in byte_bars)
+    return any(b._touched for b in bars)
 
 
 def _print_pull_summary(

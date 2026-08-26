@@ -106,11 +106,13 @@ def test_hf_cached_fallback_reports_verified(
     snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
 
     def _download(*args, tqdm_class=None, **_kwargs):
-        # Byte bars exist but record zero = nothing transferred (cached).
+        # The transfer ("Download") bar exists but never updates = nothing
+        # crossed the network (cached). The reconstruction bar IS updated (HF
+        # writes the symlink/dedup metadata to disk on a warm pull) and the
+        # file bar advances per cached file, but neither is network traffic
+        # (codex round-4 #2) — so the label must stay "Already cached".
         tqdm_class(desc="Downloading bytes", total=0, unit="B")
-        tqdm_class(desc="Reconstructing", total=0, unit="B")
-        # The file bar advances per completed file (cache hits too) but is
-        # NOT counted as bytes — it must not flip the label to "Downloaded".
+        tqdm_class(desc="Reconstructing", total=4096, unit="B").update(4096)
         tqdm_class(desc="Fetching 7 files", total=7, unit="it").update(7)
         return str(snapshot_dir)
 
@@ -126,6 +128,38 @@ def test_hf_cached_fallback_reports_verified(
     assert "Already cached" in out, out
     assert "verified (nothing to download)" in out, out
     assert "Downloaded" not in out, out
+
+
+def test_hf_fetch_zero_byte_file_counts_as_download(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fetched zero-byte file is a network fetch, not a cache hit.
+
+    codex round-4 BLOCKING #3: a transfer bar that records zero bytes could
+    be mislabelled "Already cached". HF still calls ``update()`` on the
+    transfer bar for a fetched file even when it is zero-byte; ``_touched``
+    flags that as a real network fetch, so the summary says ``Downloaded``.
+    """
+    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+
+    def _download(*args, tqdm_class=None, **_kwargs):
+        # A file was fetched but its size is 0 bytes.
+        tqdm_class(desc="Downloading bytes", total=0, unit="B").update(0)
+        tqdm_class(desc="Reconstructing", total=0, unit="B")
+        return str(snapshot_dir)
+
+    args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        patch("huggingface_hub.snapshot_download", side_effect=_download),
+    ):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Downloaded" in out, out
+    assert "Already cached" not in out, out
 
 
 def test_hf_fallback_transfers_bytes_as_download(
