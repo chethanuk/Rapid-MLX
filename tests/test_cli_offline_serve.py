@@ -7,11 +7,13 @@ printing "First-time download" / "Pre-download skipped; server will retry"),
 let the serve subprocess start, and end in misleading ``--mllm``/``--no-mllm``
 lane advice even though neither flag can supply the missing checkpoint.
 
-The fix (in ``_ensure_model_downloaded``) detects the offline + uncached
-condition ONCE, states which repository is missing, points to ``rapid-mlx
-pull`` and the expected cache location, and exits(1) before server
-initialization — mirroring the TimeoutError / disk-space exits. A lane override
-is never recommended when the checkpoint is simply absent.
+The fix (in ``_ensure_model_downloaded`` and ``main()``'s B2 gate) detects the
+offline + uncached condition ONCE, states which repository is missing, points
+to ``rapid-mlx pull`` and the expected cache location, and exits(1) before
+server initialization — mirroring the TimeoutError / disk-space exits. A lane
+override is never recommended when the checkpoint is simply absent. Cachedness
+is judged by the single shared ``_cache_entry_is_runnable`` predicate, so a
+fully-cached mflux / split-video / Whisper model is never refused.
 """
 
 from __future__ import annotations
@@ -25,13 +27,9 @@ from vllm_mlx import cli
 
 
 def _uncached_probe(monkeypatch):
-    """Force the cache probes to report "not cached" (weights absent)."""
-    import vllm_mlx._download_gate as gate
-
-    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
-    monkeypatch.setattr(
-        gate, "mflux_missing_weights", lambda name: ["model.safetensors"]
-    )
+    """Force the runnability predicate to report "not cached runnable",
+    so the model falls through to the offline refusal / download path."""
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
 
 
 def test_offline_hub_mode_detects_env_switches(monkeypatch):
@@ -102,45 +100,39 @@ def test_offline_local_path_is_noop_not_refused(monkeypatch, capsys):
 
 
 def test_offline_cached_repo_is_noop_not_refused(monkeypatch, capsys):
-    """A fully-cached repo never hits the offline refusal."""
-    import vllm_mlx._download_gate as gate
-
+    """A fully-cached repo (any modality, judged by the single runnability
+    predicate) never hits the offline refusal."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(gate, "is_repo_cached", lambda name: True)
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: True)
     cli._ensure_model_downloaded("acme/already-cached")
     assert "is not cached" not in capsys.readouterr().err
 
 
-def test_offline_cached_split_video_is_noop_not_refused(monkeypatch, capsys):
-    """A fully-cached component-split video (CogVideoX/LTX) that
-    ``is_repo_cached`` cannot see (no root ``model*.safetensors``) must NOT be
-    refused — the split-model probe marks it complete (codex #2357-R1 P1)."""
-    import vllm_mlx._download_gate as gate
-
+def test_offline_cached_mflux_is_noop_not_refused(monkeypatch, capsys):
+    """A fully-cached mflux checkpoint (no root ``model*.safetensors``, so a
+    text-only ``is_repo_cached`` read misses it) must NOT be refused — the
+    shared runnability predicate accepts it (codex #2357-P1)."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
-    monkeypatch.setattr(
-        gate, "mflux_missing_weights", lambda name: ["model.safetensors"]
-    )
-    monkeypatch.setattr(gate, "_snapshot_is_complete_split_model", lambda name: True)
-    cli._ensure_model_downloaded("acme/cogvideox-cached")
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: True)
+    cli._ensure_model_downloaded("acme/qwen-image-cached")
     assert "is not cached" not in capsys.readouterr().err
 
 
-def test_offline_cached_whisper_is_noop_not_refused(monkeypatch, capsys):
-    """A fully-cached Whisper snapshot is runnable offline — not refused."""
-    import vllm_mlx._download_gate as gate
-
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+def test_disk_gate_systemexit_still_propagates(monkeypatch, capsys):
+    """Below the offline refusal, a disk-space-gate ``SystemExit`` must still
+    clear the spinner and propagate (not be swallowed by the runnability /
+    cache refactor this file tests). Guards the re-raise boundary directly
+    under ``_cache_entry_is_runnable``."""
+    _uncached_probe(monkeypatch)  # not runnable, not offline -> reaches disk gate
+    monkeypatch.setenv("HF_HUB_OFFLINE", "")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "")
+    monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
     monkeypatch.setattr(
-        gate, "mflux_missing_weights", lambda name: ["model.safetensors"]
+        cli, "_check_disk_space", lambda *a, **k: (_ for _ in ()).throw(SystemExit(3))
     )
-    monkeypatch.setattr(
-        gate, "_snapshot_is_complete_whisper_model", lambda name: True
-    )
-    cli._ensure_model_downloaded("openai/whisper-cached")
-    assert "is not cached" not in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        cli._ensure_model_downloaded("badorg/offline-missing-model")
+    assert exc.value.code == 3
 
 
 def test_online_uncached_still_attempts_download(monkeypatch, capsys):
@@ -170,7 +162,11 @@ def test_gate_refuses_offline_uncached_before_notices(monkeypatch, capsys):
     """
     import vllm_mlx._download_gate as gate
 
+    # Outer gate condition: text-only probe reports uncached (no root
+    # ``model*.safetensors``). Offline refusal scope: the shared runnability
+    # predicate also reports False, so the refusal must fire.
     monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
     monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     # Interactive so the gate's confirmation branch is active.

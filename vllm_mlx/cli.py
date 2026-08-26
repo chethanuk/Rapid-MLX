@@ -1705,46 +1705,17 @@ def _ensure_model_downloaded(
     """
     if os.path.exists(model_name):
         return
-    # Reuse the same weight-file-presence probe as ``is_repo_cached``:
-    # the older ``try_to_load_from_cache('config.json')`` check
-    # short-circuits on a partial cache (metadata downloaded, weight
-    # shards still in flight), letting the spawned ``serve`` quietly
-    # finish the download inside its logfile. Codex round-3 BLOCKING #2.
-    try:
-        from vllm_mlx._download_gate import (
-            _snapshot_is_complete_split_model,
-            _snapshot_is_complete_whisper_model,
-            is_repo_cached,
-            mflux_missing_weights,
-        )
-
-        if is_repo_cached(model_name):
-            return
-        # ``is_repo_cached`` probes for root ``model*.safetensors``, which an
-        # mflux checkpoint never has — its weights live under ``transformer/``,
-        # ``text_encoder/`` and ``vae/``. So a fully-downloaded image model
-        # always failed that probe and fell through to the disk-space gate and
-        # the mirror below, i.e. every single start of an image model needed
-        # the network. On a hostile DNS path that is not a slow start but a
-        # hung one: the socket sits in SYN_SENT against a poisoned address
-        # while the UI shows "Starting" forever. Verified-complete component
-        # weights are just as cached as a verified-complete root checkpoint.
-        if mflux_missing_weights(model_name) == []:
-            return
-        # Non-text layouts ``is_repo_cached`` cannot see are just as runnable
-        # offline: a fully-cached component-split video (CogVideoX / LTX) or a
-        # Whisper snapshot. Without these, the offline refusal below would
-        # wrongly block a model that IS cached (codex #2357-R1 split-video P1).
-        if _snapshot_is_complete_split_model(model_name) or (
-            _snapshot_is_complete_whisper_model(model_name)
-        ):
-            return
-    except Exception:
-        # Probe failed (filesystem permission error, unexpected layout) —
-        # fall through to the heavy snapshot_download path; HF will
-        # short-circuit on its own cache check if the repo really is
-        # fully present.
-        pass
+    # Reuse the cache inventory's single runnability predicate
+    # (``_cache_entry_is_runnable``, the same source ``models --cached`` uses)
+    # so what counts as "already cached" is identical everywhere and spans
+    # every modality: text ``model*.safetensors`` (``is_repo_cached``), mflux
+    # component weights, component-split video, and family-scoped Whisper
+    # ``weights.npz``. A text-only ``is_repo_cached`` check would wrongly read
+    # a fully-downloaded mflux / split-video model as uncached and re-download
+    # on every start — a slow start at best, a hung one (SYN_SENT against a
+    # poisoned address) on a hostile DNS path (codex round-3 BLOCKING #2).
+    if _cache_entry_is_runnable(model_name):
+        return
 
     # Offline + uncached refusal (#2357): reaching this point means the model is
     # NOT cached (the probes above returned on every cached/complete shape) and
@@ -11808,8 +11779,15 @@ def main():
                 # "about to download … proceed" — so without this, the user
                 # would see a contradictory "About to download / Proceeding
                 # anyway" pair right before the refusal below. Refuse once here,
-                # identically to ``_ensure_model_downloaded``.
-                if _offline_hub_mode_active():
+                # identically to ``_ensure_model_downloaded``. Scope the refusal
+                # on the SAME runnability predicate (``_cache_entry_is_runnable``)
+                # rather than ``is_repo_cached`` alone: a fully-cached mflux or
+                # split-video checkpoint has no root ``model*.safetensors``, so a
+                # text-only check would wrongly refuse a model that IS cached
+                # (codex #2357-P1).
+                if _offline_hub_mode_active() and not _cache_entry_is_runnable(
+                    args.model
+                ):
                     _refuse_offline_uncached(args.model)
                 # The size estimate is a silent HF ``model_info`` round-trip
                 # (up to 5s). Cover it with a "Resolving…" spinner so the
