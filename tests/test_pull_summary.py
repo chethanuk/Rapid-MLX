@@ -357,3 +357,59 @@ def test_format_pull_duration_units() -> None:
     assert cli._format_pull_duration(125.0) == "2m 5s"
     # Rounding rule: 119.9s reads as 2m 0s, not 1m 59s.
     assert cli._format_pull_duration(119.9) == "2m 0s"
+
+
+def test_hf_bytes_bar_tracks_transfer_and_reports_network_fetch() -> None:
+    """The network-transfer bar class (issue #2349) detects a real fetch.
+
+    ``_hf_bytes_bar_class`` returns a tqdm subclass that records ONLY the
+    network-transfer bar (``unit="B"`` + ``desc.startswith("Download")``),
+    flags ``_touched`` on any ``update()`` (even ``n=0``, for zero-byte
+    files), and ``_hf_network_fetch`` turns that into the authoritative
+    transfer verdict. These exercise the real construction path with no
+    network and no MLX.
+    """
+    # Each call to ``_hf_bytes_bar_class`` returns a fresh tqdm subclass
+    # with its own ``_bar_instances``, so the four cases below are isolated.
+
+    # No transfer bar constructed -> unknown (None), never a false cache hit.
+    empty = cli._hf_bytes_bar_class()
+    assert cli._hf_network_fetch(empty) is None
+
+    # A non-transfer file bar (unit "it") is NOT registered as a transfer →
+    # still None (the file bar counts completions, not network bytes).
+    base = cli._hf_bytes_bar_class()
+    file_bar = base(unit="it", desc="Fetching 4 files", total=10)
+    file_bar.update(n=10)
+    file_bar.close()
+    assert cli._hf_network_fetch(base) is None
+
+    # A transfer bar CONSTRUCTED but never updated -> False (clean cache hit).
+    cached_cls = cli._hf_bytes_bar_class()
+    cached_bar = cached_cls(unit="B", desc="Downloading model.safetensors", total=None)
+    cached_bar.close()
+    assert cli._hf_network_fetch(cached_cls) is False
+
+    # A transfer bar that observes an update() -> True, including an n=0
+    # (zero-byte) file, which still orchestrates a fetch.
+    fetched = cli._hf_bytes_bar_class()
+    transfer = fetched(unit="B", desc="Downloading model.safetensors", total=None)
+    transfer.update(n=0)  # zero-byte file still counts as a transfer
+    transfer.update(n=512)
+    transfer.close()
+    assert cli._hf_network_fetch(fetched) is True
+
+
+def test_print_pull_summary_was_cached_branch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``was_cached=True`` prints the "Already cached ... verified" line
+    (issue #2349) rather than the "Downloaded" line — a proven no-transfer."""
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "model.safetensors").write_bytes(b"\x00" * 4096)
+    cli._print_pull_summary("mlx-community/Qwen3-0.6B-4bit", snap, 1.5, was_cached=True)
+    out_str = capsys.readouterr().out
+    assert "Already cached" in out_str
+    assert "Downloaded" not in out_str
+    assert "verified (nothing to download)" in out_str

@@ -4149,3 +4149,78 @@ def test_subfolder_allow_patterns_fetches_only_that_quant(
     requested = [r["url"] for r in router.requests]
     assert not any("/8bit/" in u for u in requested)
     assert not any(u.endswith("/LICENSE") for u in requested)
+
+
+# ---------------------------------------------------------------------------
+# issue #2349 — download_with_mirror_fallback reports its transfer account
+# through ``out`` (out["transferred_bytes"] + out["network_fetch"]).
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_download_reports_transfer_account_via_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing ``out={}`` returns the authoritative transfer account: which
+    bytes crossed the wire this pull and whether anything was fetched at all.
+
+    Drives the REAL ``download_with_mirror_fallback`` R2+HF path (mocked
+    HTTP): one file (config.json) is an R2 hit, another (model.safetensors)
+    misses R2 and falls back to HF. Both arms increment
+    ``transferred_bytes`` (R2 and HF), so ``out["transferred_bytes"]`` and
+    ``out["network_fetch"]`` are fully exercised. Issue #2349: ``pull_command``
+    reads these to tell "already cached" from "download" truthfully.
+    """
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    revision = "0badf00d" * 5
+    files = [("config.json", 100), ("model.safetensors", 200)]
+    catalog = _catalog_payload([("qwen3-0.6b-4bit", repo_id, "mirrored")])
+
+    router = _UrlRouter()
+    router.add(
+        "https://models.rapidmlx.com/api/models",
+        _FakeResponse(200, json.dumps(catalog).encode()),
+    )
+    # config.json is an R2 hit; model.safetensors misses R2 (404) so it
+    # falls back to HF — covering both the R2 and HF transfer arms.
+    router.add(
+        "https://models.rapidmlx.com/mlx-community/Qwen3-0.6B-4bit/config.json",
+        _FakeResponse(200, b"x" * 100),
+    )
+    router.add(
+        "https://models.rapidmlx.com/mlx-community/Qwen3-0.6B-4bit/model.safetensors",
+        _FakeResponse(404, b""),
+    )
+
+    def _fake_hf(repo_id, filename, revision, cache_dir=None, **kwargs):
+        snap = (
+            Path(cache_dir)
+            / f"models--{repo_id.replace('/', '--')}"
+            / "snapshots"
+            / revision
+        )
+        snap.mkdir(parents=True, exist_ok=True)
+        target = snap / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        expected_size = next(s for n, s in files if n == filename)
+        target.write_bytes(b"h" * expected_size)
+        return str(target)
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")
+    out: dict[str, object] = {}
+    with (
+        patch("urllib.request.urlopen", side_effect=router),
+        patch(
+            "huggingface_hub.model_info",
+            return_value=_mk_model_info(revision, files),
+        ),
+        patch("huggingface_hub.hf_hub_download", side_effect=_fake_hf) as hf_mock,
+    ):
+        ok = _mirror.download_with_mirror_fallback(repo_id, cache_dir=tmp_path, out=out)
+
+    assert ok is True
+    assert hf_mock.call_count == 1  # model.safetensors fell back to HF
+    assert out["network_fetch"] is True, "bytes fetched -> network_fetch True"
+    assert out["transferred_bytes"] == 300, (
+        "R2 (config.json: 100) + HF (model.safetensors: 200) = 300"
+    )
