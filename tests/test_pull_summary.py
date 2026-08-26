@@ -69,13 +69,9 @@ def test_summary_printed_on_hf_success(
     args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
 
     with (
+        # Not cached at entry (no resolved snapshot), so this pull actually
+        # transfers bytes — the summary reports a download.
         patch.object(cli, "_try_mirror_prefetch", return_value=False),
-        # Not cached at entry — this pull actually transfers bytes, so the
-        # summary reports a download (issue #2349 keeps "Downloaded" for this).
-        patch(
-            "vllm_mlx._download_gate.is_repo_cached",
-            return_value=False,
-        ),
         patch(
             "huggingface_hub.snapshot_download",
             return_value=str(snapshot_dir),
@@ -103,30 +99,30 @@ def test_summary_printed_on_mirror_success(
     """R2-mirror success path also prints the summary line.
 
     We point the HF cache root at ``tmp_path`` via the ``HF_HUB_CACHE``
-    constant so ``pull_command`` resolves the snapshot dir under our
-    fixture and our seeded file shows up in the size sum.
+    constant so ``pull_command`` resolves the snapshot dir under our fixture.
+    The mirror mock simulates an actual fetch: it creates ``refs/main`` and
+    populates the snapshot ONLY during the pull, so no snapshot exists at
+    entry (pre-pull size is unknown) and the summary reports a real download.
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     revision = "abc123" * 6  # 36 hex chars; shape doesn't matter for the test
 
     cache_root = tmp_path / "hub"
-    repo_root = cache_root / "models--mlx-community--Qwen3-0.6B-4bit"
-    refs_dir = repo_root / "refs"
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    (refs_dir / "main").write_text(revision)
-    snapshot_dir = repo_root / "snapshots" / revision
-    _make_fake_snapshot(snapshot_dir, total_bytes=4096)
-
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    def _mirror_fetch(model_name: str) -> bool:
+        """Simulate the mirror downloading the snapshot during this pull."""
+        repo_root = cache_root / "models--mlx-community--Qwen3-0.6B-4bit"
+        refs_dir = repo_root / "refs"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "main").write_text(revision)
+        snapshot_dir = repo_root / "snapshots" / revision
+        _make_fake_snapshot(snapshot_dir, total_bytes=4096)
+        return True
 
     args = argparse.Namespace(model=repo_id)
 
-    with (
-        # The snapshot was NOT complete before this pull (the mirror just
-        # fetched it), so the summary reports a real download.
-        patch("vllm_mlx._download_gate.is_repo_cached", return_value=False),
-        patch.object(cli, "_try_mirror_prefetch", return_value=True),
-    ):
+    with patch.object(cli, "_try_mirror_prefetch", side_effect=_mirror_fetch):
         cli.pull_command(args)
 
     out = capsys.readouterr().out
@@ -163,16 +159,61 @@ def test_cached_pull_reports_verified_not_downloaded(
 
     args = argparse.Namespace(model=repo_id)
 
-    with (
-        patch("vllm_mlx._download_gate.is_repo_cached", return_value=True),
-        patch.object(cli, "_try_mirror_prefetch", return_value=True),
-    ):
+    # The snapshot is already complete at entry AND the mirror pulls nothing
+    # new, so pre-pull and post-pull sizes match -> "verified (nothing to
+    # download)", not "Downloaded".
+    with patch.object(cli, "_try_mirror_prefetch", return_value=True):
         cli.pull_command(args)
 
     out = capsys.readouterr().out
     assert "Already cached" in out, out
     assert "Downloaded" not in out, out
     assert "verified (nothing to download)" in out, out
+
+
+def test_moved_main_reported_as_download(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local snapshot may be complete while ``main`` advanced remote-side.
+
+    The codex BLOCKING on #2349: ``is_repo_cached`` (local presence) alone is
+    wrong for a mutable ``main`` — the subsequent mirror/HF call can transfer
+    new files while the summary falsely says "nothing to download". The
+    summary must reflect the ACTUAL transfer. Here a stale rev_A is fully
+    cached pre-pull, then the mirror populates a NEWER rev_B with real bytes:
+    the pre-pull size (measured against rev_A) and the post-pull size (against
+    the now-resolved rev_B) differ, so the pull is reported as a download.
+    """
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    stale_rev = "aaaaaa" * 6
+    head_rev = "bbbbbb" * 6
+    cache_root = tmp_path / "hub"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    repo_root = cache_root / "models--mlx-community--Qwen3-0.6B-4bit"
+    refs_dir = repo_root / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    # A fully-cached STALE rev exists before the pull.
+    (refs_dir / "main").write_text(stale_rev)
+    _make_fake_snapshot(repo_root / "snapshots" / stale_rev, total_bytes=4096)
+
+    def _mirror_fetch(model_name: str) -> bool:
+        # Remote main advanced mid-pull: refs/main now points at a NEWER rev
+        # whose snapshot is populated with more bytes than the stale one.
+        (refs_dir / "main").write_text(head_rev)
+        _make_fake_snapshot(repo_root / "snapshots" / head_rev, total_bytes=8192)
+        return True
+
+    args = argparse.Namespace(model=repo_id)
+
+    with patch.object(cli, "_try_mirror_prefetch", side_effect=_mirror_fetch):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Downloaded" in out, out
+    assert "Already cached" not in out, out
 
 
 def test_summary_not_printed_on_404(
