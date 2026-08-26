@@ -786,11 +786,11 @@ def _snapshot_is_complete_audio_model(repo_id: str, family: str) -> bool:
 
     Mirror ``_snapshot_is_complete_whisper_model``: resolve the pinned sha,
     require ``config.json`` present + on-this-repo (no crafted symlink
-    pointing outside), and require a non-empty weight file for the family.
-    Families without a verified layout (other TTS/STT) accept any non-empty
-    ``*.safetensors`` (or ``weights.npz``) so a genuinely-cached upload is
-    never falsely marked incomplete — a real weights file is never a
-    metadata-only stub.
+    pointing outside), and require a non-empty, VERIFIED weight file for the
+    family. Strict verified-filename-only matching: no speculative generic
+    ``any(*.safetensors)`` acceptance, so an unrelated sharded/aux safetensors
+    can never false-mark an upload as runnable. Unsupported families return
+    False (out of scope; not over-routed).
     """
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
@@ -822,18 +822,11 @@ def _snapshot_is_complete_audio_model(repo_id: str, family: str) -> bool:
         if family == "whisper":
             return _present("weights.npz") or _present("weights.safetensors")
         if family == "kokoro":
-            return _present("kokoro-v1_0.safetensors") or any(
-                _present(name)
-                for name in os.listdir(snap_dir)
-                if name.endswith(".safetensors")
-            )
-        # Any other audio family: a real weights file (single or sharded
-        # safetensors, or the NPZ layout some STT models use).
-        return any(
-            _present(name)
-            for name in os.listdir(snap_dir)
-            if name.endswith(".safetensors")
-        ) or _present("weights.npz")
+            return _present("kokoro-v1_0.safetensors")
+        # Unsupported audio family with no verified weight layout: not
+        # established runnable. Each family must be added explicitly with its
+        # verified filename — no generic any-safetensors routing.
+        return False
     except Exception:
         return False
 

@@ -661,9 +661,11 @@ def test_audio_family_incomplete_without_config(tmp_path, monkeypatch):
     "weight",
     ["voice.safetensors", "weights.npz"],  # other-family safetensors / NPZ
 )
-def test_audio_family_generic_runnable(tmp_path, monkeypatch, weight):
-    """Any other audio family (e.g. parakeet STT) with a real weight file is
-    runnable — a safetensors shard or the NPZ layout."""
+def test_audio_family_no_generic_any_safetensors(tmp_path, monkeypatch, weight):
+    """An UNSUPPORTED audio family must NOT be marked runnable from a generic
+    ``*.safetensors`` / ``weights.npz`` — no speculative any-safetensors
+    routing. Each family is added explicitly with its verified weight filename
+    (#2406 part A is strictly Kokoro + Whisper)."""
     repo = "mlx-community/example-other"
     cache_root = tmp_path / "hf-cache"
     repo_root = cache_root / "models--mlx-community--example-other"
@@ -676,7 +678,26 @@ def test_audio_family_generic_runnable(tmp_path, monkeypatch, weight):
 
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
-    assert gate._snapshot_is_complete_audio_model(repo, "parakeet") is True
+    assert gate._snapshot_is_complete_audio_model(repo, "parakeet") is False
+
+
+def test_audio_family_kokoro_rejects_unrelated_safetensors(tmp_path, monkeypatch):
+    """Kokoro must require its VERIFIED ``kokoro-v1_0.safetensors``; a stray
+    sharded/aux safetensors must never false-mark the upload as runnable
+    (the codex BLOCKING the strict filename fixes)."""
+    repo = "mlx-community/example-kokoro"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-kokoro"
+    sha = "kokoroaux"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / "kokoro-v1_0.model.safetensors").write_bytes(b"x" * 4096)
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, "kokoro") is False
 
 
 def test_audio_family_exception_is_not_runnable(monkeypatch):
