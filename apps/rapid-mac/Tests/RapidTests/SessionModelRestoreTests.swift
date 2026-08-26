@@ -243,6 +243,52 @@ struct SessionModelRestoreTests {
         await server.stop()
     }
 
+    @Test(
+        "An authoritative chat start remains proven across a transiently empty restart probe",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func authoritativeChatProofSurvivesRestartProbeFailure() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let catalog = SequencedCatalogLoader([[chat], []])
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in
+            await catalog.load()
+        }
+
+        let firstReady = await server.ensureServing(
+            alias: chat.alias,
+            hfPath: chat.hfRepo
+        )
+        #expect(firstReady)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: chat.alias,
+            hfPath: chat.hfRepo
+        )
+        #expect(restarted)
+        #expect(server.servingAlias == chat.alias)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        await server.stop()
+    }
+
     private static var safeMemorySnapshot: MemoryProbe.Snapshot {
         MemoryProbe.Snapshot(
             totalBytes: 64 * 1_024 * 1_024 * 1_024,
