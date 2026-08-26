@@ -3149,13 +3149,20 @@ async def _stream_anthropic_messages(
         f"Anthropic messages (stream): prompt={prompt_tokens} + completion={completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)"
     )
 
+    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+
     # Opt-in telemetry (caller attribution, task C): record a bucketed
     # ``request`` event for this completed /v1/messages stream. Fired only
-    # after the generator drains normally (all tokens flushed). ``caller_agent``
-    # is the inbound User-Agent bucketed to an allowlist in ``redact`` (never
-    # stored raw); ``ttft_ms`` is true first-token latency. ``emit.request``
-    # is sampled + ``is_enabled()``-gated + ``@_safe``, so this is a cheap
-    # no-op when telemetry is off / not sampled.
+    # AFTER the terminal ``message_stop`` marker is yielded + the generator
+    # resumes cleanly — matching the chat lane's documented emit-after-
+    # terminal-marker placement. A stream the client cancels or that raises
+    # while delivering that final marker raises out before this line and is
+    # deliberately NOT counted (under-counting is conservative; emitting
+    # before ``message_stop`` would record a false status-200 success).
+    # ``caller_agent`` is the inbound User-Agent bucketed to an allowlist in
+    # ``redact`` (never stored raw); ``ttft_ms`` is true first-token latency.
+    # ``emit.request`` is sampled + ``is_enabled()``-gated + ``@_safe``, so
+    # this is a cheap no-op when telemetry is off / not sampled.
     from vllm_mlx.telemetry import emit as _telemetry_emit
 
     _telemetry_emit.request(
@@ -3175,5 +3182,3 @@ async def _stream_anthropic_messages(
         status=200,
         caller_agent=caller_agent,
     )
-
-    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"

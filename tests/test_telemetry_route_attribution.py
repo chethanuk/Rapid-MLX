@@ -76,6 +76,29 @@ def _request_events(captured) -> list[dict]:
     return events
 
 
+async def _sleep(seconds: float) -> None:
+    """Async sleep helper so fake engines can inject a real post-first-token
+    gap without blocking the event loop (mirrors the fake engine in
+    ``test_telemetry_streaming_request_wiring.py``)."""
+    import asyncio
+
+    await asyncio.sleep(seconds)
+
+
+def _capture_request(monkeypatch, captured):
+    """Capture every ``emit.request`` KWARG (not the enqueued payload) so a
+    test can assert on raw values (e.g. exact ``ttft_ms``) that are otherwise
+    bucketed in the wire payload. Mirrors the emit.request-capture pattern in
+    ``test_telemetry_streaming_request_wiring.py``."""
+    from vllm_mlx.telemetry import emit
+
+    def _wrapper(**kw):
+        captured.append(kw)
+
+    monkeypatch.setattr(emit, "request", _wrapper)
+    return captured
+
+
 # ---------------------------------------------------------------- anthropic
 
 
@@ -116,6 +139,10 @@ class _AnthropicEngine:
     async def stream_chat(self, messages, **kwargs):
         self.stream_calls += 1
         for i, text in enumerate(["Hello ", "world"], start=1):
+            if i == len(["Hello ", "world"]):
+                # Post-first-token gap so total latency dwarfs true TTFT
+                # (mirrors test_telemetry_streaming_request_wiring).
+                await _sleep(0.2)
             yield SimpleNamespace(
                 new_text=text,
                 prompt_tokens=9,
@@ -183,14 +210,27 @@ def test_anthropic_messages_nonstream_emits_claude_code_attribution(
 
 
 def test_anthropic_messages_stream_emits_claude_code_attribution(
-    telemetry_on, captured
+    telemetry_on, monkeypatch
 ):
     """Same contract on the streaming ``/v1/messages`` branch: the emit fires
     after the stream drains, caller_agent is the bucketed claude-code label,
-    stream=True, and TTFT is true first-token latency (> 0)."""
+    stream=True, and TTFT is TRUE first-token latency.
+
+    Captures raw ``emit.request`` kwargs (before bucketing) while driving the
+    route end-to-end; the fake engine injects a real 0.2s gap after the first
+    token so total stream latency dwarfs true TTFT. Asserting ``ttft_ms`` is a
+    small fraction of total proves ``_first_token_ts`` is latched and used —
+    a regression to "total latency" would blow past ``0.5 * total``.
+    """
+    import time
+
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+
     engine = _AnthropicEngine()
     client = _anthropic_client(engine)
 
+    t0 = time.perf_counter()
     resp = client.post(
         "/v1/messages",
         headers={"user-agent": "Claude-Code/2.0 (macOS) Anthropic/API"},
@@ -201,26 +241,25 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
             "messages": [{"role": "user", "content": "hello"}],
         },
     )
+    total_ms = (time.perf_counter() - t0) * 1000.0
     assert resp.status_code == 200, resp.text
     assert "text/event-stream" in resp.headers["content-type"]
-    events = _request_events(captured)
     assert engine.stream_calls == 1
-    assert len(events) >= 1, f"no request telemetry emitted: {captured!r}"
-    ev = events[-1]
-    assert ev["endpoint"] == "/v1/messages"
-    assert ev["stream"] is True
-    assert ev["caller_agent"] == "claude-code"
-    # streaming fake engine yields prompt_tokens=9 + completion_tokens=2 → "0-256"
-    assert ev["prompt_tokens_bucket"] == "0-256"
-    assert ev["completion_tokens_bucket"] == "0-256"
-    assert ev["ttft_ms_bucket"] in (
-        "<100ms",
-        "100-500ms",
-        "500-1500ms",
-        "1.5-5s",
-        ">5s",
+    assert len(calls) == 1, f"expected one request emit, got {calls!r}"
+    kw = calls[0]
+    assert kw["endpoint"] == "/v1/messages"
+    assert kw["stream"] is True
+    assert kw["status"] == 200
+    assert kw["caller_agent"] == "Claude-Code/2.0 (macOS) Anthropic/API"
+    assert kw["prompt_tokens"] == 9
+    assert kw["completion_tokens"] == 2
+    # TTFT is measured at the FIRST token, so it is a small fraction of total
+    # latency (which includes the 0.2s post-first-token gap) — NOT total.
+    assert kw["ttft_ms"] > 0.0
+    assert kw["ttft_ms"] < 0.5 * total_ms, (
+        f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
+        f"latency {total_ms:.1f}ms — it must reflect first-token timing, not total"
     )
-    assert ev["status"] == 200
 
 
 # ---------------------------------------------------------------- completions
@@ -254,6 +293,8 @@ def _completions_client(monkeypatch):
             completion_tokens=0,
             prompt_tokens=3,
         )
+        # Post-first-token gap so total latency dwarfs true TTFT.
+        await _sleep(0.2)
         # Final chunk: finished, carries the engine's final usage.
         yield SimpleNamespace(
             new_text="",
@@ -328,30 +369,39 @@ def test_completions_nonstream_emits_openai_python_attribution(
     assert ev["status"] == 200
 
 
-def test_completions_stream_emits_openai_python_attribution(
-    telemetry_on, captured, monkeypatch
-):
-    """The streaming ``/v1/completions`` branch emits stream=True with true
-    TTFT and final-usage token counts."""
+def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkeypatch):
+    """The streaming ``/v1/completions`` branch emits stream=True with TRUE
+    first-token TTFT and final-usage token counts.
+
+    Captures raw ``emit.request`` kwargs; the fake stream injects a real 0.2s
+    gap after the first chunk so total latency dwarfs true TTFT. Asserting
+    ``ttft_ms`` is a small fraction of total proves ``_first_token_ts`` is
+    latched and used (a total-latency regression would blow past 0.5*total).
+    """
+    import time
+
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+
     client = _completions_client(monkeypatch)
+    t0 = time.perf_counter()
     resp = client.post(
         "/v1/completions",
         headers={"user-agent": "OpenAI/Python 1.30.1"},
         json={"model": "test-model", "prompt": "hi", "max_tokens": 8, "stream": True},
     )
+    total_ms = (time.perf_counter() - t0) * 1000.0
     assert resp.status_code == 200, resp.text
-    events = _request_events(captured)
-    assert len(events) >= 1, f"no request telemetry emitted: {captured!r}"
-    ev = events[-1]
-    assert ev["endpoint"] == "/v1/completions"
-    assert ev["stream"] is True
-    assert ev["caller_agent"] == "openai-python"
-    assert ev["completion_tokens_bucket"] == "0-256"
-    assert ev["ttft_ms_bucket"] in (
-        "<100ms",
-        "100-500ms",
-        "500-1500ms",
-        "1.5-5s",
-        ">5s",
+    assert len(calls) == 1, f"expected one request emit, got {calls!r}"
+    kw = calls[0]
+    assert kw["endpoint"] == "/v1/completions"
+    assert kw["stream"] is True
+    assert kw["status"] == 200
+    assert kw["caller_agent"] == "OpenAI/Python 1.30.1"
+    assert kw["prompt_tokens"] == 3
+    assert kw["completion_tokens"] == 5
+    assert kw["ttft_ms"] > 0.0
+    assert kw["ttft_ms"] < 0.5 * total_ms, (
+        f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
+        f"latency {total_ms:.1f}ms — it must reflect first-token timing, not total"
     )
-    assert ev["status"] == 200

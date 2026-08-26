@@ -934,11 +934,20 @@ async def stream_completion(
         }
         yield f"data: {json.dumps(usage_data)}\n\n"
 
+    yield "data: [DONE]\n\n"
+
     # Opt-in telemetry (task C): record a bucketed ``request`` event for
-    # this streaming completion, after the generator drains normally. TTFT
-    # is true first-token latency (``_first_token_ts``); tokens come from the
-    # engine's final usage (``_final_usage`` is set on the finish chunk). Same
-    # sampled + consent-gated + ``@_safe`` no-op semantics as the chat lane.
+    # this streaming completion, fired only AFTER the terminal ``[DONE]``
+    # marker is yielded + the generator resumes cleanly — matching the chat
+    # lane's documented emit-after-terminal-marker placement. A stream the
+    # client cancels or that raises while delivering ``[DONE]`` raises out
+    # before this line and is deliberately NOT counted (under-counting is
+    # conservative; emitting before ``[DONE]`` would record a false
+    # status-200 success on a disconnected final write). TTFT is true
+    # first-token latency (``_first_token_ts``); tokens come from the
+    # engine's final usage (``_final_usage`` is set on the finish chunk).
+    # Same sampled + consent-gated + ``@_safe`` no-op semantics as the chat
+    # lane.
     _elapsed_stream = time.perf_counter() - _stream_start
     _done = getattr(_final_usage, "completion_tokens", None) or 0
     _ptok = getattr(_final_usage, "prompt_tokens", None) or 0
@@ -962,5 +971,3 @@ async def stream_completion(
         status=200,
         caller_agent=caller_agent,
     )
-
-    yield "data: [DONE]\n\n"
