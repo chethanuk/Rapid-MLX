@@ -4233,6 +4233,58 @@ def test_mirror_download_reports_transfer_account_via_out(
     )
 
 
+def test_mirror_r2_only_non_lfs_fetch_is_a_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure R2 fetch of a non-LFS file is still a network transfer (Codex
+    #2392 R4 BLOCKING).
+
+    R2 serves files that carry no catalog sha256 straight into
+    ``snapshots/<rev>/`` WITHOUT writing an HF ``blobs/<sha>`` blob — so the
+    blob-store diff alone would wrongly report ``network_fetch=False`` ("Already
+    cached") for an R2-only cold pull. ``network_fetch`` must also count
+    ``bool(r2_hits)`` (any R2 worker that actually fetched over the wire) to
+    catch this. HF is never invoked, so the blob store stays byte-identical.
+    """
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    revision = "0badf00d" * 5
+    # No third element => no lfs sha256 => R2 lands it directly in snapshots/
+    # with no blob write (and no warm-cache blob-name shortcut).
+    files = [("config.json", 100)]
+    catalog = _catalog_payload([("qwen3-0.6b-4bit", repo_id, "mirrored")])
+
+    router = _UrlRouter()
+    router.add(
+        "https://models.rapidmlx.com/api/models",
+        _FakeResponse(200, json.dumps(catalog).encode()),
+    )
+    # config.json is an R2 hit (200) — the ONLY transfer this pull.
+    router.add(
+        "https://models.rapidmlx.com/mlx-community/Qwen3-0.6B-4bit/config.json",
+        _FakeResponse(200, b"x" * 100),
+    )
+
+    monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")
+    out: dict[str, object] = {}
+    with (
+        patch("urllib.request.urlopen", side_effect=router),
+        patch(
+            "huggingface_hub.model_info",
+            return_value=_mk_model_info(revision, files),
+        ),
+        patch("huggingface_hub.hf_hub_download") as hf_mock,
+    ):
+        ok = _mirror.download_with_mirror_fallback(repo_id, cache_dir=tmp_path, out=out)
+
+    assert ok is True
+    assert hf_mock.call_count == 0  # pure R2 pull — HF never invoked
+    # No blob was written (non-LFS file, no catalog sha256), yet bytes DID
+    # cross the wire from R2 — the boolean must be True.
+    assert out["network_fetch"] is True, "R2-only fetch is still a transfer"
+    assert out["transferred_bytes"] == 100
+
+
 def test_mirror_hf_relink_of_local_blob_is_not_a_fetch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

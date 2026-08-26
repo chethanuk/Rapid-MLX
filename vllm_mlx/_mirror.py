@@ -1472,9 +1472,14 @@ def download_with_mirror_fallback(
 ) -> bool:
     """Download ``repo_id`` to the HF cache via R2-first / HF-fallback.
 
-    ``out`` (optional) receives ``out["transferred_bytes"]`` = the count of
-    bytes actually fetched over the wire this pull (R2 + HF-fallback only;
-    warm ``cached`` hits are excluded). ``pull_command`` uses it to say
+    ``out`` (optional) receives ``out["transferred_bytes"]`` = the total
+    completed-file bytes of every file actually fetched over the wire this
+    pull (R2 + HF-fallback only; warm ``cached`` hits are excluded). This is
+    the files' on-disk size after download, NOT a byte-exact wire delta: a
+    resumed partial reuses bytes already written by the prior attempt, so the
+    count can over-state the fresh bytes in a resume. It is authoritative for
+    "did we fetch at all" (see ``network_fetch``) and for the approximate
+    download size, not for per-byte metering. ``pull_command`` uses it to say
     "already cached … (nothing to download)" truthfully (issue #2349).
 
     Returns True if every file landed in the snapshot dir (mix of R2 +
@@ -2199,10 +2204,23 @@ def download_with_mirror_fallback(
         out["transferred_bytes"] = transferred_bytes
         # Authoritative "did we fetch anything over the wire this pull?" —
         # distinct from the byte count so a fetched zero-byte file still
-        # counts as a transfer (codex round-4 BLOCKING #4). The verdict is the
-        # BLOB-store diff (Codex #2392): a new/modified blob means bytes
-        # crossed the wire; a warm re-link of already-local blobs does NOT
-        # (including non-LFS files with no catalog sha256, which the old
-        # ``bool(r2_hits or hf_hits)`` / sha256-only checks miscounted).
-        out["network_fetch"] = blobs_before != _blob_fingerprint(repo_root)
+        # counts as a transfer (codex round-4 BLOCKING #4).
+        #
+        # Two independent signals, OR'd (Codex #2392 + R4 BLOCKING):
+        #   1. ``bool(r2_hits)`` — any R2 worker actually fetched a file
+        #      over the wire. R2 serves non-LFS / no-catalog-sha256 files
+        #      straight into ``snapshots/<rev>/`` WITHOUT touching HF's
+        #      ``blobs/`` store, so those transfers are invisible to the
+        #      blob diff yet are genuine fetches. ``_do_file`` returns
+        #      "cached" before ever calling R2 when the target already
+        #      exists, so a warm R2 pull does not bump ``r2_hits``.
+        #   2. ``blobs_before != _blob_fingerprint(repo_root)`` — an HF
+        #      fallback materialized a new/modified blob (bytes crossed the
+        #      wire). A warm re-link of an already-local blob does NOT
+        #      change the blob store, so it is not counted as a fetch
+        #      (matching the ``blob_already_local`` "cached" classification
+        #      in ``_do_file``).
+        out["network_fetch"] = bool(r2_hits) or (
+            blobs_before != _blob_fingerprint(repo_root)
+        )
     return True
