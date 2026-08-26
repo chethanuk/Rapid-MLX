@@ -354,17 +354,57 @@ enum PortSweep {
     static func parseListeningPIDs(_ data: Data, port: Int) -> [Int32] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
         guard (1...65_535).contains(port) else { return [] }
+
+        enum OwnerColumn {
+            case processAndPID(Int)
+            case numericPID(Int)
+        }
+
         let portSuffix = ".\(port)"
         var result: [Int32] = []
         var seen: Set<Int32> = []
+        var ownerColumn: OwnerColumn?
         for line in text.split(separator: "\n") {
             let fields = line.split(whereSeparator: { $0.isWhitespace })
-            guard fields.count > 10,
+
+            // Header labels contain two two-word address columns, while each
+            // data row contains one token per address. Derive the owner column
+            // from the table's own header so both supported macOS layouts work:
+            // current releases expose `process:pid`; older releases expose
+            // separate numeric `pid` / `epid` columns.
+            if fields.first == "Proto" {
+                let addressLabelAdjustment = 2
+                if let index = fields.firstIndex(of: "process:pid"),
+                   index >= addressLabelAdjustment {
+                    ownerColumn = .processAndPID(index - addressLabelAdjustment)
+                } else if let index = fields.firstIndex(of: "pid"),
+                          fields.contains("epid"),
+                          index >= addressLabelAdjustment {
+                    ownerColumn = .numericPID(index - addressLabelAdjustment)
+                } else {
+                    ownerColumn = nil
+                }
+                continue
+            }
+
+            guard let ownerColumn,
+                  fields.count > 5,
                   fields[0] == "tcp4" || fields[0] == "tcp6",
                   fields[5] == "LISTEN",
-                  fields[3].hasSuffix(portSuffix),
-                  let separator = fields[10].lastIndex(of: ":"),
-                  let pid = Int32(fields[10][fields[10].index(after: separator)...]),
+                  fields[3].hasSuffix(portSuffix) else { continue }
+
+            let pid: Int32?
+            switch ownerColumn {
+            case let .processAndPID(index):
+                guard fields.indices.contains(index),
+                      let separator = fields[index].lastIndex(of: ":") else { continue }
+                pid = Int32(fields[index][fields[index].index(after: separator)...])
+            case let .numericPID(index):
+                guard fields.indices.contains(index) else { continue }
+                pid = Int32(fields[index])
+            }
+
+            guard let pid,
                   pid > 0,
                   seen.insert(pid).inserted else { continue }
             result.append(pid)
