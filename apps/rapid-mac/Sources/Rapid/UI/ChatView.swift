@@ -950,7 +950,9 @@ struct ChatView: View {
 
     private func choosePhotos() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .gif]
+        // ImageIO normalizes native still-image formats at the shared draft
+        // boundary; the picker must expose the same contract as paste/drop.
+        panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -1001,8 +1003,7 @@ struct ChatView: View {
 
         if !imageURLs.isEmpty {
             if supportsImageInput {
-                addImageURLs(imageURLs)
-                accepted = true
+                accepted = attachmentDraft.importImageURLs(imageURLs) || accepted
             } else {
                 rejectImageInputForCurrentModel()
             }
@@ -1014,19 +1015,6 @@ struct ChatView: View {
             attachmentDraft.notice = "Choose PDF, CSV, TXT, PNG, JPEG, or GIF files."
         }
         return accepted
-    }
-
-    private func addImageURLs(_ urls: [URL]) {
-        var accepted: [(attachment: ChatImageAttachment, sourceURL: URL)] = []
-        var rejection: String?
-        for url in urls {
-            do {
-                accepted.append((try ChatImageAttachment(contentsOf: url), url))
-            }
-            catch { rejection = error.localizedDescription }
-        }
-        attachmentDraft.appendImages(accepted)
-        attachmentDraft.notice = rejection
     }
 
     @discardableResult

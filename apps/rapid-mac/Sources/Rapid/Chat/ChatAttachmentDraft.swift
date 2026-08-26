@@ -35,6 +35,25 @@ struct ChatAttachmentDraft: Equatable {
         for item in imported { appendImage(item.attachment, sourceURL: item.sourceURL) }
     }
 
+    /// Shared picker/drop/file-paste import boundary. Keeping URL decoding in
+    /// the draft state makes every UI entry point produce the same normalized
+    /// attachment and leaves the native view responsible only for presentation.
+    @discardableResult
+    mutating func importImageURLs(_ urls: [URL]) -> Bool {
+        var imported: [(attachment: ChatImageAttachment, sourceURL: URL)] = []
+        var rejection: String?
+        for url in urls {
+            do {
+                imported.append((try ChatImageAttachment(contentsOf: url), url))
+            } catch {
+                rejection = error.localizedDescription
+            }
+        }
+        appendImages(imported)
+        notice = rejection
+        return !imported.isEmpty
+    }
+
     /// Starts one asynchronous import generation. A second source cannot race
     /// the first because every UI entry point funnels through this method.
     mutating func beginFileImport() -> UUID? {
