@@ -99,8 +99,16 @@ def test_low_disk_marks_fail():
     ]
 
 
-def test_huge_hf_cache_marks_warn():
-    """> 100 GB HF cache → WARN with cleanup hint."""
+def test_huge_hf_cache_marks_warn(tmp_path):
+    """> 100 GB HF cache → WARN with cleanup hint.
+
+    The cache dir is pointed at a fresh ``tmp_path`` that EXISTS so the
+    ``cache.exists()`` branch is taken deterministically on every platform
+    (a fresh Linux CI runner has no ``~/.cache/huggingface`` yet, which would
+    otherwise short-circuit to "HF cache: not present" and skip the WARN). The
+    reported size comes from the mocked ``_dir_size_gb``, not host state.
+    """
+    (tmp_path / "dummy").mkdir()
     with (
         mock.patch.object(eh.platform, "system", return_value="Darwin"),
         mock.patch.object(eh.platform, "machine", return_value="arm64"),
@@ -111,6 +119,7 @@ def test_huge_hf_cache_marks_warn():
         mock.patch.object(eh, "_detect_apple_silicon", return_value=("Apple M3", 36)),
         mock.patch.object(eh, "_disk_free_gb", return_value=200.0),
         mock.patch.object(eh, "_dir_size_gb", return_value=246.0),
+        mock.patch.object(eh, "_hf_cache_dir", return_value=tmp_path),
     ):
         section = eh.section_system()
 
