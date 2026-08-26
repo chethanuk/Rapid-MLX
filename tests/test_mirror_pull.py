@@ -4381,7 +4381,7 @@ def test_mirror_nonnfs_relink_is_a_pinned_documented_limitation(
     exists for — stay exact via the LFS ``blob_already_local`` probe. This test
     PINS that behavior so it is a contract, not an accident. Follow-up for full
     exactness: huggingface_hub downloader instrumentation (post-0.13.1, Vector
-    lane).
+    lane) — https://github.com/raullenchai/Rapid-MLX/issues/2427.
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     revision = "0badf00d" * 5
