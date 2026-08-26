@@ -4443,8 +4443,8 @@ struct QuickstartView: View {
     /// disk probe (FU-4) and the real kickoff:
     ///
     ///   * Probe ``freeBytesProbe`` (defaults to the HF cache volume).
-    ///   * Run ``DiskSpaceProbe.decide`` against
-    ///     ``DiskSpaceProbe.quickstartRequiredBytes``.
+    ///   * Derive the selected model's transient + OS-headroom requirement.
+    ///   * Run ``DiskSpaceProbe.decide`` against that requirement.
     ///   * ``.ok`` → fire ``kickoffDownload`` directly.
     ///   * ``.warn`` → flip the coordinator to ``.lowDiskWarning`` and
     ///     let the user choose Continue / Cancel from the rendered
@@ -4463,11 +4463,22 @@ struct QuickstartView: View {
         QuickstartView.applyPreflightDecision(
             decision: DiskSpaceProbe.decide(
                 freeBytes: freeBytesProbe(),
-                requiredBytes: DiskSpaceProbe.quickstartRequiredBytes
+                requiredBytes: Self.requiredDiskBytes(for: coordinator.selection)
             ),
             coordinator: coordinator,
             onKickoff: { kickoffDownload() }
         )
+    }
+
+    /// Translate the same selected-model size shown by onboarding into the
+    /// disk pre-flight budget. Authored byte receipts win; other choices use
+    /// the existing model-sizing estimate rather than alias-specific logic.
+    static func requiredDiskBytes(for choice: QuickstartModelChoice) -> Int64 {
+        let gib = Double(1 << 30)
+        let downloadBytes = choice.downloadBytes ?? Int64(
+            (ModelSizing.estimate(alias: choice.alias).weightsGB * gib).rounded(.up)
+        )
+        return DiskSpaceProbe.requiredBytes(downloadBytes: downloadBytes)
     }
 
     /// Cached models skip both the disk-space warning and DownloadManager.
