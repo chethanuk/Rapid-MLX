@@ -83,16 +83,16 @@ def _pulled_audio_aliases():
     state_path = _setting("FAKE_AUDIO_PULL_STATE")
     if not state_path:
         return set()
+    try:
+        with open(state_path) as stream:
+            return {line.strip() for line in stream if line.strip()}
+    except OSError:
+        return set()
 
 
 def _pulled_model_aliases():
     state_path = _setting("FAKE_PULL_STATE")
     if not state_path:
-        return set()
-    try:
-        with open(state_path) as stream:
-            return {line.strip() for line in stream if line.strip()}
-    except OSError:
         return set()
     try:
         with open(state_path) as stream:
