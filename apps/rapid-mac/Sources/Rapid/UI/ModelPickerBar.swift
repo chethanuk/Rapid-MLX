@@ -667,7 +667,8 @@ struct ModelPickerBar: View {
     /// independent notion of emptiness is exactly how the picker ended up
     /// with a branch that believed it had rows while rendering none.
     private var hasSelectableRows: Bool {
-        if quickstartEntry() != nil { return true }
+        let quickstartAlias = quickstartEntry()?.alias
+        if quickstartAlias != nil { return true }
         if !recommendedPickRows().isEmpty { return true }
         let filtered = ModelPickerVisibility.filter(
             catalog,
@@ -676,7 +677,7 @@ struct ModelPickerBar: View {
         )
         let deduped = ModelPickerBar.dedupedAllEntries(
             filtered: filtered,
-            quickstartRowRendered: quickstartEntry() != nil
+            quickstartAlias: quickstartAlias
         )
         let partition = ModelPickerBar.partitionByFit(deduped, hardware: hardware)
         return !partition.fits.isEmpty || !partition.notFit.isEmpty
@@ -791,10 +792,10 @@ struct ModelPickerBar: View {
     /// invariant directly without standing up a SwiftUI host.
     static func dedupedAllEntries(
         filtered: [ModelEntry],
-        quickstartRowRendered: Bool
+        quickstartAlias: String?
     ) -> [ModelEntry] {
-        guard quickstartRowRendered else { return filtered }
-        return filtered.filter { $0.alias != QuickstartCoordinator.defaultChoice.alias }
+        guard let quickstartAlias else { return filtered }
+        return filtered.filter { $0.alias != quickstartAlias }
     }
 
     /// Order the "All models" list: downloaded (cached) aliases first,
@@ -866,7 +867,7 @@ struct ModelPickerBar: View {
         // "select this alias" semantics.
         let deduped = ModelPickerBar.dedupedAllEntries(
             filtered: filtered,
-            quickstartRowRendered: quickstartEntry() != nil
+            quickstartAlias: quickstartEntry()?.alias
         )
         let partition = ModelPickerBar.partitionByFit(deduped, hardware: hardware)
         let sorted = ModelPickerBar.orderedAllModels(partition.fits)
