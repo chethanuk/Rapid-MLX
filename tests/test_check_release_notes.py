@@ -75,6 +75,24 @@ def test_rejects_notes_with_unterminated_drafting_comment(tmp_path: Path) -> Non
         check_release_notes("0.13.1", changelog, notes_dir)
 
 
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "> <!-- blockquoted draft -->\n",
+        "- <!-- list draft -->\n",
+        "1. <!-- ordered-list draft -->\n",
+        "> - <!-- nested container draft -->\n",
+    ],
+)
+def test_rejects_container_wrapped_comment_only_notes(
+    tmp_path: Path, markdown: str
+) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    (notes_dir / "v0.13.1.md").write_text(markdown, encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        check_release_notes("0.13.1", changelog, notes_dir)
+
+
 @pytest.mark.parametrize("version", ["0.13", "0.13.1-rc0", "../0.13.1", "v0.13.1"])
 def test_rejects_invalid_or_unsafe_version(tmp_path: Path, version: str) -> None:
     changelog, notes_dir = _inputs(tmp_path)

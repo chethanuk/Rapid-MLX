@@ -57,6 +57,12 @@ def test_post_merge_release_repeats_curated_notes_check_before_publish():
     assert '--version "$VERSION"' in precheck
     assert "--changelog apps/rapid-mac/CHANGELOG.md" in precheck
     assert "--notes-dir docs/release-notes" in precheck
+    validation = workflow.index("scripts/check_release_notes.py")
+    desktop_tag = workflow.index(
+        "- name: Tag the desktop app at the exact validated SHA"
+    )
+    engine_release = workflow.index("- name: Create tag and release")
+    assert validation < desktop_tag < engine_release
 
 
 def test_rc_never_replaces_stable_updater_pointer():

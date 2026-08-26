@@ -18,6 +18,14 @@ function rest_is_clean(s,    o, c) {
 function indented_code(line) {
   return (line ~ /^    / || line ~ /^\t/)
 }
+function container_payload(line,    s) {
+  s = line
+  sub(/^   /, "", s); sub(/^  /, "", s); sub(/^ /, "", s)
+  while (s ~ /^>[[:space:]]*/) sub(/^>[[:space:]]*/, "", s)
+  sub(/^[-+*][[:space:]]+/, "", s)
+  sub(/^[0-9]+[.)][[:space:]]+/, "", s)
+  return s
+}
 function fence_marker(line,    s, ch, n) {
   if (indented_code(line)) return ""
   s = line
@@ -53,7 +61,7 @@ in_fence {
       && $0 ~ ("^[[:space:]]*[" fence_char "]+[[:space:]]*$")) in_fence = 0
   next
 }
-!indented_code($0) && /^[[:space:]]*<!--/ {
+!indented_code($0) && container_payload($0) ~ /^<!--/ {
   if ($0 ~ /-->/) {
     if (!rest_is_clean(tail_after_close($0))) print
     next

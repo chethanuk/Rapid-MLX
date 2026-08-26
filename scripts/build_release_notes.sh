@@ -32,6 +32,8 @@
 # Required env:
 #   VERSION            X.Y.Z being released
 #   RELEASE_SHA        commit being tagged
+# Companion file:
+#   strip_release_note_comments.awk must remain beside this script.
 # Optional env:
 #   FORCE              "true" → stamp the emergency (gate-bypassed) banner
 #   ACTOR / REASON     audit fields for that banner
@@ -42,6 +44,11 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+NORMALIZER="$SCRIPT_DIR/strip_release_note_comments.awk"
+if [ ! -f "$NORMALIZER" ]; then
+  echo "missing release-note normalizer: $NORMALIZER" >&2
+  exit 1
+fi
 
 : "${VERSION:?VERSION is required}"
 : "${RELEASE_SHA:?RELEASE_SHA is required}"
@@ -234,7 +241,7 @@ if git cat-file -e "$RELEASE_SHA:$HIGHLIGHTS_PATH" 2>/dev/null; then
       # Keep the preflight and publisher on one executable normalization SSOT.
       # The legacy inline pass remains for compatibility; the shared pass is
       # idempotent and is what the bump validator invokes directly.
-      awk -f "$SCRIPT_DIR/strip_release_note_comments.awk" |
+      awk -f "$NORMALIZER" |
       # Trim leading blank lines ($( ) trims trailing ones).
       sed -e '/./,$!d'
   )
