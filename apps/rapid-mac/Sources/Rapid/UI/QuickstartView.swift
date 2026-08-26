@@ -255,6 +255,7 @@ final class QuickstartCoordinator {
         alias: "qwen3.5-4b-4bit",
         displayName: "Qwen 3.5 · 4B",
         hfRepo: "mlx-community/Qwen3.5-4B-MLX-4bit",
+        downloadBytes: 3_061_121_321,
         blurb: "Strong everyday chat and tools, chosen for a reliable first conversation.",
         tier: .starter
     )
@@ -264,6 +265,7 @@ final class QuickstartCoordinator {
         alias: "lfm2.5-2.6b-4bit",
         displayName: "LFM2.5 · 2.6B",
         hfRepo: "LiquidAI/LFM2.5-2.6B-MLX",
+        downloadBytes: 1_601_103_345,
         blurb: "A lighter everyday model chosen to fit lower-memory Macs.",
         tier: .starter
     )

@@ -40,10 +40,12 @@ struct DiskSpaceProbeTests {
         ) == 4 * gib)
         #expect(QuickstartView.requiredDiskBytes(
             for: QuickstartCoordinator.defaultChoice
-        ) == 5 * gib)
+        ) == 6 * gib)
         #expect(QuickstartView.requiredDiskBytes(
             for: QuickstartCoordinator.lowMemoryChoice
         ) == 2 * gib)
+        #expect(QuickstartCoordinator.defaultChoice.downloadBytes == 3_061_121_321)
+        #expect(QuickstartCoordinator.compactDefaultChoice.downloadBytes == 1_601_103_345)
     }
 
     // MARK: - Decision truth table
