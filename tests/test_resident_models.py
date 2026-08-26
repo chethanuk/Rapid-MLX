@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
@@ -855,6 +856,225 @@ async def test_failed_assistant_replacement_rolls_back_newly_loaded_model():
     assert "chat-new" not in registry
     assert "chat-new" not in loaded
     assert {item["id"] for item in manager.snapshot()["models"]} == {"chat"}
+
+
+@pytest.mark.asyncio
+async def test_replacement_keeps_rollback_path_when_both_models_fit():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        assert old_engine.stopped is False
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=10 * GIB,
+        memory_reader=lambda: 0,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    replacement = await manager.load(
+        "chat-new",
+        estimated_bytes=4 * GIB,
+        replace_group="assistant",
+        memory_policy="evict_first_if_needed",
+    )
+
+    projection = replacement.replacement_projection
+    assert projection is not None
+    assert projection.strategy == "keep_then_commit"
+    assert projection.reason == "keep_both_fits"
+    assert projection.models_to_free == (("chat-old", 4 * GIB),)
+    assert projection.projected_bytes == 4 * GIB
+    assert old_engine.stopped is True
+    assert registry.default_name == "chat-new"
+
+
+@pytest.mark.asyncio
+async def test_replacement_evicts_first_only_when_that_makes_target_fit():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    load_observations: list[tuple[bool, str | None]] = []
+    primary_changes: list[str | None] = []
+    handoff = Mock()
+
+    async def loader(name: str, path: str | None, performance=None):
+        load_observations.append((old_engine.stopped, registry.default_name))
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=lambda replacement: primary_changes.append(
+            replacement.model_name if replacement is not None else None
+        ),
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    replacement = await manager.load(
+        "chat-new",
+        estimated_bytes=4 * GIB,
+        replace_group="assistant",
+        replace_mode="wait",
+        memory_policy="evict_first_if_needed",
+    )
+
+    assert load_observations == [(True, None)]
+    projection = replacement.replacement_projection
+    assert projection is not None
+    assert projection.payload() == {
+        "strategy": "evict_first",
+        "reason": "role_capacity_evict_first_required",
+        "models_to_free": [{"id": "chat-old", "estimated_bytes": 4 * GIB}],
+        "current_bytes": 4 * GIB,
+        "requested_bytes": 4 * GIB,
+        "projected_bytes": 4 * GIB,
+        "limit_bytes": 6 * GIB,
+    }
+    assert replacement.primary is True
+    assert replacement.pinned is True
+    assert registry.default_name == "chat-new"
+    assert old_engine.pauses == [("wait", None)]
+    assert primary_changes == [None, "chat-new"]
+    handoff.commit.assert_called_once_with(replacement.entry)
+    handoff.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evict_first_load_failure_reports_primary_absent_without_rollback():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    primary_changes: list[str | None] = []
+    handoff_commits: list[str | None] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        raise ImportError("replacement checkpoint is unavailable")
+
+    class Handoff:
+        def __init__(self):
+            self.rollback = Mock()
+
+        def commit(self, replacement):
+            handoff_commits.append(
+                replacement.model_name if replacement is not None else None
+            )
+
+    handoff = Handoff()
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=lambda replacement: primary_changes.append(
+            replacement.model_name if replacement is not None else None
+        ),
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(ImportError, match="unavailable"):
+        await manager.load(
+            "chat-invalid",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    assert old_engine.stopped is True
+    assert registry.default_name is None
+    assert manager.snapshot()["models"] == []
+    assert primary_changes == [None]
+    assert handoff_commits == [None]
+    handoff.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evict_first_stop_failure_finishes_handoff_as_primary_absent():
+    registry = ModelRegistry()
+    old_engine = FailingStopLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+    handoff = Mock()
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=lambda _entry: None,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    loader.assert_not_awaited()
+    handoff.commit.assert_called_once_with(None)
+    handoff.rollback.assert_not_called()
+    assert registry.default_name is None
+    assert manager.snapshot()["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_replacement_rejects_before_eviction_when_target_still_does_not_fit():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(ResidentModelCapacityError) as exc_info:
+        await manager.load(
+            "chat-too-large",
+            estimated_bytes=8 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    projection = exc_info.value.replacement_projection
+    assert projection is not None
+    assert projection.strategy == "reject"
+    assert projection.reason == "role_capacity_insufficient_after_eviction"
+    assert projection.projected_bytes == 8 * GIB
+    loader.assert_not_awaited()
+    assert old_engine.pauses == [("wait", 0)]
+    assert old_engine.paused is False
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_unknown_memory_policy():
+    manager, _, _, _ = manager_fixture()
+
+    with pytest.raises(ResidentModelError, match="unsupported memory policy"):
+        await manager.load("chat-new", memory_policy="invented")
 
 
 @pytest.mark.asyncio
@@ -1964,6 +2184,90 @@ def test_residency_control_plane_forwards_abort_replacement_policy(monkeypatch):
     assert response.status_code == 200
     assert old_engine.pauses == [("abort", None)]
     assert registry.default_name == "chat-new"
+    assert response.json()["replacement_projection"] == {
+        "strategy": "keep_then_commit",
+        "reason": "keep_both_fits",
+        "models_to_free": [{"id": "chat-old", "estimated_bytes": 4 * GIB}],
+        "current_bytes": 4 * GIB,
+        "requested_bytes": response.json()["estimated_bytes"],
+        "projected_bytes": response.json()["estimated_bytes"],
+        "limit_bytes": 0,
+    }
+
+
+def test_residency_control_plane_returns_typed_replacement_capacity_projection(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from vllm_mlx.middleware.exception_handlers import install_exception_handlers
+    from vllm_mlx.routes.residency import router
+
+    manager, registry, loaded, _ = manager_fixture(limit_gib=6)
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.get_config",
+        lambda: SimpleNamespace(residency_manager=manager),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    install_exception_handlers(app)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/models/load",
+            json={
+                "model": "chat-too-large",
+                "estimated_size_gb": 8,
+                "replace_group": "assistant",
+            },
+        )
+
+    assert response.status_code == 507
+    assert response.json() == {
+        "error": {
+            "message": (
+                "resident model memory ceiling exceeded after projected "
+                "assistant replacement"
+            ),
+            "type": "insufficient_capacity_error",
+            "code": "insufficient_capacity_error",
+            "param": "estimated_size_gb",
+        },
+        "replacement_projection": {
+            "strategy": "reject",
+            "reason": "role_capacity_insufficient_after_eviction",
+            "models_to_free": [{"id": "chat", "estimated_bytes": 4 * GIB}],
+            "current_bytes": 4 * GIB,
+            "requested_bytes": 8 * GIB,
+            "projected_bytes": 8 * GIB,
+            "limit_bytes": 6 * GIB,
+        },
+    }
+    assert loaded == {}
+    assert registry.default_name == "chat"
+
+
+def test_residency_control_plane_preserves_generic_capacity_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx.routes.residency import router
+
+    manager, _, _, _ = manager_fixture(limit_gib=6)
+    monkeypatch.setattr(
+        "vllm_mlx.routes.residency.get_config",
+        lambda: SimpleNamespace(residency_manager=manager),
+    )
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/models/load",
+            json={"model": "image-too-large", "estimated_size_gb": 8},
+        )
+
+    assert response.status_code == 507
+    assert "memory ceiling exceeded" in response.json()["detail"]
 
 
 def test_residency_control_plane_validates_and_forwards_performance(monkeypatch):

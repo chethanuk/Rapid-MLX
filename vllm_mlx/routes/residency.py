@@ -59,6 +59,9 @@ class ModelLoadRequest(BaseModel):
     performance: ModelPerformanceRequest | None = None
     reload_if_changed: StrictBool = False
     replace_mode: Literal["reject", "wait", "abort"] = "reject"
+    memory_policy: Literal["keep_then_commit", "evict_first_if_needed"] = (
+        "evict_first_if_needed"
+    )
 
 
 class ModelPinRequest(BaseModel):
@@ -154,11 +157,26 @@ async def load_resident_model(request: ModelLoadRequest):
             performance=performance,
             reload_if_changed=request.reload_if_changed,
             replace_mode=request.replace_mode,
+            memory_policy=request.memory_policy,
         )
     except HTTPException:
         raise
     except ResidentModelCapacityError as exc:
-        raise HTTPException(status_code=507, detail=str(exc)) from exc
+        projection = exc.replacement_projection
+        if projection is None:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=507,
+            detail={
+                "error": {
+                    "message": str(exc),
+                    "type": "insufficient_capacity_error",
+                    "code": "insufficient_capacity_error",
+                    "param": "estimated_size_gb",
+                },
+                "replacement_projection": projection.payload(),
+            },
+        ) from exc
     except ResidentModelError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
