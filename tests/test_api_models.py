@@ -1128,6 +1128,49 @@ class TestStreamingModels:
             mllm_scheduler._commit_request(mllm_request)
         assert mllm_scheduler.requests[public_id] is mllm_request
 
+    @pytest.mark.asyncio
+    async def test_diffusion_stream_registers_public_id_for_cancellation(self):
+        """The diffusion worker's existing cancel event is publicly addressable."""
+        import asyncio
+        import queue
+        import threading
+
+        from vllm_mlx.runtime.diffusion_lane import _STREAM_DONE, DiffusionEngine
+
+        engine = DiffusionEngine.__new__(DiffusionEngine)
+        engine._max_tokens = 32
+        engine._scheduler_config = None
+        engine._generation_lock = asyncio.Lock()
+        engine._worker_stuck = False
+        engine._jobs = queue.Queue()
+        engine._request_cancels = {}
+        engine._request_cancels_lock = threading.Lock()
+        public_id = "chatcmpl-" + "c" * 32
+
+        async def _consume():
+            return [
+                chunk
+                async for chunk in engine._stream_prompt_raw(
+                    "prompt",
+                    max_tokens=8,
+                    temperature=0.0,
+                    request_id=public_id,
+                )
+            ]
+
+        consumer = asyncio.create_task(_consume())
+        while engine._jobs.empty():
+            await asyncio.sleep(0)
+        _, _, _, worker_output, cancel_event, done_event = engine._jobs.get_nowait()
+
+        assert await engine.abort_request(public_id) is True
+        assert cancel_event.is_set()
+        worker_output.put(_STREAM_DONE)
+        done_event.set()
+        assert await consumer == []
+        assert public_id not in engine._request_cancels
+        assert await engine.abort_request(public_id) is False
+
 
 class TestModelSerialization:
     """Tests for model serialization (model_dump / JSON)."""
