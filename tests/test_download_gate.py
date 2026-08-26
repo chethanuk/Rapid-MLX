@@ -662,10 +662,13 @@ def test_audio_family_incomplete_without_config(tmp_path, monkeypatch):
     ["voice.safetensors", "weights.npz"],  # other-family safetensors / NPZ
 )
 def test_audio_family_no_generic_any_safetensors(tmp_path, monkeypatch, weight):
-    """An UNSUPPORTED audio family must NOT be marked runnable from a generic
-    ``*.safetensors`` / ``weights.npz`` — no speculative any-safetensors
-    routing. Each family is added explicitly with its verified weight filename
-    (#2406 part A is strictly Kokoro + Whisper)."""
+    """The AUDIO helper does no speculative generic any-safetensors routing:
+    an unsupported family is NOT established runnable by a stray
+    ``*.safetensors`` / ``weights.npz``. Each supported family is added
+    explicitly with its verified weight filename (#2406 part A = Kokoro +
+    Whisper). Callers (``_cache_entry_is_runnable``) decide which families
+    reach this helper and may fall through to the generic text probe for
+    unsupported ones — that routing is covered in test_cli_models."""
     repo = "mlx-community/example-other"
     cache_root = tmp_path / "hf-cache"
     repo_root = cache_root / "models--mlx-community--example-other"
