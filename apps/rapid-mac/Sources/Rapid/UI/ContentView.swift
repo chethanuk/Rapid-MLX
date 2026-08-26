@@ -294,12 +294,41 @@ struct ContentView: View {
             guard !telemetryConsentPending else { return }
             await refreshCatalogSnapshot()
         }
+        // The selected chat alias may be a secondary resident model rather
+        // than the process-owning `servingAlias`. Fetch its exact live profile
+        // whenever that selection becomes resident so photo admission follows
+        // the lane that will actually receive the request.
+        .task(id: SelectedModelProfileKey(
+            alias: alias,
+            isResident: server.isModelResident(alias),
+            port: server.activePort
+        )) {
+            let requestedAlias = alias
+            server.clearActiveModelProfile()
+            guard server.isModelResident(requestedAlias) else { return }
+            let profile = await ServerProfileFetcher.fetch(
+                baseURL: ChatStreamClient.loopbackURL(port: server.activePort),
+                alias: requestedAlias,
+                bearer: server.activeBearer
+            )
+            guard !Task.isCancelled,
+                  alias == requestedAlias,
+                  server.isModelResident(requestedAlias),
+                  let profile else { return }
+            server.applyActiveModelProfile(profile, forAlias: requestedAlias)
+        }
         .task {
             while !Task.isCancelled {
                 await server.refreshResidency()
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+
+    private struct SelectedModelProfileKey: Equatable {
+        let alias: String
+        let isResident: Bool
+        let port: Int
     }
 
     /// First-run setup, filling the window (Paper 05.1.A).

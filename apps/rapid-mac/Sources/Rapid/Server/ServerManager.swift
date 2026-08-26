@@ -655,7 +655,7 @@ final class ServerManager {
     }
 
     func applyActiveModelProfile(_ profile: ServerModelProfile, forAlias alias: String) {
-        guard servingAlias?.caseInsensitiveCompare(alias) == .orderedSame,
+        guard isModelResident(alias),
               profile.id.caseInsensitiveCompare(alias) == .orderedSame
         else { return }
         activeModelProfile = profile

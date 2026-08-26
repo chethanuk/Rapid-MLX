@@ -711,6 +711,13 @@ final class ChatViewModel {
         guard let messageID,
               let index = messages.firstIndex(where: { $0.id == messageID })
         else { return }
+        // Acceptance is monotonic for one request: once the server emits a
+        // token, a later transport failure means the response was interrupted,
+        // not that the image was rejected. An explicit retry may still move a
+        // previously rejected image to accepted when its own first token lands.
+        if messages[index].imageDeliveryStatus == .accepted, status == .rejected {
+            return
+        }
         messages[index].imageDeliveryStatus = status
     }
 

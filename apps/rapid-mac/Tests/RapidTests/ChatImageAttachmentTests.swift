@@ -218,6 +218,29 @@ struct ChatImageAttachmentTests {
         #expect(messages[1].imageDeliveryStatus == .pending)
     }
 
+    @Test("accepted image delivery cannot regress after a later stream failure")
+    @MainActor
+    func acceptedDeliveryIsMonotonic() {
+        let id = UUID()
+        var messages = [
+            ChatMessage(id: id, role: .user, imageDeliveryStatus: .pending)
+        ]
+
+        ChatViewModel.updateImageDeliveryStatus(
+            in: &messages, messageID: id, status: .accepted
+        )
+        ChatViewModel.updateImageDeliveryStatus(
+            in: &messages, messageID: id, status: .rejected
+        )
+        #expect(messages[0].imageDeliveryStatus == .accepted)
+
+        messages[0].imageDeliveryStatus = .rejected
+        ChatViewModel.updateImageDeliveryStatus(
+            in: &messages, messageID: id, status: .accepted
+        )
+        #expect(messages[0].imageDeliveryStatus == .accepted)
+    }
+
     @Test("plain-text follow-up after a document does not resurrect an older image")
     func documentFollowUpKeepsDocumentFocus() throws {
         let image = try ChatImageAttachment(

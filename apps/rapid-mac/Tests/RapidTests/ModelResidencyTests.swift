@@ -259,6 +259,51 @@ struct ModelResidencyTests {
         #expect(server.activeModelProfile == nil)
     }
 
+    @Test("Secondary resident chat aliases accept their own live photo profile")
+    func secondaryResidentProfileIsAuthoritative() {
+        let secondary = ResidentModelStatus(
+            id: "secondary-model",
+            modelPath: "repo/secondary-model",
+            aliases: [],
+            modality: "text",
+            state: "resident",
+            pinned: false,
+            primary: false,
+            activeRequests: 0,
+            estimatedBytes: 1,
+            measuredBytes: nil,
+            idleSeconds: 0
+        )
+        let residency = ModelResidencySnapshot(
+            memoryLimitBytes: 10,
+            memoryUsedBytes: 1,
+            memoryAvailableBytes: 9,
+            idleTTLSeconds: 60,
+            loadsTotal: 1,
+            evictionsTotal: 0,
+            models: [secondary]
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: "primary-model"),
+            residency: residency
+        )
+        server.applyActiveModelProfile(
+            ServerModelProfile(
+                id: "secondary-model",
+                capabilities: ["text"],
+                servingLane: "text",
+                servingLaneReason: "operator_forced_text"
+            ),
+            forAlias: "secondary-model"
+        )
+
+        #expect(server.activeModelProfile?.id == "secondary-model")
+        #expect(!server.imageInputAvailability(
+            forAlias: "secondary-model",
+            catalogSupportsImageInput: true
+        ).isAvailable)
+    }
+
     @Test("Resident ceiling reuses the Mac usable-RAM bucket")
     func residentMemoryCeiling() {
         #expect(ModelSizing.residentMemoryCeilingGB(on: mockMac(ramGB: 32)) == 25)

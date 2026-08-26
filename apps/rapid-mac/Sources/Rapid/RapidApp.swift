@@ -421,7 +421,6 @@ struct RapidApp: App {
                     // fetch so a chat send during an alias swap can't bump
                     // ``max_tokens`` for the wrong alias.
                     sampling.clearActiveReasoningParser()
-                    server.clearActiveModelProfile()
                     guard let alias = server.servingAlias else { return }
                     let baseURL = ChatStreamClient.loopbackURL(port: server.activePort)
                     let bearer = server.activeBearer
@@ -434,7 +433,6 @@ struct RapidApp: App {
                     }
                     guard !Task.isCancelled,
                           server.servingAlias == alias else { return }
-                    server.applyActiveModelProfile(profile, forAlias: alias)
                     sampling.applyServerProfile(profile)
                 }
                 .task {
