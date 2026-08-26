@@ -93,7 +93,8 @@ struct ModelPickerBar: View {
     /// affordance and
     /// uses ``QuickstartCoordinator.defaultChoice`` directly.
     private var quickstartTargetAlias: String {
-        quickstart?.selection.alias ?? QuickstartCoordinator.defaultChoice.alias
+        quickstart?.selection.alias
+            ?? QuickstartCoordinator.baselineChoice(hardware: hardware).alias
     }
     /// cycle-7: hide sub-1B aliases (qwen3-0.6b-*) from the
     /// alphabetical "All models" list by default — they hallucinate
@@ -698,7 +699,8 @@ struct ModelPickerBar: View {
     /// section is dropped entirely rather than rendering a row that
     /// can't be Started.
     private func quickstartEntry() -> ModelEntry? {
-        return catalog.first(where: { $0.alias == QuickstartCoordinator.defaultChoice.alias })
+        let alias = QuickstartCoordinator.baselineChoice(hardware: hardware).alias
+        return catalog.first(where: { $0.alias == alias })
     }
 
     /// One row for the Quickstart section. Mirrors ``aliasButton``'s

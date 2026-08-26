@@ -327,9 +327,7 @@ final class QuickstartCoordinator {
         hardware: MacHardware,
         catalog: [ModelEntry]
     ) -> QuickstartModelChoice {
-        let baseline = hardware.physicalRAMGB < 16
-            ? compactDefaultChoice
-            : defaultChoice
+        let baseline = baselineChoice(hardware: hardware)
         let eligibleCatalog = catalog.filter { $0.kind == .chat }
         let excluded = CacheAwareDefault.retiredAutomaticAliases
             .union([lowMemoryChoice.alias])
@@ -340,6 +338,14 @@ final class QuickstartCoordinator {
             excludedAliases: excluded
         ) else { return baseline }
         return choice(forAlias: alias)
+    }
+
+    /// RAM-only baseline shared by onboarding and the persistent picker row.
+    /// Cached preference is deliberately layered only by ``defaultChoice``.
+    static func baselineChoice(hardware: MacHardware) -> QuickstartModelChoice {
+        hardware.physicalRAMGB < 16
+            ? compactDefaultChoice
+            : defaultChoice
     }
 
     /// UserDefaults key for the persistent "Quickstart already

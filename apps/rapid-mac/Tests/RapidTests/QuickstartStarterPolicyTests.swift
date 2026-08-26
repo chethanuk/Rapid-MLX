@@ -47,6 +47,12 @@ struct QuickstartStarterPolicyTests {
         #expect(QuickstartCoordinator.defaultChoice(
             hardware: hardware(64), catalog: catalog
         ).alias == "qwen3.5-4b-4bit")
+        #expect(QuickstartCoordinator.baselineChoice(
+            hardware: hardware(8)
+        ).alias == "lfm2.5-2.6b-4bit")
+        #expect(QuickstartCoordinator.baselineChoice(
+            hardware: hardware(16)
+        ).alias == "qwen3.5-4b-4bit")
     }
 
     @Test("The synchronous no-catalog baseline is safe before welcome Skip")
