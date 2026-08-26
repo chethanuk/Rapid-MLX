@@ -150,6 +150,26 @@ final class ServerModelProfileTests {
         #expect(first != replacement)
     }
 
+    @Test("Selected live profile is retried on the existing residency cadence")
+    func selectedProfileRetriesAfterInitialFailure() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/Rapid/UI/ContentView.swift"),
+            encoding: .utf8
+        )
+        let residencyRefresh = try #require(source.range(of: "await server.refreshResidency()"))
+        let retry = try #require(
+            source.range(
+                of: "await refreshSelectedModelProfile(for: alias)",
+                range: residencyRefresh.lowerBound..<source.endIndex
+            )
+        )
+        #expect(retry.lowerBound > residencyRefresh.lowerBound)
+    }
+
     @Test("Partial sampling block — only some keys populated")
     func decodesPartialSampling() throws {
         // aliases.json may set only ``temperature`` for some

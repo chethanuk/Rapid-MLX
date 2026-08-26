@@ -818,7 +818,8 @@ final class ChatViewModel {
             ?? ModelBrandStyle.supportsImageInput(forAlias: alias)
         beginAssistantTurn(
             alias: alias,
-            supportsImageInput: resolvedImageCapability
+            supportsImageInput: resolvedImageCapability,
+            imageMessageID: imageAttachments.isEmpty ? nil : user.id
         )
     }
 
@@ -833,7 +834,8 @@ final class ChatViewModel {
     /// see the two answers as alternatives at all.
     private func beginAssistantTurn(
         alias: String,
-        supportsImageInput: Bool
+        supportsImageInput: Bool,
+        imageMessageID: UUID? = nil
     ) {
         let placeholder = ChatMessage(role: .assistant, status: .streaming)
         let placeholderIndex = appendMessage(placeholder)
@@ -873,20 +875,29 @@ final class ChatViewModel {
                 // returns `ready == true`, yet must still not stream and
                 // must still reset `isStreaming`.
                 guard !Task.isCancelled else {
-                    finishStartupCancellation(placeholderIndex: placeholderIndex, epoch: epoch)
+                    finishStartupCancellation(
+                        placeholderIndex: placeholderIndex,
+                        imageMessageID: imageMessageID,
+                        epoch: epoch
+                    )
                     return
                 }
                 guard ready else {
                     finishWithStartupFailure(
                         placeholderIndex: placeholderIndex,
                         alias: alias,
+                        imageMessageID: imageMessageID,
                         epoch: epoch
                     )
                     return
                 }
             }
             guard !Task.isCancelled else {
-                finishStartupCancellation(placeholderIndex: placeholderIndex, epoch: epoch)
+                finishStartupCancellation(
+                    placeholderIndex: placeholderIndex,
+                    imageMessageID: imageMessageID,
+                    epoch: epoch
+                )
                 return
             }
 
@@ -975,9 +986,15 @@ final class ChatViewModel {
     func finishWithStartupFailure(
         placeholderIndex: Int,
         alias: String,
+        imageMessageID: UUID? = nil,
         epoch: Int? = nil
     ) {
         if let epoch, epoch != conversationEpoch { return }
+        setImageDeliveryStatus(
+            messageID: imageMessageID,
+            status: nil,
+            epoch: conversationEpoch
+        )
         let message = "Couldn't start \(alias). Try again, or pick a different model in the box below."
         if var placeholder = currentMessage(index: placeholderIndex) {
             placeholder.status = .failed
@@ -1019,9 +1036,15 @@ final class ChatViewModel {
     /// ``finaliseCancellation``.
     func finishStartupCancellation(
         placeholderIndex: Int,
+        imageMessageID: UUID? = nil,
         epoch: Int? = nil
     ) {
         if let epoch, epoch != conversationEpoch { return }
+        setImageDeliveryStatus(
+            messageID: imageMessageID,
+            status: nil,
+            epoch: conversationEpoch
+        )
         if var placeholder = currentMessage(index: placeholderIndex) {
             Self.finaliseCancellation(message: &placeholder)
             updateMessage(at: placeholderIndex, with: placeholder)

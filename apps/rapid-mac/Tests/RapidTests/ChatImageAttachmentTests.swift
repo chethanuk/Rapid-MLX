@@ -256,6 +256,45 @@ struct ChatImageAttachmentTests {
         #expect(messages[0].imageDeliveryStatus == nil)
     }
 
+    @Test("model-start failure clears pending image delivery before persistence")
+    @MainActor
+    func startupFailureClearsPendingDelivery() throws {
+        let imageID = UUID()
+        let model = ChatViewModel(persistsConversations: false)
+        model.devSeedMessages([
+            ChatMessage(id: imageID, role: .user, imageDeliveryStatus: .pending),
+            ChatMessage(role: .assistant, status: .streaming),
+        ])
+
+        model.finishWithStartupFailure(
+            placeholderIndex: 1,
+            alias: "model",
+            imageMessageID: imageID
+        )
+
+        #expect(model.messages[0].imageDeliveryStatus == nil)
+        #expect(model.messages[1].status == .failed)
+    }
+
+    @Test("cancelled model start clears pending image delivery")
+    @MainActor
+    func startupCancellationClearsPendingDelivery() {
+        let imageID = UUID()
+        let model = ChatViewModel(persistsConversations: false)
+        model.devSeedMessages([
+            ChatMessage(id: imageID, role: .user, imageDeliveryStatus: .pending),
+            ChatMessage(role: .assistant, status: .streaming),
+        ])
+
+        model.finishStartupCancellation(
+            placeholderIndex: 1,
+            imageMessageID: imageID
+        )
+
+        #expect(model.messages[0].imageDeliveryStatus == nil)
+        #expect(model.messages[1].status == .complete)
+    }
+
     @Test("plain-text follow-up after a document does not resurrect an older image")
     func documentFollowUpKeepsDocumentFocus() throws {
         let image = try ChatImageAttachment(

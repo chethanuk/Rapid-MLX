@@ -306,24 +306,40 @@ struct ContentView: View {
         )) {
             let requestedAlias = alias
             server.clearActiveModelProfile()
-            guard server.isModelResident(requestedAlias) else { return }
-            let profile = await ServerProfileFetcher.fetch(
-                baseURL: ChatStreamClient.loopbackURL(port: server.activePort),
-                alias: requestedAlias,
-                bearer: server.activeBearer
-            )
-            guard !Task.isCancelled,
-                  alias == requestedAlias,
-                  server.isModelResident(requestedAlias),
-                  let profile else { return }
-            server.applyActiveModelProfile(profile, forAlias: requestedAlias)
+            await refreshSelectedModelProfile(for: requestedAlias)
         }
         .task {
             while !Task.isCancelled {
                 await server.refreshResidency()
                 try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                // Reuse the existing local residency cadence as recovery for
+                // a transient profile timeout/non-2xx. A successful profile
+                // remains authoritative for this bearer session; only a
+                // missing/mismatched profile needs another request.
+                if server.activeModelProfile?.id.caseInsensitiveCompare(alias) != .orderedSame {
+                    await refreshSelectedModelProfile(for: alias)
+                }
             }
         }
+    }
+
+    private func refreshSelectedModelProfile(for requestedAlias: String) async {
+        guard server.isModelResident(requestedAlias) else { return }
+        let requestedPort = server.activePort
+        let requestedBearer = server.activeBearer
+        let profile = await ServerProfileFetcher.fetch(
+            baseURL: ChatStreamClient.loopbackURL(port: requestedPort),
+            alias: requestedAlias,
+            bearer: requestedBearer
+        )
+        guard !Task.isCancelled,
+              alias == requestedAlias,
+              server.activePort == requestedPort,
+              server.activeBearer == requestedBearer,
+              server.isModelResident(requestedAlias),
+              let profile else { return }
+        server.applyActiveModelProfile(profile, forAlias: requestedAlias)
     }
 
     /// First-run setup, filling the window (Paper 05.1.A).
