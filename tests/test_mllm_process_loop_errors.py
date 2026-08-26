@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +15,26 @@ from tests._headless_mlx import install_headless_mlx_import_stubs
 install_headless_mlx_import_stubs()
 
 from vllm_mlx.mllm_scheduler import MLLMRequest, MLLMScheduler  # noqa: E402
+
+
+def test_mllm_scheduler_rejects_duplicate_public_ids() -> None:
+    """A duplicate cannot replace the MLLM request cancellation addresses."""
+    public_id = "chatcmpl-" + "a" * 32
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._generation_paused = False
+    scheduler._paused_admission_tokens = set()
+    scheduler._paused_add_allowance = 0
+    scheduler.requests = {}
+    scheduler.waiting = deque()
+    scheduler._cancelled_request_ids = set()
+    scheduler._disconnect_abort_ids = set()
+    request = SimpleNamespace(request_id=public_id, lifecycle_admission_token=None)
+
+    scheduler._commit_request(request)
+
+    with pytest.raises(ValueError, match="already exists"):
+        scheduler._commit_request(request)
+    assert scheduler.requests[public_id] is request
 
 
 @pytest.mark.asyncio
