@@ -6970,6 +6970,7 @@ def ps_command(_args):
         }
         model = "(unknown)"
         port = "8000"  # serve's default
+        served = None  # --served-model-name value, if any (issue #2353)
         try:
             i = cmd.index("serve") + 1
             # Pre-PR this loop ``break``ed on the first positional, so a
@@ -6985,10 +6986,14 @@ def ps_command(_args):
                         key, val = tok.split("=", 1)
                         if key == "--port":
                             port = val
+                        elif key == "--served-model-name":
+                            served = val
                         i += 1
                     elif tok in VALUE_FLAGS:
                         if tok == "--port" and i + 1 < len(cmd):
                             port = cmd[i + 1]
+                        elif tok == "--served-model-name" and i + 1 < len(cmd):
+                            served = cmd[i + 1]
                         i += 2
                     else:
                         i += 1
@@ -6999,6 +7004,12 @@ def ps_command(_args):
                     i += 1
         except ValueError:
             pass
+
+        # #2353: a user sets --served-model-name to choose the API model
+        # identity; the process surface should lead with that identity and
+        # may show the requested alias/checkpoint in parentheses after it.
+        if served and served != model:
+            model = f"{served} ({model})"
 
         uptime_s = max(0, int(time.time() - proc.info["create_time"]))
         h, m = uptime_s // 3600, (uptime_s % 3600) // 60

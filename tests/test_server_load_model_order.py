@@ -92,6 +92,31 @@ def test_load_model_enables_native_tool_format_when_parser_supports_it(monkeypat
     assert server._engine.preserve_native_tool_format is True
 
 
+@pytest.mark.parametrize("served,expected", [("studio-assistant", True), (None, False)])
+def test_load_model_tracks_explicit_served_model_name(monkeypatch, served, expected):
+    """Issue #2353: ``load_model(..., served_model_name=...)`` must set the
+    flag the readiness banner consumes, and leave it clear when no override
+    is supplied — otherwise the banner would silently fall back to the
+    catalog alias."""
+    from vllm_mlx import server
+
+    monkeypatch.setattr(server, "BatchedEngine", _StubEngine)
+    monkeypatch.setattr(server, "_engine", None, raising=False)
+    monkeypatch.setattr(server, "_enable_auto_tool_choice", False, raising=False)
+    monkeypatch.setattr(server, "_tool_call_parser", None, raising=False)
+    monkeypatch.setattr(server, "_reasoning_parser_name", None, raising=False)
+    monkeypatch.setattr(server, "_reasoning_parser", None, raising=False)
+    monkeypatch.setattr(server, "_tool_parser_instance", None, raising=False)
+    monkeypatch.setattr(server, "_mcp_manager", None, raising=False)
+    monkeypatch.setattr(server, "_enable_tool_logits_bias", False, raising=False)
+    monkeypatch.setattr(server, "_model_alias", None, raising=False)
+    monkeypatch.setattr(server, "_served_model_name_set", not expected, raising=False)
+
+    server.load_model("mlx-community/Qwen3.5-9B-4bit", served_model_name=served)
+
+    assert server._served_model_name_set is expected
+
+
 def _stub_routing_globals(monkeypatch, server):
     """Neutralize the load_model globals that the routing tests don't exercise."""
     monkeypatch.setattr(server, "BatchedEngine", _StubEngine)
