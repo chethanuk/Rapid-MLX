@@ -1644,6 +1644,18 @@ def _try_mirror_prefetch(
     )
 
 
+def _offline_hub_mode_active() -> bool:
+    """True when the HF/transformers offline switches force local-only hub
+    access, making a download impossible regardless of connectivity.
+
+    Mirrors huggingface_hub's own semantics: ``HF_HUB_OFFLINE`` /
+    ``TRANSFORMERS_OFFLINE`` are truthy when set to any non-empty value.
+    """
+    hf_offline: str | None = os.environ.get("HF_HUB_OFFLINE")
+    transformers_offline: str | None = os.environ.get("TRANSFORMERS_OFFLINE")
+    return bool(hf_offline) or bool(transformers_offline)
+
+
 def _ensure_model_downloaded(
     model_name: str, *, force_disk_check: bool = False
 ) -> None:
@@ -1689,6 +1701,28 @@ def _ensure_model_downloaded(
         # short-circuit on its own cache check if the repo really is
         # fully present.
         pass
+
+    # Offline + uncached refusal (#2357): reaching this point means the model is
+    # NOT cached (the probes above returned on every cached/complete shape) and
+    # it is not a local path. If the hub is pinned to offline mode, a download
+    # is impossible, so refuse NOW with one actionable message instead of
+    # falling through to the network attempts that each fail and let the serve
+    # subprocess re-download — which duplicates "First-time download" /
+    # "Pre-download skipped" and eventually ends in misleading --mllm/--no-mllm
+    # lane advice when the checkpoint is simply absent. This mirrors the
+    # TimeoutError / disk-space exits: refuse before server initialization.
+    if _offline_hub_mode_active():
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        print(
+            f"\n  Error: {model_name} is not cached and the network is "
+            "unavailable (offline mode is enabled).\n"
+            f"  After connectivity is restored, download it with "
+            f"`rapid-mlx pull {model_name}`, then serve again.\n"
+            f"  Expected cache location: {HF_HUB_CACHE}\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Disk-space gate + mirror pull. Both the disk probe (HF ``model_info``)
     # and the mirror's own metadata + ``/api/models`` catalog round-trips run
