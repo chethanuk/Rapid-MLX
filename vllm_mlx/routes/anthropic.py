@@ -2173,6 +2173,20 @@ async def _stream_anthropic_messages(
     async for output in engine.stream_chat(messages=messages, **chat_kwargs):
         delta_text = output.new_text
 
+        # Task-C TTFT latch on the first engine content delta. We latch on
+        # the raw engine delta (not per-block-client-visibility) deliberately
+        # and doc the deferral from codex r3-B#2: the Anthropic stream state
+        # machine routes each delta through reasoning / tool / text channels
+        # across ~1000 lines of scatter (thinking_delta, text_delta,
+        # tool_use block, forced-content buffering) — latching at the first
+        # client-visible block would require re-plumbing every yield site.
+        # The engine emits the first delta essentially as it becomes the
+        # first visible block (reasoning is shown as thinking_delta, tool
+        # JSON args as a tool block); the only suppressed-delta edge case
+        # (a capped/forced reasoning head the caller didn't request) shifts
+        # TTFT by a single block and does not materially skew a bucketed
+        # aggregate metric. This matches the semantic chat.py lands on
+        # ("first real output token") at the granularity telemetry buckets.
         if _first_token_ts is None and (delta_text or ""):
             _first_token_ts = time.perf_counter()
 

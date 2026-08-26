@@ -881,7 +881,15 @@ async def stream_completion(
         if output.finished:
             _final_usage = get_usage(output)
         # Task C: latch the timestamp of the first non-empty content chunk
-        # for a true TTFT on the streaming emit below.
+        # for a true TTFT on the streaming emit below. This fires only in the
+        # non-JSON, non-echo path (the loop ``continue``s above for
+        # ``_json_mode``, where no client-visible content leaves per-chunk).
+        # Doc'd deferral from codex r3-B#1: in JSON mode the client genuinely
+        # sees NO content until the buffered consolidated emit at stream end,
+        # so the emit's ``_elapsed_stream`` total-latency fallback IS the
+        # correct "client-visible TTFT" (there is no earlier content to
+        # measure) — not an underreport. Echo re-emits the prompt as visible
+        # prefix content, which likewise first leaves at this yield.
         if _first_token_ts is None and (output.new_text or ""):
             _first_token_ts = time.perf_counter()
         yield f"data: {json.dumps(data)}\n\n"

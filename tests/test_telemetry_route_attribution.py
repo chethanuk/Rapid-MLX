@@ -79,7 +79,16 @@ def _request_events(captured) -> list[dict]:
 async def _sleep(seconds: float) -> None:
     """Async sleep helper so fake engines can inject a real post-first-token
     gap without blocking the event loop (mirrors the fake engine in
-    ``test_telemetry_streaming_request_wiring.py``)."""
+    ``test_telemetry_streaming_request_wiring.py``).
+
+    TTFT rigor (codex r3-NIT#3 deferral): we use a REAL clock + an artificial
+    post-first-token gap and assert ``ttft_ms < 0.5 * total``, exactly the
+    approach the repo's accepted ``test_telemetry_streaming_request_wiring``
+    uses — rather than patching the global ``time.perf_counter`` (which leaks
+    into the HTTP client's own elapsed-time arithmetic and is flaky). Under
+    pathological CI slowness where pre-token processing could exceed the gap,
+    the assertion would trip on a genuinely-regressed (total-latency) TTFT —
+    the exact regression the test exists to catch."""
     import asyncio
 
     await asyncio.sleep(seconds)
