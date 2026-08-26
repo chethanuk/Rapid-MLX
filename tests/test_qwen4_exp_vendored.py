@@ -663,6 +663,36 @@ def test_qsa_attention_continuous_batch_decode_matches_cache_lengths():
     np.testing.assert_array_equal(np.array(batch_cache[1].offset), np.array([4, 6]))
 
 
+def test_qsa_attention_filter_preserves_shorter_row_padding_during_decode():
+    args = _args(
+        indexer_budget=2,
+        indexer_compress_ratio=2,
+        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
+    )
+    attention = QSAAttention(args)
+    caches = []
+    for length in (3, 5):
+        cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
+        output = attention(mx.zeros((1, length, args.hidden_size)), cache)
+        mx.eval(output, cache.state)
+        caches.append(cache)
+
+    filtered = CacheList.merge(caches)
+    compact = filtered.extract(0)
+    filtered.filter(mx.array([0]))
+    np.testing.assert_array_equal(np.array(filtered[1].left_padding), np.array([2]))
+
+    compact_output = attention(mx.zeros((1, 1, args.hidden_size)), compact)
+    filtered_output = attention(mx.zeros((1, 1, args.hidden_size)), filtered)
+    mx.eval(compact_output, filtered_output, compact.state, filtered.state)
+
+    np.testing.assert_allclose(
+        np.array(filtered_output), np.array(compact_output), rtol=0, atol=0
+    )
+    np.testing.assert_array_equal(np.array(filtered[0].offset), np.array([4]))
+    np.testing.assert_array_equal(np.array(filtered[1].offset), np.array([4]))
+
+
 def test_qsa_attention_fresh_left_padded_batch_aligns_with_main_kv():
     args = _args(
         indexer_budget=2,

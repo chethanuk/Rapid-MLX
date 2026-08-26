@@ -303,10 +303,11 @@ class QSAIndexCache(ArraysCache):
         ]
         if self._valid_until is not None:
             self._valid_until = [self._valid_until[index] for index in indices]
-        max_offset = max(self._offsets, default=0)
-        self.left_padding = mx.array(
-            [max_offset - offset for offset in self._offsets], dtype=mx.int32
-        )
+        # ArraysCache.filter already selected the matching physical-padding
+        # rows. Preserve those values: they describe where each request's
+        # logical token zero sits in the still-padded KV tensors. Recomputing
+        # against the longest *surviving* request would incorrectly turn a
+        # retained shorter row's padding into zero.
 
     def extend(self, other):
         rows = [self.extract(index) for index in range(len(self._offsets))]
