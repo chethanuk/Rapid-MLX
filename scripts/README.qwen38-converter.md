@@ -1,4 +1,4 @@
-# Qwen3.8-Flash-Next streaming q4-g64 converter (prototype)
+# Qwen3.8-Flash-Next streaming q4-g32 converter (prototype v2)
 
 **Lane:** script-only helper for Vector's `qwen4_exp` port. Never edits model
 math. This is a **prototype** to be reviewed and transplanted by Vector — it is
@@ -14,9 +14,9 @@ guard. So this converter:
 
 1. processes the checkpoint **shard-by-shard** (one MoE expert matrix at a time,
    exactly as `mlx_lm convert.py` streams with `lazy=True`), and
-2. preserves the PLE table **as-is** by streaming raw **byte-slices** out of each
-   source shard via `mmap` — it never parses a PLE tensor into a dense array and
-   never concatenates the table in RAM.
+2. **quantises** every quantisable weight (including PLE/embed tables) to affine
+   **q4-g32** while streaming each tensor via `mmap` byte-slice — it never
+   materialises the whole ~51B PLE table in RAM.
 
 ## Files
 
@@ -47,7 +47,7 @@ source .venv/bin/activate   # mlx 0.32.2, safetensors, numpy
     --output /tmp/synth-out \
     --max-shard-bytes 2000000
 
-# 3. verify PLE byte-preservation, quant round-trip, SHA-256 manifest
+# 3. verify COPY preservation, q4-g32 quant round-trip, total_size, manifests
 .venv/bin/python scripts/verify_synth_conversion.py /tmp/synth-src /tmp/synth-out
 
 # 4. prove the guards abort closed
@@ -60,11 +60,10 @@ Expected: all green, with the converter ledger reporting `peak_rss_bytes`
 ## Converter CLI
 
 ```
---source   <snapshot dir>           must contain model.safetensors.index.json
---output   <dir>                    must NOT exist (aborts if it does)
---max-shard-bytes <int>             quant output shard cap (default 4 GiB)
---ple-substr <str> [repeatable]     tensor-name substring = PLE (default: ple_embed,
-                                    embed_tokens, mm.embedding)
+--source           <snapshot dir>   must contain model.safetensors.index.json
+--output           <dir>            must NOT exist (aborts if it does)
+--max-shard-bytes  <int>            output shard cap (default 4 GiB)
+--group-size       <int>            quant group size (default 32 = q4-g32)
 ```
 
 Runbook-guard parameters (only via the Python API today): `min_free_bytes`
@@ -73,20 +72,26 @@ operator confirms ≥140 GiB free at the output root before starting.
 
 ## Output contract
 
-* Quantised weights → affine **q4-g64** (`mx.quantize(bits=4, group_size=64,
-  mode='affine')`), each tensor emitted with `.scales` / `.biases`, packed into
-  bounded output shards.
-* PLE weights → copied **byte-for-byte** into `model-ple-00001.safetensors` via
-  mmap byte-slices (never materialised), preserving source dtype/shape so the
-  shard is a fully valid safetensors file.
+* **Quantised** weights (all 2-D, group-size-divisible tensors incl. the PLE /
+  embed tables) → affine **q4-g32** (`mx.quantize(bits=4, group_size=32,
+  mode='affine')`), each emitted with `.scales` / `.biases`, packed into
+  bounded output shards. PLE is quantised, never preserved BF16, and never
+  materialised as a whole table (per-tensor mmap streaming).
+* **Copy** tensors (1-D norms/biases, `A_log`, aux/buffer dtypes, widths not
+  divisible by group_size) → carried through value-for-value with their source
+  shape/dtype, so no quantisable-unfriendly tensor is dropped or mangled.
 * Non-weight metadata (config.json, generation_config.json, tokenizer files)
   copied verbatim (root level) so the output tree is self-contained loader
   input; these are never quantized.
-* `model.safetensors.index.json` → covers every original weight exactly once
+* `model.safetensors.index.json` → `total_size` = Σ over every source weight of
+  `numel × dtype_bytes` (the loader's semantic model size, not source
+  *.safetensors file sizes), and a `weight_map` covering every original weight
   (2 extra keys per quantised tensor for scales/biases).
+* Output shards use deterministic `model-{i:05d}-of-{N:05d}.safetensors` with
+  the real total `N` (bounded by `--max-shard-bytes`).
 * `SHA256SUMS.txt` → byte-sorted `sha256  <relative path>` per output file.
 * Execution ledger on stdout: file count, output bytes, shard list, **peak RSS**,
-  wall time, `status`.
+  group_size, quant/copy counts, `total_weight_bytes`, `status`.
 
 ## Fail-closed guarantees
 
@@ -102,17 +107,17 @@ operator confirms ≥140 GiB free at the output root before starting.
 
 ## Known prototype limits (for Vector to finalise)
 
-* `total_size` in the output index is the SOURCE byte total (computed before the
-  weight_map is re-keyed). Vector should confirm the loader's expectation here.
-* The PLE output shard keeps source dtype (often fp16); the Rapid loader's PLE
-  fast-path must read by byte-span / dtype-shape, not assume fp32.
-* `model.embed_tokens.weight` is classified PLE by substring and preserved
-  (correct for this embedding-table-as-PLE model). If embed_tokens must instead
-  be quantised in some variant, adjust `--ple-substr`.
+* bf16 **copy** tensors (norms etc.) are widened to fp32 in the output because
+  numpy safetensors cannot carry bfloat16; a bf16-preserving copy needs mlx
+  `framework="mlx"` in the transplant (Vector's loader). Quantised PATH handles
+  bf16 correctly (widens via bit-manip → q4-g32).
+* The manifest `classify_tensor` conjoins explicit embed/PLE names with the
+  predicate; Vector may want to gate embed/PLE q4-g32 against the loader's
+  `nn.Embedding.as_linear` / quantised-embedding contract (rows must be
+  divisible by 32 — true for hidden=2560).
+* `--group-size` defaults to 32; swap to 64 for a q4-g64 variant is a one-line
+  change (shard sizes / packed dtype shift accordingly).
 * No `--upload-repo` (forbidden on the real run by the runbook).
-* Shard count in the ledger is the raw quant shard set; a final re-bundling
-  pass (packing small quant shards up to `--max-shard-bytes`) is not yet wired
-  and is the obvious next step before a real production run.
 
 ## Reference
 

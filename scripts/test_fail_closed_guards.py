@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from qwen38_streaming_convert import convert, GUARD_EXPERT_SSD  # noqa: E402
+from qwen38_streaming_convert import GUARD_EXPERT_SSD, convert  # noqa: E402
 
 FIXTURES = Path("/tmp/synth-guard-fixtures")
 
@@ -58,14 +58,18 @@ def main(src: Path) -> int:
     # 1 existing output dir
     out1 = _empty_out("existing-out")
     (out1 / "sentinel").write_text("x")
-    ok, msg = _fails("existing-out", lambda: convert(src, out1 / "out", max_shard_bytes=2_000_000))
+    ok, msg = _fails(
+        "existing-out", lambda: convert(src, out1 / "out", max_shard_bytes=2_000_000)
+    )
     cases.append(("existing-output-dir", ok, msg))
 
     # 2 missing index
     def _no_index(copy: Path):
         (copy / "model.safetensors.index.json").unlink()
 
-    ok, msg = _fails("missing-index", lambda: _conv_bad_index(src, out1 / "x", _no_index))
+    ok, msg = _fails(
+        "missing-index", lambda: _conv_bad_index(src, out1 / "x", _no_index)
+    )
     cases.append(("missing-index", ok, msg))
 
     # 3 missing source shard
@@ -75,13 +79,19 @@ def main(src: Path) -> int:
         idx["weight_map"][first] = "does-not-exist.safetensors"
         (copy / "model.safetensors.index.json").write_text(json.dumps(idx))
 
-    ok, msg = _fails("missing-shard", lambda: _conv_bad_index(src, out1 / "y", _missing_shard))
+    ok, msg = _fails(
+        "missing-shard", lambda: _conv_bad_index(src, out1 / "y", _missing_shard)
+    )
     cases.append(("missing-source-shard", ok, msg))
 
     # 4 Extreme SSD
     ok, msg = _fails(
         "extreme-ssd",
-        lambda: convert(Path(GUARD_EXPERT_SSD + "/src"), Path("/tmp/x/out"), max_shard_bytes=2_000_000),
+        lambda: convert(
+            Path(GUARD_EXPERT_SSD + "/src"),
+            Path("/tmp/x/out"),
+            max_shard_bytes=2_000_000,
+        ),
     )
     cases.append(("extreme-ssd", ok, msg))
 
@@ -95,8 +105,7 @@ def main(src: Path) -> int:
     cases.append(("free-space-floor", ok, msg))
 
     for label, ok, msg in cases:
-        print(f"  [{'ok' if ok else 'FAIL'}] {label}"
-              + ("" if ok else f": {msg}"))
+        print(f"  [{'ok' if ok else 'FAIL'}] {label}" + ("" if ok else f": {msg}"))
     bad = [c for c in cases if not c[1]]
     if bad:
         print("\nFAILED GUARDS:", ", ".join(c[0] for c in bad))
