@@ -66,6 +66,21 @@ struct OnboardingDirectionDTests {
                 "the setup surface must take the window's size, not a panel's")
     }
 
+    @Test("Welcome-screen Skip receives the hardware-aware starter policy")
+    func starterPolicyIsOwnedByTheRootView() throws {
+        let source = try Self.strippedSource("Sources/Rapid/UI/QuickstartView.swift")
+        let body = try #require(source.range(of: "varbody:someView{"))
+        let content = try #require(source.range(of: "privatevarcontent:someView{"))
+        let policyTask = try #require(source.range(of: ".task(id:StarterSelectionKey("))
+        let chooser = try #require(source.range(of: "privatevarchooseModelStep:someView{"))
+
+        #expect(policyTask.lowerBound > body.lowerBound)
+        #expect(policyTask.lowerBound < content.lowerBound,
+                "the policy task must mount with the root view before welcome Skip is actionable")
+        #expect(policyTask.lowerBound < chooser.lowerBound,
+                "the policy task must not be owned by Step 2")
+    }
+
     /// #2033 finding 2 — a first-time user reported two enabled "Start"
     /// controls on Step 2 at once: the wizard's own footer primary
     /// ("Start existing model") AND the shared ``ReadinessBanner``'s inline

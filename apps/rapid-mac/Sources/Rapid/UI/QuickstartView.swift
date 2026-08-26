@@ -1497,6 +1497,19 @@ struct QuickstartView: View {
             .task(id: downloadJobStatusKey) {
                 handleDownloadStatusChange()
             }
+            // Selection belongs to the whole onboarding lifecycle, not Step 2:
+            // Skip is available on the welcome screen and must hand the parent
+            // the same hardware/cache-aware alias the chooser would show.
+            .task(id: StarterSelectionKey(
+                catalogLoaded: catalogLoaded,
+                physicalRAMGB: hardware.physicalRAMGB,
+                catalogSignature: cachedModels
+                    .map { "\($0.alias):\($0.kind):\($0.cached)" }
+                    .sorted()
+            )) {
+                guard catalogLoaded else { return }
+                coordinator.applyDefaultChoice(hardware: hardware, catalog: cachedModels)
+            }
             // The warning asks the user to free memory, so keep observing the
             // result of that action while this exact decision is visible.
             // The view-bound task cancels when onboarding unmounts; three
@@ -1904,16 +1917,6 @@ struct QuickstartView: View {
         // signal rather than a timer. Re-fires when the snapshot lands.
         .task(id: catalogLoaded) {
             coordinator.resolveRecommendationLoading(catalogLoaded: catalogLoaded)
-        }
-        .task(id: StarterSelectionKey(
-            catalogLoaded: catalogLoaded,
-            physicalRAMGB: hardware.physicalRAMGB,
-            catalogSignature: cachedModels
-                .map { "\($0.alias):\($0.kind):\($0.cached)" }
-                .sorted()
-        )) {
-            guard catalogLoaded else { return }
-            coordinator.applyDefaultChoice(hardware: hardware, catalog: cachedModels)
         }
     }
 
