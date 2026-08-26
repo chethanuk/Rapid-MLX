@@ -16,6 +16,7 @@ name: Release pre-flight
 #   G10  MLX upstream cross-chip-family scan   advisory
 #   G11  auto-routing escape-hatch registry    macOS-14 (needs MLX)
 #   PF-1 canonical bump-PR title pre-check     ubuntu-latest
+#   PF-1 release-note completeness             ubuntu-latest
 #   PF-2 release secret + var presence         ubuntu-latest
 #        + Cloudflare credential probe (expiry blocks; scope gaps advise)
 #
@@ -93,6 +94,14 @@ jobs:
             echo "::error::PR title says v$TITLE_VER but pyproject.toml is $PYPROJECT_VER. Bump pyproject.toml or rename the PR."
             exit 1
           fi
+      - name: PF-1 — verify curated release-note inputs
+        env:
+          TITLE_VER: ${{ needs.detect-bump-pr.outputs.version }}
+        run: |
+          python scripts/check_release_notes.py \
+            --version "$TITLE_VER" \
+            --changelog apps/rapid-mac/CHANGELOG.md \
+            --notes-dir docs/release-notes
 
   pf2-release-secrets:
     # PF-2 — every secret and var that rapid-mac-release.yml references must

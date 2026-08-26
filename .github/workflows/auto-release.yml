@@ -487,11 +487,13 @@ jobs:
           HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
         run: |
           set -euo pipefail
-          if ! grep -qE "^## \[${VERSION//./\\.}\]" apps/rapid-mac/CHANGELOG.md; then
-            echo "::error::apps/rapid-mac/CHANGELOG.md has no '## [${VERSION}]' section — the app release would ship empty notes. Add it and re-run; nothing has been published yet."
-            exit 1
-          fi
-          echo "apps/rapid-mac/CHANGELOG.md has a [${VERSION}] section."
+          # Repeat the bump-PR PF-1 check at the exact release SHA. This is
+          # defense in depth against a skipped/obsolete PR check or a recovery
+          # dispatch from a later main head.
+          python scripts/check_release_notes.py \
+            --version "$VERSION" \
+            --changelog apps/rapid-mac/CHANGELOG.md \
+            --notes-dir docs/release-notes
 
           # Fail HERE, before anything is published, because there is no good
           # answer later. Skipping the app tag would leave a green run with only

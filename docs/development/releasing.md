@@ -198,7 +198,7 @@ This is the rule. No exceptions. CI doesn't fake-inference with a tiny model on 
 | G9 | 10-sequential latency | **M3** | `make release-check-m3` | tok/s stability degradation |
 | G10 | MLX upstream cross-chip-family audit | CI | `release-preflight.yml` advisory (macOS-14) | M5-style #404 landmines |
 | G11 | Auto-routing escape-hatch registry | CI | `release-preflight.yml` (macOS-14) + ci.yml test-apple-silicon | silent auto-detection failures (#393/#400/#404) |
-| PF-1 | Auto-release bump-PR title regex pre-check (canonical subject, no suffix) | CI | `release-preflight.yml` (ubuntu) | a bump PR whose title isn't the clean release subject (the post-merge detect step separately tolerates the `(#NN)` squash suffix) |
+| PF-1 | Auto-release bump-PR title and curated-note pre-check | CI | `release-preflight.yml` (ubuntu) | a non-canonical bump title, version mismatch, missing exact Desktop CHANGELOG section, or missing/empty version-bound release-notes file |
 | PF-2 | Release workflow secret + var presence | CI | `release-preflight.yml` (ubuntu) | a credential the tag run needs but nobody configured (#1851) |
 | PF-3 | `rapid-mac-tag` environment read-back | CI | `release-preflight.yml` (ubuntu) | the production tag approval environment is missing or no longer protected (a workflow reference auto-creates an *unprotected* one — not an approval gate) |
 | PF-4 | Live main-head + blocker evidence at candidate time | CI | `auto-release.yml::release-prep` | an RC tag claimed at a validated candidate that is no longer the live `main` head, or with an unresolved/recently-changed release blocker (#2301) |

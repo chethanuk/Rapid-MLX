@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-release.yml"
 DESKTOP_RELEASABLE = ROOT / ".github/actions/desktop-releasable/action.yml"
 PREFLIGHT_WORKFLOW = ROOT / ".github/workflows/release-preflight.yml"
+AUTO_RELEASE_WORKFLOW = ROOT / ".github/workflows/auto-release.yml"
 PUBLISH_WORKFLOWS = [
     ROOT / ".github/workflows/publish.yml",
     ROOT / ".github/workflows/release-artifact-matrix.yml",
@@ -38,6 +39,24 @@ def test_bump_detection_checks_out_version_parser_before_invoking_it():
     checkout = detect.index("actions/checkout@")
     invocation = detect.index("scripts/release_version.py")
     assert checkout < invocation
+
+
+def test_bump_preflight_runs_automatically_and_checks_curated_notes():
+    workflow = PREFLIGHT_WORKFLOW.read_text(encoding="utf-8")
+    assert "pull_request:" in workflow
+    assert "scripts/check_release_notes.py" in workflow
+    assert '--version "$TITLE_VER"' in workflow
+    assert "--changelog apps/rapid-mac/CHANGELOG.md" in workflow
+    assert "--notes-dir docs/release-notes" in workflow
+
+
+def test_post_merge_release_repeats_curated_notes_check_before_publish():
+    workflow = AUTO_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    precheck = _step(workflow, "Pre-check the desktop app CHANGELOG")
+    assert "scripts/check_release_notes.py" in precheck
+    assert '--version "$VERSION"' in precheck
+    assert "--changelog apps/rapid-mac/CHANGELOG.md" in precheck
+    assert "--notes-dir docs/release-notes" in precheck
 
 
 def test_rc_never_replaces_stable_updater_pointer():
