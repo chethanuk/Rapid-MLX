@@ -237,20 +237,29 @@ def bench_one(
     # Interleave calibration and parser timing across rounds; with a tiny
     # ``iters`` (unit tests) a single round suffices.
     rounds = _CAL_REPS if iters >= _CAL_REPS else 1
-    per_round = max(1, iters // rounds)
+    # Distribute ``iters`` across rounds so the full count is actually run:
+    # the first ``iters % rounds`` rounds get one extra call, and every round
+    # runs at least one. Accounting is exact — ``sum(n_per_round) == iters``
+    # and the reported ``iters`` equals what was executed (issue #2344 review).
+    per_round = [
+        max(1, iters // rounds + (1 if i < iters % rounds else 0))
+        for i in range(rounds)
+    ]
     pairs: list[tuple[float, float]] = []
     t_total0 = time.perf_counter()
-    for _ in range(rounds):
+    for i in range(rounds):
         speedup = (
             _measure_runner_speedup() if runner_speedup is None else runner_speedup
         )
+        n = per_round[i]
         t0 = time.perf_counter()
-        for _ in range(per_round):
+        for _ in range(n):
             fn(sample)
         dt = time.perf_counter() - t0
-        us = (dt / per_round) * 1_000_000
+        us = (dt / n) * 1_000_000
         pairs.append((us, speedup))
     total_ms = (time.perf_counter() - t_total0) * 1000
+    iters_executed = sum(per_round)
     # Worst-case ε across all paired rounds (max(parser_us / (base × speedup))).
     eps = max(us / (base_us * speedup) for us, speedup in pairs)
     last_speedup = pairs[-1][1]
@@ -260,7 +269,7 @@ def bench_one(
         name=name,
         total_ms=total_ms,
         us_per_call=us_per_call,
-        iters=iters,
+        iters=iters_executed,
         threshold_us=threshold_us,
         passed=eps <= REGRESSION_LIMIT,
     )
