@@ -74,11 +74,8 @@ can actually understand.
   [#2219](https://github.com/raullenchai/Rapid-MLX/issues/2219),
   [#2388](https://github.com/raullenchai/Rapid-MLX/pull/2388))
 - **Dictation remains available across chat-model switches.** The speech model
-  stays resident and is restored after switching, while a proven chat selection
-  survives an in-session restart. ([#2400](https://github.com/raullenchai/Rapid-MLX/pull/2400),
-  [#2374](https://github.com/raullenchai/Rapid-MLX/pull/2374),
-  [#2363](https://github.com/raullenchai/Rapid-MLX/issues/2363),
-  [#2364](https://github.com/raullenchai/Rapid-MLX/issues/2364))
+  stays resident and is restored after switching chat models.
+  ([#2400](https://github.com/raullenchai/Rapid-MLX/pull/2400))
 - **Photo rejection and multimodal reloads recover cleanly.** A rejected image
   cannot poison the next text turn, and a reloaded vision model cannot reuse a
   stale generation worker. ([#2379](https://github.com/raullenchai/Rapid-MLX/pull/2379),
