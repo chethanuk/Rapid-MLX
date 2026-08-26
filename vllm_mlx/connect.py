@@ -134,16 +134,17 @@ class ServerEndpoints:
 
 
 # The ``--setup`` verbs printed in the human banner's "Connect:" section.
-# Each row is ``(app label, command prefix, OpenAI endpoint?)``. Rows that
-# point a first-class agent at the server (`claude-code`, `continue`) take an
-# OpenAI-style ``/v1`` base URL and get ``--base-url <url>`` appended so the
-# copied command targets the *actual* running server, not the localhost
-# default the agent would otherwise assume. ``openai-python`` writes no config
-# and just prints a snippet, so it carries no ``--base-url``.
+# Each row is ``(app label, command prefix, OpenAI endpoint?)``. Every row —
+# including ``openai-python`` — takes an OpenAI-style ``/v1`` base URL and
+# gets ``--base-url <url>`` appended so the copied command targets the
+# *actual* running server, not the localhost:8000 default the standalone
+# process would otherwise assume (#2348). ``connect`` accepts ``--base-url``
+# as the explicit way to receive that instance context, so the pasted command
+# resolves the real host/port/model instead of printing placeholders.
 _CONNECT_ROWS: list[tuple[str, str, bool]] = [
     ("Claude Code", "rapid-mlx agents claude-code --setup", True),
     ("Continue", "rapid-mlx agents continue --setup", True),
-    ("Python", "rapid-mlx connect openai-python", False),
+    ("Python", "rapid-mlx connect openai-python", True),
 ]
 
 
@@ -247,6 +248,40 @@ def endpoints_from_bind(
     if listen_fd is not None and (host is None or port is None):
         return ServerEndpoints(host="", port=0, model=model, listen_fd=listen_fd)
     return ServerEndpoints(host or "localhost", port or 8000, model=model)
+
+
+def _parse_base_url(base_url: str) -> tuple[str, int]:
+    """Split an OpenAI-style base URL into ``(host, port)``.
+
+    ``rapid-mlx connect`` accepts ``--base-url`` as the explicit way to carry
+    the *live* server context across process boundaries (#2348). Without it a
+    standalone ``connect`` process cannot know the port/model a ``serve``
+    picked, so it would print the localhost:8000 default instead of the real
+    endpoint. A trailing ``/v1`` (OpenAI-style, what the banner prints) is
+    accepted and ignored for host/port derivation.
+
+    Accepts and normalizes the same host shapes as :func:`_authority` —
+    bare IPv4/hostnames and bracket-wrapped or scoped IPv6 literals — so a
+    user can paste the banner URL verbatim. A missing port falls back to the
+    rapid-mlx default (8000).
+
+    Raises ``ValueError`` on a non-http(s) scheme or a URL with no host.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    split = urlsplit(base_url, scheme="http")
+    scheme = split.scheme or "http"
+    if scheme not in ("http", "https"):
+        raise ValueError(f"base-url must be an http(s) URL, got {base_url!r}")
+    host = split.hostname
+    if not host:
+        raise ValueError(f"base-url has no host, got {base_url!r}")
+    # unquote canonicalizes a percent-encoded scoped IPv6 zone-id back to the
+    # raw form (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then
+    # re-encodes it consistently when rendering, so the round-trip is stable.
+    host = unquote(host)
+    port = split.port or 8000
+    return host, port
 
 
 def resolve_endpoints(
