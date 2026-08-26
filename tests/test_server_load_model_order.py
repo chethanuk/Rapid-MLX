@@ -138,8 +138,11 @@ def test_load_model_materializes_config_before_hybrid_routing_probe(
     # its config has been materialized (i.e. after the download).
     monkeypatch.setattr(api_utils, "is_mllm_model", lambda name: True)
     monkeypatch.setattr(
-        api_utils, "mllm_backbone_is_hybrid", lambda name: state["materialized"]
+        api_utils,
+        "mllm_backbone_cache_mode",
+        lambda name: "arrays" if state["materialized"] else None,
     )
+    monkeypatch.setattr(api_utils, "mllm_hybrid_runtime_supported", lambda: False)
 
     with caplog.at_level(logging.INFO, logger="vllm_mlx.server"):
         server.load_model("some/uncached-hybrid-vlm-4bit")
@@ -167,7 +170,7 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
     _stub_routing_globals(monkeypatch, server)
     monkeypatch.setattr(server, "_ensure_routing_config", lambda name: None)
     monkeypatch.setattr(api_utils, "is_mllm_model", lambda name: True)
-    monkeypatch.setattr(api_utils, "mllm_backbone_is_hybrid", lambda name: False)
+    monkeypatch.setattr(api_utils, "mllm_backbone_cache_mode", lambda name: None)
 
     server.load_model("some/genuine-vlm-4bit")
 
@@ -178,7 +181,16 @@ def test_load_model_genuine_vlm_stays_on_mllm_lane(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(monkeypatch):
+@pytest.mark.parametrize(
+    ("auto_text_fallback", "lane_reason", "expected_force_text"),
+    [
+        (True, "vision_hybrid_runtime_unsupported", True),
+        (False, "vision_hybrid_runtime_supported", False),
+    ],
+)
+async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(
+    monkeypatch, auto_text_fallback, lane_reason, expected_force_text
+):
     """Startup and residency must hand the same resolved path/lane to engine."""
     from vllm_mlx import server
     from vllm_mlx.model_profile import ModelProfile
@@ -188,7 +200,8 @@ async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(monkey
     resolved = server._ServingCheckpoint(
         model_path="publisher/model",
         load_path="/cache/snapshots/revision",
-        auto_text_fallback=True,
+        auto_text_fallback=auto_text_fallback,
+        lane_reason=lane_reason,
     )
 
     def resolve_once(model_name, **kwargs):
@@ -220,7 +233,16 @@ async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(monkey
         ),
     ]
     assert startup_kwargs["model_name"] == runtime.engine.kwargs["model_name"]
-    assert startup_kwargs["force_text"] == runtime.engine.kwargs["force_text"] is True
+    assert (
+        startup_kwargs["force_text"]
+        == runtime.engine.kwargs["force_text"]
+        is expected_force_text
+    )
+    assert (
+        startup_kwargs["serving_lane_reason"]
+        == runtime.engine.kwargs["serving_lane_reason"]
+        == lane_reason
+    )
 
 
 def test_ensure_routing_config_raises_when_prefetch_does_not_materialize(monkeypatch):
