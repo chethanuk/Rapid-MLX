@@ -58,10 +58,31 @@ def _wait_until_ready(base_url: str, process: subprocess.Popen, timeout: float) 
     raise RuntimeError(f"sidecar server was not ready after {timeout}s: {last_error}")
 
 
+def _resolve_model(model: str, revision: str | None) -> Path:
+    local_path = Path(model)
+    if local_path.exists():
+        return local_path
+    if not revision:
+        raise SystemExit(
+            "vision smoke: a repository model requires --revision so the "
+            "release proof is content-addressed"
+        )
+    from huggingface_hub import snapshot_download
+
+    return Path(
+        snapshot_download(
+            repo_id=model,
+            revision=revision,
+            local_files_only=True,
+        )
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sidecar-root", type=Path, required=True)
-    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--revision")
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--request-timeout", type=float, default=240)
@@ -70,11 +91,11 @@ def main() -> int:
     executable = args.sidecar_root / "bin" / "rapid-mlx"
     for path, label in (
         (executable, "sidecar executable"),
-        (args.model, "model"),
         (args.image, "image"),
     ):
         if not path.exists():
             raise SystemExit(f"vision smoke: {label} not found: {path}")
+    model = _resolve_model(args.model, args.revision)
 
     port = _free_local_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -83,7 +104,7 @@ def main() -> int:
     ) as log:
         log_path = Path(log.name)
         process = subprocess.Popen(
-            [str(executable), "serve", str(args.model), "--mllm", "--port", str(port)],
+            [str(executable), "serve", str(model), "--mllm", "--port", str(port)],
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -94,7 +115,7 @@ def main() -> int:
         _wait_until_ready(base_url, process, args.startup_timeout)
         image = base64.b64encode(args.image.read_bytes()).decode("ascii")
         payload = {
-            "model": str(args.model),
+            "model": str(model),
             "messages": [
                 {
                     "role": "user",

@@ -977,11 +977,18 @@ fi
 # release operator supplies the immutable local snapshot explicitly.
 if [[ -n "${SIDECAR_VISION_SMOKE_MODEL:-}" ]]; then
     SIDECAR_VISION_SMOKE_IMAGE="${SIDECAR_VISION_SMOKE_IMAGE:-$REPO_ROOT/Sources/Rapid/Resources/cheetah.png}"
-    "$STAGE/python/bin/python3.12" \
-        "$REPO_ROOT/scripts/smoke-sidecar-vision.py" \
-        --sidecar-root "$STAGE" \
-        --model "$SIDECAR_VISION_SMOKE_MODEL" \
+    SIDECAR_VISION_SMOKE_ARGS=(
+        --sidecar-root "$STAGE"
+        --model "$SIDECAR_VISION_SMOKE_MODEL"
         --image "$SIDECAR_VISION_SMOKE_IMAGE"
+    )
+    if [[ -n "${SIDECAR_VISION_SMOKE_REVISION:-}" ]]; then
+        SIDECAR_VISION_SMOKE_ARGS+=(--revision "$SIDECAR_VISION_SMOKE_REVISION")
+    fi
+    PYTHONPATH="$STAGE/site-packages" PYTHONNOUSERSITE=1 \
+        "$STAGE/python/bin/python3.12" \
+        "$REPO_ROOT/scripts/smoke-sidecar-vision.py" \
+        "${SIDECAR_VISION_SMOKE_ARGS[@]}"
 else
     echo "==> real image smoke: not configured (set SIDECAR_VISION_SMOKE_MODEL for release candidates)"
 fi

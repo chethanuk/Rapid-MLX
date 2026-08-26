@@ -68,6 +68,8 @@ struct SidecarBuildScriptTests {
         #expect(script.contains("SIDECAR_VISION_SMOKE_MODEL"))
         #expect(script.contains("$REPO_ROOT/scripts/smoke-sidecar-vision.py"),
                 "Configured release-candidate builds must run real image inference through the sidecar.")
+        #expect(script.contains(#"PYTHONPATH="$STAGE/site-packages" PYTHONNOUSERSITE=1"#),
+                "The image gate must resolve its pinned snapshot with the bundled runtime, not host Python.")
         for architecture in [
             "diffusion_gemma", "gemma3", "gemma3n", "gemma4", "gemma4_unified",
             "qwen3_5", "qwen3_5_moe", "qwen3_vl", "qwen3_vl_moe",
