@@ -1926,6 +1926,21 @@ def download_with_mirror_fallback(
         # Mute HF's tqdm for confirmed-small metadata files so it doesn't
         # collide with our aggregate UI; keep it for weight/unknown-size
         # files (see ``_should_suppress_hf_bar``).
+        #
+        # Stable transfer-account seam (Codex #2392): before the HF call,
+        # record whether this file's blob ALREADY exists in HF's local cache
+        # (``blobs/<sha>``). When it does, ``hf_hub_download`` only
+        # materializes the missing snapshot link from the local blob — zero
+        # bytes cross the wire — so the outcome is a "cached" no-transfer, not
+        # a fetch. When the blob is absent, a success IS a real network fetch.
+        # This keyed on the local file inventory (public, size/hash), never on
+        # huggingface_hub's tqdm progress internals.
+        blob_already_local = False
+        if expected_sha256 is not None:
+            try:
+                blob_already_local = (repo_root / "blobs" / expected_sha256).is_file()
+            except OSError:
+                blob_already_local = False
         ok, hf_path = _hf_fallback_one(
             repo_id,
             fname,
@@ -1947,7 +1962,11 @@ def download_with_mirror_fallback(
                     size = (snap_dir / fname).stat().st_size
             except OSError:
                 size = 0
-            return fname, "hf", size
+            # If the blob was already in HF's local cache, hf_hub_download only
+            # linked it into the snapshot — no bytes were transferred. Classify
+            # as "cached", not "hf", so `network_fetch` doesn't mislabel a warm
+            # pull as a download (Codex #2392; stable local-file-inventory seam).
+            return fname, ("cached" if blob_already_local else "hf"), size
 
         return fname, "miss", 0
 
