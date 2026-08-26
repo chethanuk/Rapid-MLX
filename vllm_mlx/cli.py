@@ -6370,6 +6370,40 @@ def _format_pull_duration(seconds: float) -> str:
     return f"{minutes}m {secs}s"
 
 
+def _resolve_pull_snapshot_dir(repo_id: str):
+    """Resolve the HF-cache snapshot dir a ``pull`` would populate, or ``None``.
+
+    Mirrors how ``pull_command`` derives ``repo_root/snapshots/<rev>`` after a
+    mirror/HF transfer (including the catalog subfolder narrowing applied in
+    :func:`_print_pull_summary`). Used to capture the snapshot's pre-pull size
+    so the summary can tell "nothing transferred" from a real download without
+    relying on bare local presence (a moved ``main`` can advance the snapshot
+    even when some local rev is already complete — issue #2349, codex round:
+    derive the label from the actual transfer, not pre-pull cache presence).
+    Returns ``None`` when the cache has no resolved snapshot yet (a fresh pull).
+    """
+    from pathlib import Path
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    from vllm_mlx.model_aliases import resolve_subfolder
+
+    owner, _, repo = repo_id.partition("/")
+    repo_root = Path(HF_HUB_CACHE) / f"models--{owner}--{repo}"
+    refs_main = repo_root / "refs" / "main"
+    try:
+        rev = refs_main.read_text().strip()
+    except OSError:
+        return None
+    snap = repo_root / "snapshots" / rev
+    sub = resolve_subfolder(repo_id)
+    if sub:
+        cand = snap / sub
+        if cand.is_dir():
+            snap = cand
+    return snap
+
+
 def _snapshot_size_bytes(path) -> int:
     """Sum file sizes under ``path`` (recursively, following symlinks).
 
@@ -6423,13 +6457,18 @@ def _print_pull_summary(
     snapshot_dir,
     elapsed: float,
     *,
-    was_cached: bool = False,
+    pre_size: int | None = None,
 ) -> None:
     """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
 
-    When ``was_cached`` is true the pull reused an already-complete snapshot
-    (nothing was transferred), so the summary says the cache was verified
-    rather than claiming a download + transfer time (issue #2349).
+    ``pre_size`` is the snapshot's on-disk size before this pull began
+    (:func:`_resolve_pull_snapshot_dir` + :func:`_snapshot_size_bytes`), or
+    ``None`` for a fresh pull with no pre-existing snapshot. The summary is
+    labelled "Already cached ... verified (nothing to download)" only when the
+    pull transferred no new bytes — i.e. the resolved snapshot is byte-for-byte
+    the same size as before. A mutable ``main`` that advanced remote-side makes
+    post-pull size grow, so it is reported as a real download instead of a lie
+    (issue #2349; see codex: label from actual transfer, not pre-pull presence).
     """
     import os as _os
 
@@ -6444,6 +6483,9 @@ def _print_pull_summary(
         if _os.path.isdir(_candidate):
             snapshot_dir = _candidate
     size = _snapshot_size_bytes(snapshot_dir)
+    # Nothing was transferred iff the post-pull snapshot is byte-for-byte the
+    # same size as before the pull began; ``pre_size=None`` means a fresh pull.
+    was_cached = pre_size is not None and size == pre_size
     if was_cached:
         print(
             f"  Already cached {repo_id} — {_format_bytes(size)} verified "
@@ -6584,15 +6626,16 @@ def pull_command(args):
         )
         sys.exit(1)
 
-    # Was the snapshot already complete before this pull? If so, nothing
-    # will be transferred — the final summary must say the cache was verified
-    # rather than claiming a download + transfer time (issue #2349).
+    # Capture the resolved snapshot's size BEFORE the transfer. The post-pull
+    # summary is labelled "verified (nothing to download)" only when no new
+    # bytes were transferred (size unchanged), not merely because some local
+    # rev was already complete — a moved ``main`` can fetch new files even when
+    # a stale local snapshot exists (issue #2349).
     try:
-        from vllm_mlx._download_gate import is_repo_cached
-
-        was_cached = is_repo_cached(repo_id)
+        _pre_dir = _resolve_pull_snapshot_dir(repo_id)
+        _pre_size = _snapshot_size_bytes(_pre_dir) if _pre_dir else None
     except Exception:
-        was_cached = False
+        _pre_size = None
 
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
     # before adding more. huggingface_hub gives each attempt a uniquely-named
@@ -6645,7 +6688,7 @@ def pull_command(args):
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
         _print_pull_summary(
-            repo_id, snapshot_dir, time.monotonic() - t0, was_cached=was_cached
+            repo_id, snapshot_dir, time.monotonic() - t0, pre_size=_pre_size
         )
         return
     # Mirror returned False — fall through to plain snapshot_download.
@@ -6741,7 +6784,7 @@ def pull_command(args):
             sys.exit(1)
         raise
     print(f"  Cached at: {path}")
-    _print_pull_summary(repo_id, path, time.monotonic() - t0, was_cached=was_cached)
+    _print_pull_summary(repo_id, path, time.monotonic() - t0, pre_size=_pre_size)
 
 
 def rm_command(args):
