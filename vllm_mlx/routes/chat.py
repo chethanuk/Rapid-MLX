@@ -4345,6 +4345,20 @@ async def _create_chat_completion_impl(
     _glp = await _offload_tool_grammar_build(
         engine, cfg, request, messages, resolved_thinking
     )
+    # The serialized MLLM scheduler does not currently accept any of the
+    # text-lane logits processors.  Keeping a processor here is worse than a
+    # no-op: it suppresses the forced-assistant-prefix fallback below even
+    # though ``BatchedEngine`` cannot forward the processor to generation.
+    # Restore the established prefix contract until MLLMScheduler grows an
+    # explicit logits-processor capability (tracked separately).
+    _mllm_ignores_logits_processors = bool(getattr(engine, "is_mllm", False))
+    if _mllm_ignores_logits_processors and _glp is not None:
+        logger.warning(
+            "MLLM %s chat request cannot apply logits processors; discarding "
+            "the tool grammar and restoring the forced-assistant-prefix fallback",
+            "streaming" if request.stream else "non-streaming",
+        )
+        _glp = None
     # LINE① (#558) Option B — COUPLE the generation-time thinking budget to the
     # gated grammar. ``reasoning_gate_id is not None`` means the grammar's mask is
     # held OFF until ``</think>`` (runtime token-id gate), so a budget that
@@ -4476,15 +4490,17 @@ async def _create_chat_completion_impl(
     # holds the tool grammar OFF through the ``<think>`` span, so the budget's
     # force-close of ``</think>`` lands before any tool-call token — safe despite
     # vLLM #44676 (which is the UNGATED auto/parser path this never touches).
-    _rblp = _build_reasoning_budget_processor(
-        engine,
-        request,
-        cfg,
-        messages,
-        resolved_thinking,
-        allow_tools=_line1_gate_engaged,
-        seed_prefix=(_line1_prefix if _line1_gate_engaged else _LINE1_SEED_UNSET),
-    )
+    _rblp = None
+    if not _mllm_ignores_logits_processors:
+        _rblp = _build_reasoning_budget_processor(
+            engine,
+            request,
+            cfg,
+            messages,
+            resolved_thinking,
+            allow_tools=_line1_gate_engaged,
+            seed_prefix=(_line1_prefix if _line1_gate_engaged else _LINE1_SEED_UNSET),
+        )
     if _rblp is not None:
         chat_kwargs["reasoning_budget_logits_processor"] = _rblp
     elif _line1_gate_engaged:

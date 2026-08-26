@@ -142,6 +142,86 @@ def _multipart_user_message(text: str) -> dict:
     }
 
 
+def test_forced_named_tool_on_mllm_uses_prefix_not_dropped_processors(
+    monkeypatch, caplog
+):
+    """MLLM generation must retain a real enforcement lever for forced tools.
+
+    The text route may successfully build a grammar processor, but the current
+    MLLM scheduler cannot consume it.  The route must therefore discard that
+    processor, restore the parser-derived assistant prefix, and avoid building
+    the equally unsupported reasoning-budget processor.
+    """
+    from vllm_mlx.routes import chat as chat_route
+
+    class _GrammarProcessor:
+        reasoning_gate_id = None
+
+    async def _built_grammar(*_args, **_kwargs):
+        return _GrammarProcessor()
+
+    def _unexpected_reasoning_budget(*_args, **_kwargs):
+        raise AssertionError("MLLM requests must not build logits processors")
+
+    monkeypatch.setattr(chat_route, "_offload_tool_grammar_build", _built_grammar)
+    monkeypatch.setattr(
+        chat_route,
+        "_build_reasoning_budget_processor",
+        _unexpected_reasoning_budget,
+    )
+
+    engine = _StubMLLMEngine()
+    client = _make_client(engine)
+    cfg = reset_config()
+    cfg.engine = engine
+    cfg.model_name = "qwen3-vl-8b-4bit"
+    cfg.model_registry = None
+    cfg.no_thinking = True
+    cfg.tool_call_parser = "hermes"
+    cfg.reasoning_parser_name = None
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen3-vl-8b-4bit",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            "stream": False,
+        },
+    )
+
+    # The canned stub deliberately ignores the prefix and returns prose, so the
+    # route's schema-valid synthesis guard rejects its final response.  The
+    # contract under test is the generation kwargs delivered to that stub.
+    assert response.status_code == 422, response.text
+    kwargs = engine.chat_calls[0]["kwargs"]
+    assert kwargs["forced_assistant_prefix"] == (
+        '<tool_call>\n{"name": "get_weather", "arguments": '
+    )
+    assert "grammar_logits_processor" not in kwargs
+    assert "reasoning_budget_logits_processor" not in kwargs
+    assert sum(
+        "cannot apply logits processors" in record.getMessage()
+        for record in caplog.records
+    ) == 1
+
+
 def test_chat_route_rejects_image_on_text_lane_with_typed_reason():
     engine = _StubTextFallbackEngine()
     client = _make_client(engine)
