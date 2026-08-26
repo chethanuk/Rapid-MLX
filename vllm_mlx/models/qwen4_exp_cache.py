@@ -48,9 +48,7 @@ class QSAIndexCache(ArraysCache):
             raise ValueError("QSA cache batch metadata does not match input")
         self._offsets = [0] * batch
         self._compressed_counts = [0] * batch
-        self._pending_left_padding = [
-            int(item) for item in self.left_padding.tolist()
-        ]
+        self._pending_left_padding = [int(item) for item in self.left_padding.tolist()]
 
     @property
     def raw_ring(self):
@@ -90,8 +88,7 @@ class QSAIndexCache(ArraysCache):
         self._ensure_batch(batch)
         if lengths is not None:
             self._valid_until = [
-                offset + int(length)
-                for offset, length in zip(self._offsets, lengths)
+                offset + int(length) for offset, length in zip(self._offsets, lengths)
             ]
         self._right_padding = (
             None if right_padding is None else [int(item) for item in right_padding]
@@ -110,9 +107,7 @@ class QSAIndexCache(ArraysCache):
         return [count for _, count in self.valid_spans(input_length)]
 
     def valid_spans(self, input_length: int) -> list[tuple[int, int]]:
-        starts = [
-            min(input_length, pending) for pending in self._pending_left_padding
-        ]
+        starts = [min(input_length, pending) for pending in self._pending_left_padding]
         if self._valid_until is None:
             return [(start, input_length - start) for start in starts]
         return [
@@ -120,9 +115,7 @@ class QSAIndexCache(ArraysCache):
                 start,
                 max(0, min(input_length - start, limit - offset)),
             )
-            for start, limit, offset in zip(
-                starts, self._valid_until, self._offsets
-            )
+            for start, limit, offset in zip(starts, self._valid_until, self._offsets)
         ]
 
     def update(
@@ -160,24 +153,19 @@ class QSAIndexCache(ArraysCache):
                         self.raw_ring[row : row + 1].astype(mx.float32), axis=1
                     ).astype(raw_keys.dtype)
                     completed[row].append(
-                        transform_group(
-                            pooled, position + 1 - self.compress_ratio
-                        )[0]
+                        transform_group(pooled, position + 1 - self.compress_ratio)[0]
                     )
             self._offsets[row] += valid_length
             self._pending_left_padding[row] -= input_start
 
         new_counts = [
-            old + len(rows)
-            for old, rows in zip(self._compressed_counts, completed)
+            old + len(rows) for old, rows in zip(self._compressed_counts, completed)
         ]
         max_count = max(new_counts, default=0)
         if max_count:
             capacity = ((max_count + self.step - 1) // self.step) * self.step
             if self.compressed_keys is None:
-                expanded = mx.zeros(
-                    (batch, capacity, dim), dtype=raw_keys.dtype
-                )
+                expanded = mx.zeros((batch, capacity, dim), dtype=raw_keys.dtype)
             elif capacity > self.compressed_keys.shape[1]:
                 expanded = mx.zeros(
                     (batch, capacity, dim), dtype=self.compressed_keys.dtype
@@ -232,9 +220,7 @@ class QSAIndexCache(ArraysCache):
         decoded = json.loads(value)
         self.compress_ratio = int(decoded["compress_ratio"])
         self._offsets = [int(item) for item in decoded["offsets"]]
-        self._compressed_counts = [
-            int(item) for item in decoded["compressed_counts"]
-        ]
+        self._compressed_counts = [int(item) for item in decoded["compressed_counts"]]
         self._valid_until = None
         self._right_padding = None
         self._pending_left_padding = [0] * len(self._offsets)
@@ -254,7 +240,11 @@ class QSAIndexCache(ArraysCache):
         return cache
 
     def is_trimmable(self):
-        return all(self._can_trim_row(offset, 1) for offset in self._offsets)
+        return self.can_trim(1)
+
+    def can_trim(self, n: int) -> bool:
+        """Amount-aware preflight consumed by composite cache rollback."""
+        return all(self._can_trim_row(offset, n) for offset in self._offsets)
 
     def _can_trim_row(self, offset: int, n: int) -> bool:
         if n < 0 or n > offset:
@@ -296,9 +286,7 @@ class QSAIndexCache(ArraysCache):
         )
         super().filter(batch_indices)
         self._offsets = [self._offsets[index] for index in indices]
-        self._compressed_counts = [
-            self._compressed_counts[index] for index in indices
-        ]
+        self._compressed_counts = [self._compressed_counts[index] for index in indices]
         self._pending_left_padding = [
             self._pending_left_padding[index] for index in indices
         ]
@@ -344,9 +332,7 @@ class QSAIndexCache(ArraysCache):
             raise ValueError("QSA caches in a batch must share compression ratio")
         merged = cls(ratio, left_padding=[0] * len(caches))
         merged._offsets = [cache._offsets[0] for cache in caches]
-        merged._compressed_counts = [
-            cache._compressed_counts[0] for cache in caches
-        ]
+        merged._compressed_counts = [cache._compressed_counts[0] for cache in caches]
         merged._pending_left_padding = [0] * len(caches)
         max_offset = max(merged._offsets, default=0)
         merged.left_padding = mx.array(

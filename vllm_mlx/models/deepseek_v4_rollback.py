@@ -14,6 +14,8 @@ from contextlib import contextmanager
 
 import mlx.core as mx
 
+from ..cache_rollback import can_trim, trim_all  # re-export legacy import surface
+
 _STATE = threading.local()
 
 
@@ -99,22 +101,3 @@ def install_rotating_undo() -> None:
         BatchRotatingKVCache,
         ("keys", "values", "offset", "left_padding", "_idx", "_offset", "rotated"),
     )
-
-
-def can_trim(cache, n: int) -> bool:
-    children = getattr(cache, "caches", None)
-    if children is not None:
-        return all(can_trim(child, n) for child in children)
-    can_undo = getattr(cache, "_can_undo", None)
-    if callable(can_undo) and can_undo(n):
-        return True
-    check = getattr(cache, "is_trimmable", None)
-    return bool(callable(check) and check())
-
-
-def trim_all(caches, n: int) -> bool:
-    if n <= 0:
-        return True
-    if not all(can_trim(cache, n) for cache in caches):
-        return False
-    return all(cache.trim(n) == n for cache in caches)

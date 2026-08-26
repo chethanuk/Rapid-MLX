@@ -341,6 +341,96 @@ def test_qsa_cache_refuses_rewind_beyond_retained_raw_group():
     assert cache.offset == 9
 
 
+def test_scheduler_rollback_preflights_qsa_cachelist_for_full_rejection():
+    """A multi-token rejection cannot trim KV before QSA refuses it."""
+    from vllm_mlx.cache_rollback import can_trim, trim_all
+
+    kv = KVCache()
+    keys = mx.arange(9, dtype=mx.float32).reshape(1, 1, 9, 1)
+    kv.update_and_fetch(keys, -keys)
+    qsa = QSAIndexCache(compress_ratio=4)
+    qsa.update(
+        mx.arange(9, dtype=mx.float32).reshape(1, 9, 1),
+        lambda group, start: group + start,
+    )
+    cache = CacheList(kv, qsa)
+
+    assert cache.is_trimmable()
+    assert not can_trim(cache, 2)
+    assert not trim_all([cache], 2)
+    assert kv.offset == qsa.offset == 9
+
+    assert can_trim(cache, 1)
+    assert trim_all([cache], 1)
+    assert kv.offset == qsa.offset == 8
+
+
+def test_suffix_scheduler_falls_through_before_qsa_multitoken_verify():
+    from vllm_mlx.scheduler import _install_suffix_decoding
+
+    kv = KVCache()
+    keys = mx.arange(9, dtype=mx.float32).reshape(1, 1, 9, 1)
+    kv.update_and_fetch(keys, -keys)
+    qsa = QSAIndexCache(compress_ratio=4)
+    qsa.update(
+        mx.arange(9, dtype=mx.float32).reshape(1, 9, 1),
+        lambda group, start: group + start,
+    )
+
+    class GenerationBatch:
+        _next_tokens = mx.array([7], dtype=mx.int32)
+        uids = [11]
+        logits_processors = []
+        prompt_cache = [CacheList(kv, qsa)]
+        tokens = [[]]
+        model = None
+
+        def __init__(self):
+            self.original_calls = 0
+
+        def _step(self):
+            self.original_calls += 1
+            return [7], []
+
+        def next(self):
+            return []
+
+    class BatchGenerator:
+        def __init__(self):
+            self._generation_batch = GenerationBatch()
+
+        def remove(self, _uids, return_prompt_caches=False):
+            return {} if return_prompt_caches else None
+
+    class TwoTokenDrafter:
+        max_draft_tokens = 2
+
+        def add_generated_token(self, _token):
+            return None
+
+        def get_draft(self):
+            return [8, 9]
+
+    batch_generator = BatchGenerator()
+    _install_suffix_decoding(
+        batch_generator,
+        model=None,
+        profile=None,
+        max_draft=2,
+        max_suffix_len=2,
+        min_confidence=0.0,
+        requests={},
+        uid_to_request_id={},
+    )
+    generation_batch = batch_generator._generation_batch
+    generation_batch._suffix_drafters[11] = TwoTokenDrafter()
+
+    assert generation_batch._step() == ([7], [])
+    assert generation_batch.original_calls == 1
+    assert generation_batch._suffix_stats["ft_non_trimmable_cache"] == 1
+    assert kv.offset == qsa.offset == 9
+
+
 def test_qsa_attention_prefill_and_decode_keep_both_cache_owners_aligned():
     args = _args(
         indexer_budget=2,

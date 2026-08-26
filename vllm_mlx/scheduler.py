@@ -2522,21 +2522,24 @@ def _install_suffix_decoding(
             _counter.record_fallthrough("no_draft")
             return _orig_step()
 
+        K = len(draft)
+
         # Defense-in-depth: even though ``profile.supports_spec_decode``
         # already gates installation on hybrid arches, verify that EVERY
         # cache layer is trimmable before paying the verify-forward cost.
         # If any layer can't trim and we end up needing to roll back, the
         # cache state would silently diverge — better to fall through.
-        for c in gb.prompt_cache:
-            if not (
-                hasattr(c, "is_trimmable") and c.is_trimmable() and hasattr(c, "trim")
-            ):
-                _stats["fallthrough_steps"] += 1
-                _stats["ft_non_trimmable_cache"] += 1
-                _counter.record_fallthrough("non_trimmable_cache")
-                return _orig_step()
+        # Preflight the maximum possible rollback amount before the verify
+        # forward mutates anything. Composite caches are checked recursively,
+        # so one side-cache cannot refuse after its sibling already trimmed.
+        from .cache_rollback import can_trim
 
-        K = len(draft)
+        if not all(can_trim(c, K) for c in gb.prompt_cache):
+            _stats["fallthrough_steps"] += 1
+            _stats["ft_non_trimmable_cache"] += 1
+            _counter.record_fallthrough("non_trimmable_cache")
+            return _orig_step()
+
         _stats["verify_steps"] += 1
         _stats["draft_tokens_proposed"] += K
 
@@ -2652,9 +2655,12 @@ def _install_suffix_decoding(
 
         n_rejected = K - n_accepted
         if n_rejected > 0:
-            # Pre-checked above — every layer here is trimmable.
-            for c in gb.prompt_cache:
-                c.trim(n_rejected)
+            from .cache_rollback import trim_all
+
+            if not trim_all(gb.prompt_cache, n_rejected):
+                raise RuntimeError(
+                    "suffix verification cache rollback violated its preflight"
+                )
 
         # Token emission accounting.
         #
@@ -2814,13 +2820,12 @@ def _install_suffix_decoding(
                     # reuse for the next request that hits this prefix.
                     unused = len(pending) - emit_idx - 1
                     if unused > 0:
-                        for c in gb.prompt_cache:
-                            if (
-                                hasattr(c, "is_trimmable")
-                                and c.is_trimmable()
-                                and hasattr(c, "trim")
-                            ):
-                                c.trim(unused)
+                        from .cache_rollback import trim_all
+
+                        if not trim_all(gb.prompt_cache, unused):
+                            raise RuntimeError(
+                                "suffix terminal cache rollback violated its preflight"
+                            )
                     augmented.append(
                         gb.Response(
                             uid=uid,
