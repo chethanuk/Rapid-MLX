@@ -228,9 +228,7 @@ def _median_verdict(
     with pass/fail).
     """
     per_round_eps = [us / (base_us * speedup) for us, speedup in pairs]
-    idx = sorted(range(len(pairs)), key=lambda i: per_round_eps[i])[
-        len(pairs) // 2
-    ]
+    idx = sorted(range(len(pairs)), key=lambda i: per_round_eps[i])[len(pairs) // 2]
     return per_round_eps[idx], pairs[idx][1], idx
 
 
@@ -267,7 +265,17 @@ def bench_one(
     ``runner_speedup`` overrides the calibration when provided (unit tests);
     when ``None`` (production), each round's speedup is measured live.
     """
-    base_us = BASE_US.get(name, 5.0)
+    # Every parser the bench knows about must carry an explicit ``BASE_US``
+    # entry; silently defaulting an unknown name to a magic 5.0 would mask a
+    # wiring mistake (new parser added to the loop but forgotten in BASE_US)
+    # behind an arbitrary threshold (Codex #2409 NIT).
+    if name not in BASE_US:
+        raise KeyError(
+            f"no BASE_US baseline for parser {name!r}; every parser in "
+            f"_build_parsers() must have an explicit μs/call baseline "
+            f"(see BASE_US in scripts/microbench_parsers.py)"
+        )
+    base_us = BASE_US[name]
     # Interleave calibration and parser timing across rounds; with a tiny
     # ``iters`` (unit tests) a single round suffices.
     rounds = _CAL_REPS if iters >= _CAL_REPS else 1
@@ -338,7 +346,9 @@ def main(argv: list[str] | None = None) -> int:
     # measuring a global "runner speedup" solely to print a headline cost
     # ~100k extra regex ops AND could disagree with the actual verdict.
     print(f"Parser microbench × {args.iters} iters/parser")
-    print(f"{'parser':<12}{'us/call':>12}{'speedup':>10}{'threshold':>14}{'verdict':>10}")
+    print(
+        f"{'parser':<12}{'us/call':>12}{'speedup':>10}{'threshold':>14}{'verdict':>10}"
+    )
     print("-" * 58)
 
     results: list[BenchResult] = []

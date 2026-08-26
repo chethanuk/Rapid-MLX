@@ -61,12 +61,13 @@ def test_bench_over_threshold_fails(mb):
     assert result.us_per_call > result.threshold_us
 
 
-def test_unknown_parser_gets_default_threshold(mb):
-    """Adding a new parser without a threshold entry should still run
-    (with a generous default), not crash with KeyError."""
-    result = mb.bench_one("brand_new", lambda _t: None, "x", iters=10)
-    assert result.threshold_us > 0  # has a default
-    assert result.passed
+def test_unknown_parser_raises_missing_baseline(mb):
+    """Adding a new parser without a ``BASE_US`` entry must fail LOUDLY, not
+    silently bench against a magic default threshold (Codex #2409) — a default
+    masks the wiring mistake (a parser added to the loop but forgotten in
+    BASE_US) behind an arbitrary number."""
+    with pytest.raises(KeyError, match="no BASE_US baseline for parser 'brand_new'"):
+        mb.bench_one("brand_new", lambda _t: None, "x", iters=10)
 
 
 # ---------- sample / parser wiring -----------------------------------
@@ -218,13 +219,20 @@ def test_median_verdict_ignores_a_single_spiked_round(mb):
     on a shared runner without flaking on a single pause."""
     base = mb.BASE_US["hermes"]
     limit = mb.REGRESSION_LIMIT
-    normal = (base * 0.5, 1.0)   # ε = 0.5 — healthy across the 12× budget
-    spike = (base * 0.5 * 20.0, 1.0)  # parser 20× nominal this round → ε = 10
+    normal = (base * 0.5, 1.0)  # ε = 0.5 — healthy within the 12× budget
+    # One round the runner descheduled during the parser segment: the parser
+    # times at ε = 2.0×LIMIT (i.e. > LIMIT). A MAX-based aggregate would fail
+    # this run; the MEDIAN ignores the single spike and still passes.
+    spike = (base * 2.0 * limit, 1.0)  # ε = 2× 12 = 24 > 12 → max would fail
     # 1 spiked + 4 healthy rounds: the median (3rd-smallest of 5) is healthy.
     eps, speedup, idx = mb._median_verdict([normal] * 4 + [spike], base)
     assert idx != 4  # reports a healthy (normal) round, not the spike
     assert speedup == 1.0
     assert eps < limit and eps == pytest.approx(0.5)
+    # The SAME pairs under a *max* aggregate WOULD exceed the limit — proving
+    # the test is meaningful (it would go red if production reverted to max).
+    eps_max = max(us / (base * sp) for us, sp in [normal] * 4 + [spike])
+    assert eps_max > limit
     # All rounds genuinely slow (ε = 1.5×LIMIT): the median still fails.
     slow = (base * 1.5 * limit, 1.0)
     epss, _, _ = mb._median_verdict([slow] * 5, base)
