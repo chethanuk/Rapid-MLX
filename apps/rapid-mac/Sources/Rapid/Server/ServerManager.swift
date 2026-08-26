@@ -1590,7 +1590,7 @@ final class ServerManager {
         }
         var reclaimableBytes: UInt64 = 0
         for resident in residency.models where resident.state != "evicting" {
-            let bytes = resident.measuredBytes ?? resident.estimatedBytes
+            let bytes = resident.displayBytes
             reclaimableBytes += min(bytes, host.usedBytes - reclaimableBytes)
             if reclaimableBytes == host.usedBytes { break }
         }

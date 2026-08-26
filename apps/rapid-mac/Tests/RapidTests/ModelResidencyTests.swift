@@ -475,6 +475,22 @@ struct ModelResidencyTests {
         #expect(admission.snapshot.usedBytes < host.usedBytes)
     }
 
+    @Test("A zero resident measurement falls back to its admission estimate")
+    func processReplacementCreditsEstimatedBytesWhenMeasurementIsZero() throws {
+        let admission = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14.6),
+            residency: residency(
+                alias: "qwen3.5-9b-4bit",
+                measuredGB: 0,
+                estimatedGB: 6.3,
+                modality: "text"
+            ),
+            plan: .releaseResidentModels
+        ))
+
+        #expect(admission.plannedReleaseBytes == UInt64(6.3 * Double(UInt64(1) << 30)))
+    }
+
     @Test("No resident evidence preserves the ordinary live admission probe")
     func noResidentLeavesAdmissionUnchanged() {
         #expect(ServerManager.memoryAdmissionForTransition(
@@ -566,10 +582,12 @@ struct ModelResidencyTests {
     private func residency(
         alias: String,
         measuredGB: Double,
+        estimatedGB: Double? = nil,
         modality: String
     ) -> ModelResidencySnapshot {
         let gib = Double(UInt64(1) << 30)
         let measuredBytes = UInt64(measuredGB * gib)
+        let estimatedBytes = UInt64((estimatedGB ?? measuredGB) * gib)
         let status = ResidentModelStatus(
             id: alias,
             modelPath: "repo/\(alias)",
@@ -579,7 +597,7 @@ struct ModelResidencyTests {
             pinned: false,
             primary: true,
             activeRequests: 0,
-            estimatedBytes: measuredBytes,
+            estimatedBytes: estimatedBytes,
             measuredBytes: measuredBytes,
             idleSeconds: 0
         )
