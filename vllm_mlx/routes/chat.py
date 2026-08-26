@@ -6231,6 +6231,8 @@ async def stream_chat_completion(
 
     cfg = get_config()
     gc_was_enabled = gc.isenabled()
+    first_engine_output_task: asyncio.Task | None = None
+    admission_task: asyncio.Task | None = None
     if cfg.gc_control and gc_was_enabled:
         gc.disable()
 
@@ -6360,17 +6362,37 @@ async def stream_chat_completion(
             )
             return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
-        # Prime the engine through scheduler admission before exposing the
-        # public request id. Cancellation can arrive as soon as the role frame
-        # reaches the client, so admission and the request-id holder must
-        # already address that same live request.
+        # Start the engine and wait only for scheduler admission before
+        # exposing the public request id. Waiting for the first generated
+        # output would hide the cancellation identity throughout a slow
+        # prefill. Engines that do not implement the notification retain the
+        # legacy first-output fallback.
+        request_admitted_event = asyncio.Event()
+        kwargs["request_admitted_event"] = request_admitted_event
         engine_stream = engine.stream_chat(
             messages=messages, is_streaming=True, **kwargs
         )
-        try:
-            first_engine_output = await anext(engine_stream)
-        except StopAsyncIteration:
-            first_engine_output = None
+        engine_output_task = asyncio.create_task(anext(engine_stream))
+        first_engine_output_task = engine_output_task
+        admission_task = asyncio.create_task(request_admitted_event.wait())
+        done, _ = await asyncio.wait(
+            {engine_output_task, admission_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        first_engine_output = None
+        first_output_pending = engine_output_task not in done
+        if not first_output_pending:
+            try:
+                first_engine_output = engine_output_task.result()
+            except StopAsyncIteration:
+                first_engine_output = None
+            request_admitted_event.set()
+        if not admission_task.done():
+            admission_task.cancel()
+            try:
+                await admission_task
+            except asyncio.CancelledError:
+                pass
 
         # First chunk with role
         _first_sse = f'{_sse_prefix}"role":"assistant"{_sse_suffix}'
@@ -6550,6 +6572,12 @@ async def stream_chat_completion(
         # change for BatchedEngine which uses its own special-token
         # handling.
         async def _primed_engine_outputs():
+            nonlocal first_engine_output
+            if first_output_pending:
+                try:
+                    first_engine_output = await engine_output_task
+                except StopAsyncIteration:
+                    first_engine_output = None
             if first_engine_output is not None:
                 yield first_engine_output
             async for output in engine_stream:
@@ -7564,6 +7592,18 @@ async def stream_chat_completion(
                 surface=_telemetry_emit.server_surface(),
             )
     finally:
+        if admission_task is not None and not admission_task.done():
+            admission_task.cancel()
+            try:
+                await admission_task
+            except asyncio.CancelledError:
+                pass
+        if first_engine_output_task is not None and not first_engine_output_task.done():
+            first_engine_output_task.cancel()
+            try:
+                await first_engine_output_task
+            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                pass
         if cfg.gc_control and gc_was_enabled:
             gc.enable()
             gc.collect()

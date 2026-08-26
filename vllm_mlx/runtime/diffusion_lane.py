@@ -963,6 +963,7 @@ class DiffusionEngine(BaseEngine):
         videos: list[str] | None = None,
         is_streaming: bool = False,
         request_id: str | None = None,
+        request_admitted_event: asyncio.Event | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         self._ensure_loaded()
@@ -1002,6 +1003,7 @@ class DiffusionEngine(BaseEngine):
             temperature=temperature,
             has_tools=has_tools,
             request_id=request_id,
+            request_admitted_event=request_admitted_event,
             **kwargs,
         ):
             yield chunk
@@ -1014,6 +1016,7 @@ class DiffusionEngine(BaseEngine):
         *,
         has_tools: bool = False,
         request_id: str | None = None,
+        request_admitted_event: asyncio.Event | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         """Shared queue / cancel / stop-sequence plumbing for chat and
@@ -1149,6 +1152,8 @@ class DiffusionEngine(BaseEngine):
                 self._jobs.put(
                     (prompt, max_tokens, cfg, thread_q, cancel_event, done_event)
                 )
+                if request_admitted_event is not None:
+                    request_admitted_event.set()
             except BaseException:
                 if _request_registered:
                     with self._request_cancels_lock:
