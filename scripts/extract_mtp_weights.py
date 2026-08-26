@@ -45,6 +45,11 @@ def main():
         "--hf-model", required=True, help="HuggingFace model ID (e.g. Qwen/Qwen3.5-27B)"
     )
     parser.add_argument(
+        "--revision",
+        default="main",
+        help="Immutable HuggingFace revision (ignored when --hf-model is local)",
+    )
+    parser.add_argument(
         "--mlx-model", required=True, help="Path to quantized MLX model directory"
     )
     parser.add_argument(
@@ -79,8 +84,19 @@ def main():
     # Find which shard files contain MTP weights
     from huggingface_hub import hf_hub_download
 
+    def source_file(filename: str) -> str:
+        local = Path(args.hf_model)
+        if local.is_dir():
+            path = local / filename
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Source checkpoint is missing {filename}: {path}"
+                )
+            return str(path)
+        return hf_hub_download(args.hf_model, filename, revision=args.revision)
+
     logger.info(f"Downloading weight index from {args.hf_model}...")
-    idx_path = hf_hub_download(args.hf_model, "model.safetensors.index.json")
+    idx_path = source_file("model.safetensors.index.json")
     with open(idx_path) as f:
         idx = json.load(f)
 
@@ -101,7 +117,7 @@ def main():
     all_mtp_weights = {}
     for shard_file in shard_files:
         logger.info(f"Downloading {shard_file}...")
-        shard_path = hf_hub_download(args.hf_model, shard_file)
+        shard_path = source_file(shard_file)
         shard_weights = mx.load(shard_path)
         for k in mtp_keys:
             if mtp_keys[k] == shard_file and k in shard_weights:
@@ -196,7 +212,7 @@ def main():
     text_config = config.get("text_config", config)
     if text_config.get("mtp_num_hidden_layers") is None:
         # Read from HF config
-        hf_cfg_path = hf_hub_download(args.hf_model, "config.json")
+        hf_cfg_path = source_file("config.json")
         with open(hf_cfg_path) as f:
             hf_cfg = json.load(f)
         hf_tc = hf_cfg.get("text_config", hf_cfg)
