@@ -97,6 +97,27 @@ def test_two_layer_text_logits_match_pinned_architecture_reference():
         np.array(actual), expected, rtol=3e-2, atol=1.2e-3
     )
 
+    with torch.no_grad():
+        reference_prompt = reference(
+            torch.from_numpy(input_ids), use_cache=True
+        )
+        reference_decode = reference(
+            torch.tensor([[4]]),
+            past_key_values=reference_prompt.past_key_values,
+            use_cache=True,
+        ).logits.float().numpy()
+    cache = candidate.make_cache()
+    candidate_prompt = candidate(mx.array(input_ids), cache=cache)
+    mx.eval(candidate_prompt, [layer.state for layer in cache])
+    candidate_decode = candidate(mx.array([[4]]), cache=cache)
+    mx.eval(candidate_decode, [layer.state for layer in cache])
+    np.testing.assert_allclose(
+        np.array(candidate_decode),
+        reference_decode,
+        rtol=3e-2,
+        atol=1.2e-3,
+    )
+
 
 def test_ple_output_matches_pinned_architecture_reference():
     values = _tiny_config(
