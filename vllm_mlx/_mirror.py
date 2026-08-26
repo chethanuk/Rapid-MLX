@@ -2138,4 +2138,8 @@ def download_with_mirror_fallback(
         _print_dim(f"  {BOLD}Already cached{RESET} ({len(files)} files, {mb:.0f} MB)")
     if out is not None:
         out["transferred_bytes"] = transferred_bytes
+        # Authoritative "did we fetch anything over the wire this pull?" —
+        # distinct from the byte count so a fetched zero-byte file still
+        # counts as a transfer (codex round-4 BLOCKING #4).
+        out["network_fetch"] = bool(r2_hits or hf_hits)
     return True
