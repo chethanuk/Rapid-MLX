@@ -101,8 +101,8 @@ def test_summary_printed_on_mirror_success(
     We point the HF cache root at ``tmp_path`` via the ``HF_HUB_CACHE``
     constant so ``pull_command`` resolves the snapshot dir under our fixture.
     The mirror mock simulates an actual fetch: it creates ``refs/main`` and
-    populates the snapshot ONLY during the pull, so no snapshot exists at
-    entry (pre-pull size is unknown) and the summary reports a real download.
+    populates the snapshot ONLY during the pull, reporting ``out[
+    transferred_bytes] = 4096`` so the summary reports a real download.
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     revision = "abc123" * 6  # 36 hex chars; shape doesn't matter for the test
@@ -110,7 +110,7 @@ def test_summary_printed_on_mirror_success(
     cache_root = tmp_path / "hub"
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
-    def _mirror_fetch(model_name: str) -> bool:
+    def _mirror_fetch(model_name: str, *, out=None) -> bool:
         """Simulate the mirror downloading the snapshot during this pull."""
         repo_root = cache_root / "models--mlx-community--Qwen3-0.6B-4bit"
         refs_dir = repo_root / "refs"
@@ -118,6 +118,8 @@ def test_summary_printed_on_mirror_success(
         (refs_dir / "main").write_text(revision)
         snapshot_dir = repo_root / "snapshots" / revision
         _make_fake_snapshot(snapshot_dir, total_bytes=4096)
+        if out is not None:
+            out["transferred_bytes"] = 4096
         return True
 
     args = argparse.Namespace(model=repo_id)
@@ -159,10 +161,14 @@ def test_cached_pull_reports_verified_not_downloaded(
 
     args = argparse.Namespace(model=repo_id)
 
-    # The snapshot is already complete at entry AND the mirror pulls nothing
-    # new, so pre-pull and post-pull sizes match -> "verified (nothing to
-    # download)", not "Downloaded".
-    with patch.object(cli, "_try_mirror_prefetch", return_value=True):
+    # The mirror reports it fetched ZERO bytes this pull (every file was
+    # already cached) -> "verified (nothing to download)", not "Downloaded".
+    def _mirror_already_cached(model_name: str, *, out=None) -> bool:
+        if out is not None:
+            out["transferred_bytes"] = 0
+        return True
+
+    with patch.object(cli, "_try_mirror_prefetch", side_effect=_mirror_already_cached):
         cli.pull_command(args)
 
     out = capsys.readouterr().out
@@ -182,10 +188,8 @@ def test_moved_main_reported_as_download(
     wrong for a mutable ``main`` — the subsequent mirror/HF call can transfer
     new files while the summary falsely says "nothing to download". The
     summary must reflect the ACTUAL transfer. Here a stale rev_A is fully
-    cached pre-pull, then the mirror populates a NEWER rev_B. To prove the
-    label keys on the resolved revision (not byte count), rev_B is the SAME
-    total size as rev_A; the pull is nonetheless reported as a download
-    because the post-pull snapshot resolves to a different directory.
+    cached pre-pull, then the mirror reports it fetched NEWER files (rev_B) as
+    ``out["transferred_bytes"]``; the pull is reported as a download.
     """
     repo_id = "mlx-community/Qwen3-0.6B-4bit"
     stale_rev = "aaaaaa" * 6
@@ -200,12 +204,13 @@ def test_moved_main_reported_as_download(
     (refs_dir / "main").write_text(stale_rev)
     _make_fake_snapshot(repo_root / "snapshots" / stale_rev, total_bytes=4096)
 
-    def _mirror_fetch(model_name: str) -> bool:
-        # Remote main advanced mid-pull: refs/main now points at a NEWER rev.
-        # Same total byte count as the stale rev, so only the resolved PATH
-        # (not the size) proves a transfer happened.
+    def _mirror_fetch(model_name: str, *, out=None) -> bool:
+        # Remote main advanced mid-pull: refs/main now points at a NEWER rev
+        # whose snapshot bytes were actually fetched over the wire.
         (refs_dir / "main").write_text(head_rev)
         _make_fake_snapshot(repo_root / "snapshots" / head_rev, total_bytes=4096)
+        if out is not None:
+            out["transferred_bytes"] = 4096
         return True
 
     args = argparse.Namespace(model=repo_id)

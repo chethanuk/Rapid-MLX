@@ -1432,8 +1432,14 @@ def download_with_mirror_fallback(
     revision: str | None = None,
     on_pull_start: Callable[[], None] | None = None,
     allow_patterns: list[str] | None = None,
+    out: dict | None = None,
 ) -> bool:
     """Download ``repo_id`` to the HF cache via R2-first / HF-fallback.
+
+    ``out`` (optional) receives ``out["transferred_bytes"]`` = the count of
+    bytes actually fetched over the wire this pull (R2 + HF-fallback only;
+    warm ``cached`` hits are excluded). ``pull_command`` uses it to say
+    "already cached … (nothing to download)" truthfully (issue #2349).
 
     Returns True if every file landed in the snapshot dir (mix of R2 +
     HF is fine). Returns False if the caller should fall back to the
@@ -1718,6 +1724,12 @@ def download_with_mirror_fallback(
     hf_hits = 0
     misses: list[str] = []
     total_bytes = 0
+    # Bytes actually transferred over the wire this pull (R2 + HF-fallback
+    # files). ``total_bytes`` also counts warm ``cached`` hits, which helps
+    # the progress bar but must NOT be reported as a download — the pull
+    # summary needs the fresh-only count so a warm pull says "already
+    # cached / nothing to download" truthfully (issue #2349).
+    transferred_bytes = 0
 
     def _do_file(
         item: tuple[str, int | None, str | None],
@@ -1988,9 +2000,11 @@ def download_with_mirror_fallback(
                 if kind == "r2":
                     r2_hits += 1
                     total_bytes += size
+                    transferred_bytes += size
                 elif kind == "hf":
                     hf_hits += 1
                     total_bytes += size
+                    transferred_bytes += size
                     # HF fallback's tqdm doesn't feed into the R2 chunk loop,
                     # so the aggregate tracker would miss these bytes
                     # entirely. Bump it at completion so the heartbeat
@@ -2122,4 +2136,6 @@ def download_with_mirror_fallback(
     else:
         # All files were already cached — quiet success.
         _print_dim(f"  {BOLD}Already cached{RESET} ({len(files)} files, {mb:.0f} MB)")
+    if out is not None:
+        out["transferred_bytes"] = transferred_bytes
     return True
