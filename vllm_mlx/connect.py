@@ -265,14 +265,16 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     user can paste the banner URL verbatim. A missing port falls back to the
     rapid-mlx default (8000).
 
-    ``connect`` targets a local ``http://`` server (the SSOT endpoints are all
-    ``http``), so any non-``http`` scheme is rejected rather than silently
-    downgraded (codex #2348-R1). An explicit port is validated against the CLI
-    ``_port_arg`` 1-65535 invariant, so ``:0`` or out-of-range values fail
-    loudly instead of retargeting the snippet elsewhere.
+    ``connect`` targets a local ``http://`` server whose endpoints the SSOT
+    models as ``http://host:port`` (+ a literal ``/v1`` for OpenAI) — it has no
+    notion of a URL path prefix. So, mirroring the scheme check, any path other
+    than empty or ``/v1`` is rejected with a clear error rather than silently
+    rewriting a proxied base URL to the wrong API (codex #2348-R2). An explicit
+    port is validated against the CLI ``_port_arg`` 1-65535 invariant, so ``:0``
+    or out-of-range values fail loudly instead of retargeting the snippet.
 
-    Raises ``ValueError`` on a non-http scheme, a URL with no host, or an
-    explicit out-of-range port.
+    Raises ``ValueError`` on a non-http scheme, a URL with no host, an
+    unexpected path, or an explicit out-of-range port.
     """
     from urllib.parse import unquote, urlsplit
 
@@ -283,6 +285,12 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
     host = split.hostname
     if not host:
         raise ValueError(f"base-url has no host, got {base_url!r}")
+    # Empty path (``http://host:port``) and ``/v1`` (OpenAI form) are the only
+    # ones the SSOT can render losslessly; anything else is a proxied endpoint
+    # whose path this local-server tool does not model.
+    path = split.path or ""
+    if path not in ("", "/v1"):
+        raise ValueError(f"base-url path must be empty or /v1, got {base_url!r}")
     # unquote canonicalizes a percent-encoded scoped IPv6 zone-id back to the
     # raw form (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then
     # re-encodes it consistently when rendering, so the round-trip is stable.

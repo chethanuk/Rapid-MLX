@@ -521,8 +521,9 @@ def test_parse_base_url_default_port_and_errors():
     # No port → the rapid-mlx default.
     assert connect._parse_base_url("http://server.local/v1") == ("server.local", 8000)
     # Non-http scheme (incl. https, which the http-only connect SSOT would
-    # silently downgrade), malformed URL, no host, and an out-of-range/zero
-    # explicit port are all rejected rather than retargeting the snippet.
+    # silently downgrade), malformed URL, no host, an out-of-range/zero
+    # explicit port, and an unexpected path (a proxied endpoint the SSOT does
+    # not model) are all rejected rather than retargeting the snippet.
     for bad in (
         "ftp://localhost:8123",
         "https://localhost:8123/v1",
@@ -530,9 +531,13 @@ def test_parse_base_url_default_port_and_errors():
         "http://:8123",
         "http://localhost:0/v1",
         "http://localhost:70000/v1",
+        "http://server/proxy/v1",
+        "http://localhost:8123/custom",
     ):
         with pytest.raises(ValueError):
             connect._parse_base_url(bad)
+    # The one non-empty path the SSOT can render losslessly is allowed.
+    assert connect._parse_base_url("http://localhost:8123/v1") == ("localhost", 8123)
 
 
 def test_connect_base_url_partial_override_keeps_other_coordinate(monkeypatch):
