@@ -56,6 +56,12 @@ jobs:
             echo "::error::a non-empty recovery reason is required" >&2
             exit 1
           fi
+          case "$REASON" in
+            *$'\r'*|*$'\n'*)
+              echo "::error::recovery reason must be a single line" >&2
+              exit 1
+              ;;
+          esac
           if [ "$HAVE_PAT" != "true" ]; then
             echo "::error::RELEASE_PAT is required so the published engine Release triggers downstream workflows" >&2
             exit 1
@@ -268,9 +274,10 @@ jobs:
       - name: Recover the engine tag and Release at the Desktop candidate SHA
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.verify-published-desktop.outputs.version }}
+          VERSION: ${{ needs.verify-published-desktop.outputs.version }}
           RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
           NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md
+          REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
-          bash scripts/create_release.sh
+          bash scripts/recover_engine_release.sh

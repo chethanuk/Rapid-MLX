@@ -22,6 +22,7 @@ contains "$VERIFY" 'EVENT_REF: ${{ github.ref }}' "preflight binds dispatch to m
 contains "$VERIFY" 'refs/tags/${APP_TAG}^{commit}' "Desktop tag is the recovery identity SSOT"
 contains "$VERIFY" 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' "candidate must belong to main history"
 contains "$VERIFY" 'git show "${RELEASE_SHA}:pyproject.toml"' "version is read from the recovered candidate"
+contains "$VERIFY" 'recovery reason must be a single line' "multiline recovery reasons fail before evidence"
 contains "$VERIFY" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "a mismatched existing engine tag fails before approval"
 contains "$VERIFY" 'scripts/check_desktop_publish.py' "exact Desktop publication is verified before approval"
 contains "$VERIFY" 'scripts/check_release_blockers.py' "release blockers are checked before approval"
@@ -45,7 +46,11 @@ contains "$RECOVER" 'grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-ident
 contains "$RECOVER" '--expected-open-ids "$EXPECTED_OPEN_IDS"' "blocker set drift fails closed"
 contains "$RECOVER" 'git ls-remote --exit-code --refs origin "refs/tags/${ENGINE_TAG}"' "engine tag is re-read after approval"
 contains "$RECOVER" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "post-approval engine tag mismatch fails closed"
-contains "$RECOVER" 'bash scripts/create_release.sh' "existing idempotent engine release helper is reused"
+contains "$RECOVER" 'bash scripts/recover_engine_release.sh' "testable recovery publication unit is executed"
+contains "$RECOVER" 'VERSION: ${{ needs.verify-published-desktop.outputs.version }}' "publication receives the verified version"
+contains "$RECOVER" 'RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}' "publication receives the verified SHA"
+contains "$RECOVER" 'NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md' "publication receives immutable notes"
+contains "$RECOVER" 'REASON: ${{ inputs.reason }}' "publication receives the operator reason"
 lacks "$ALL" 'tag_desktop_app.sh' "recovery never creates or moves the Desktop tag"
 lacks "$ALL" 'rapid-mac-release.yml --ref' "recovery never dispatches another DMG build"
 
@@ -121,6 +126,52 @@ BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=0 ENGINE_SHA=000000000000000000000000000
 [ -e "$TMP/published" ] && ok "same-SHA engine tag permits idempotent recovery" || bad "same-SHA tag blocked recovery"
 BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction
 [ -e "$TMP/published" ] && ok "absent engine tag permits recovery publication" || bad "valid recovery did not reach publication"
+
+# Execute the real publication unit with a create_release.sh double. This
+# proves the final workflow step constructs TAG from the verified version and
+# preserves the exact RELEASE_SHA / NOTES_FILE values passed by the workflow.
+mkdir -p "$TMP/publication/scripts"
+cp "$REPO_ROOT/scripts/recover_engine_release.sh" "$TMP/publication/scripts/"
+cat > "$TMP/publication/scripts/create_release.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+{
+  printf 'TAG=%s\n' "$TAG"
+  printf 'RELEASE_SHA=%s\n' "$RELEASE_SHA"
+  printf 'NOTES_FILE=%s\n' "$NOTES_FILE"
+  printf 'REASON=%s\n' "$REASON"
+} > "$PUBLICATION_CALL"
+SH
+chmod +x "$TMP/publication/scripts/create_release.sh"
+printf 'release notes\n' > "$TMP/publication/notes.md"
+
+run_publication() {
+  rm -f "$TMP/publication/call"
+  env \
+    VERSION=0.13.0 \
+    RELEASE_SHA=0000000000000000000000000000000000000001 \
+    NOTES_FILE="$TMP/publication/notes.md" \
+    REASON="$1" \
+    PUBLICATION_CALL="$TMP/publication/call" \
+    bash "$TMP/publication/scripts/recover_engine_release.sh"
+}
+
+run_publication 'recover missing engine half'
+contains "$(cat "$TMP/publication/call")" 'TAG=v0.13.0' "publication constructs the exact engine tag"
+contains "$(cat "$TMP/publication/call")" 'RELEASE_SHA=0000000000000000000000000000000000000001' "publication preserves the approved SHA"
+contains "$(cat "$TMP/publication/call")" "NOTES_FILE=$TMP/publication/notes.md" "publication preserves the immutable notes path"
+contains "$(cat "$TMP/publication/call")" 'REASON=recover missing engine half' "publication preserves the audited reason"
+
+if run_publication $'forged reason\nSECOND_RECORD'; then
+  bad "multiline LF reason reached create_release"
+else
+  [ ! -e "$TMP/publication/call" ] && ok "LF reason is rejected before create_release" || bad "LF reason reached create_release"
+fi
+if run_publication $'forged reason\rSECOND_RECORD'; then
+  bad "multiline CR reason reached create_release"
+else
+  [ ! -e "$TMP/publication/call" ] && ok "CR reason is rejected before create_release" || bad "CR reason reached create_release"
+fi
 
 echo "passed: $PASS failed: $FAIL"
 [ "$FAIL" -eq 0 ]
