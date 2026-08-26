@@ -326,19 +326,30 @@ final class DictationController {
     func serverStateDidChange(_ newState: ServerState) {
         guard isEnabled, !modelPreparationDeferred else { return }
         switch newState {
-        case .starting:
+        case .starting(let alias) where alias != modelAlias:
             cancelActiveSessionForModelChange()
+            cancelModelPreparation()
             hotkey.stop()
             phase = .preparingModel
-        case .ready:
+        case .ready(let alias) where alias != modelAlias:
             cancelActiveSessionForModelChange()
             hotkey.stop()
             phase = .preparingModel
             Task { [weak self] in
                 await self?.enable(replacingCurrentPrewarm: true)
             }
-        default:
+        case .starting, .ready:
+            // This controller initiated its audio-only fallback; its in-flight
+            // preparation owns the transition and must not cancel itself.
             break
+        case .crashed, .stopped, .idle, .missing:
+            cancelActiveSessionForModelChange()
+            cancelModelPreparation()
+            hotkey.stop()
+            // Preserve the user's Enabled intent, but publish a terminal
+            // non-ready phase. Foreground revalidation or a later server
+            // transition can retry through the existing enable path.
+            phase = .off
         }
     }
 
@@ -496,6 +507,13 @@ final class DictationController {
         hud.hide()
     }
 
+    private func cancelModelPreparation() {
+        prewarmTask?.cancel()
+        prewarmTask = nil
+        prewarmRequestID = nil
+        enableRequestID = nil
+    }
+
     /// Tear down the process-wide dictation service without changing the
     /// user's persisted Enabled preference. A normal relaunch should re-arm
     /// dictation, but no global hotkey may survive into the app's synchronous
@@ -647,14 +665,14 @@ final class DictationController {
         // authoritative snapshot before arming the global hotkey: a mounted
         // audio route alone is not proof that a process-replacing model switch
         // restored the selected speech weights.
-        await server.refreshResidency()
+        let voiceLaneResident = await server.refreshVoiceLaneResidency(
+            for: alias,
+            modelPath: facts?.repo
+        )
         guard !Task.isCancelled,
               isEnabled,
               modelAlias == alias,
-              server.isVoiceLaneResident(
-                  for: alias,
-                  modelPath: facts?.repo
-              ) else { return false }
+              voiceLaneResident else { return false }
         if warmed {
             lastWarmupWarning = nil
         } else {

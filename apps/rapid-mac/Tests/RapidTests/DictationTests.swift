@@ -426,6 +426,60 @@ struct DictationTests {
     }
 
     @MainActor
+    @Test("failed chat-model switch leaves enabled dictation retryable")
+    func failedChatModelSwitchIsRetryable() async {
+        var warmupContinuation: CheckedContinuation<Bool, Never>?
+        var hotkeyStartCount = 0
+        let controller = readinessController(
+            phase: .idle,
+            prewarm: {
+                await withCheckedContinuation { warmupContinuation = $0 }
+            },
+            hotkeyStart: {
+                hotkeyStartCount += 1
+                return true
+            }
+        )
+
+        controller.serverStateDidChange(.starting(alias: "lfm2.5-1b-4bit"))
+        controller.serverStateDidChange(.crashed(
+            alias: "lfm2.5-1b-4bit",
+            message: "fixture failure"
+        ))
+        #expect(controller.isEnabled)
+        #expect(controller.phase == .off)
+        #expect(hotkeyStartCount == 0)
+
+        controller.revalidate()
+        while warmupContinuation == nil { await Task.yield() }
+        #expect(controller.phase == .preparingModel)
+        warmupContinuation?.resume(returning: true)
+        for _ in 0..<20 where controller.phase != .idle { await Task.yield() }
+        #expect(controller.phase == .idle)
+        #expect(hotkeyStartCount == 1)
+    }
+
+    @MainActor
+    @Test("audio-only fallback transitions do not cancel their own preparation")
+    func audioFallbackDoesNotSelfCancel() {
+        var prewarmCount = 0
+        let controller = readinessController(
+            phase: .preparingModel,
+            prewarm: {
+                prewarmCount += 1
+                return true
+            },
+            hotkeyStart: { true }
+        )
+
+        controller.serverStateDidChange(.starting(alias: "whisper-small"))
+        controller.serverStateDidChange(.ready(alias: "whisper-small"))
+
+        #expect(controller.phase == .preparingModel)
+        #expect(prewarmCount == 0)
+    }
+
+    @MainActor
     @Test("launch bootstrap arms before deferred model preparation")
     func launchBootstrapArmsWithoutWaitingForPrimaryHealth() async {
         var prewarmCount = 0

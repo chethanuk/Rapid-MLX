@@ -360,6 +360,16 @@ final class ServerManager {
         return residency.containsResidentAudioLane(modelPath: modelPath)
     }
 
+    /// Refresh and verify as one contract so a failed request can never make
+    /// a caller treat the previous process's audio snapshot as current.
+    func refreshVoiceLaneResidency(for alias: String, modelPath: String?) async -> Bool {
+        // An audio-only process owns this model at startup; no lazy lane or
+        // prior-process snapshot is involved.
+        if servingAlias == alias { return true }
+        guard await refreshResidency() else { return false }
+        return isVoiceLaneResident(for: alias, modelPath: modelPath)
+    }
+
     /// Bring up a server for a voice (STT/TTS) request, reusing the primary
     /// chat LLM/VLM process when one is already up so voice and text/vision
     /// run side-by-side instead of voice replacing the chat model.
@@ -395,16 +405,18 @@ final class ServerManager {
         isModelResident(alias) ? .ready(alias: alias) : state
     }
 
-    func refreshResidency() async {
+    @discardableResult
+    func refreshResidency() async -> Bool {
         guard case .ready = state else {
             residency = .empty
-            return
+            return false
         }
         guard let snapshot = await residencyClient.fetch(
             port: activePort,
             bearer: activeBearer
-        ) else { return }
+        ) else { return false }
         residency = snapshot
+        return true
     }
 
     func confirmPendingModelSwitch(_ request: PendingModelSwitch) {
