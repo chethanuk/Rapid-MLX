@@ -235,4 +235,22 @@ struct QuickstartStarterPolicyTests {
         )
         #expect(coordinator.selection.alias == settled)
     }
+
+    @Test("Entering Step 2 before catalog load preserves cached preference")
+    func deferredAuthoritativeCatalogStillWins() {
+        let coordinator = QuickstartCoordinator()
+        coordinator.applyDefaultChoice(hardware: hardware(15.99), catalog: [])
+        coordinator.advanceToChooseModel()
+        #expect(coordinator.selection.alias == "lfm2.5-2.6b-4bit")
+
+        coordinator.settleDefaultChoice(
+            hardware: hardware(15.99),
+            catalog: [
+                entry("lfm2.5-2.6b-4bit"),
+                entry("qwen3.5-4b-4bit", cached: true),
+            ]
+        )
+
+        #expect(coordinator.selection.alias == "qwen3.5-4b-4bit")
+    }
 }

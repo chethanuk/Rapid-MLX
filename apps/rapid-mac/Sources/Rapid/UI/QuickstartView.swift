@@ -1932,17 +1932,21 @@ struct QuickstartView: View {
     /// welcome screen appears; neither ordering may leave the chooser pointing
     /// at a card it does not render.
     private func advanceToModelChoice() {
-        coordinator.settleDefaultChoice(
-            hardware: hardware,
-            catalog: catalogLoaded ? cachedModels : []
-        )
+        if catalogLoaded {
+            coordinator.settleDefaultChoice(hardware: hardware, catalog: cachedModels)
+        } else {
+            // This is a provisional RAM baseline, not an authoritative empty
+            // catalog. Keep automatic policy live so the first real snapshot
+            // can still prefer an eligible cached model.
+            coordinator.applyDefaultChoice(hardware: hardware, catalog: [])
+        }
         coordinator.advanceToChooseModel()
     }
 
-    /// The one genuine onboarding dismissal. Keep the policy settlement and
+    /// The one genuine onboarding dismissal. Keep the live policy refresh and
     /// callback together so every exit preserves the same starter selection.
     private func skipForNow() {
-        coordinator.settleDefaultChoice(
+        coordinator.applyDefaultChoice(
             hardware: hardware,
             catalog: catalogLoaded ? cachedModels : []
         )

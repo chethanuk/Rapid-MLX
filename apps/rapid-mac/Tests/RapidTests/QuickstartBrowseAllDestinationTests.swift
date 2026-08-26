@@ -254,9 +254,9 @@ struct QuickstartBrowseAllDestinationTests {
             "The one dismissal control must route through the complete Skip action."
         )
         #expect(
-            stripped.contains(#"privatefuncskipForNow(){coordinator.settleDefaultChoice("#)
+            stripped.contains(#"privatefuncskipForNow(){coordinator.applyDefaultChoice("#)
                 && stripped.contains(#"catalog:catalogLoaded?cachedModels:[])onSkip()}"#),
-            "Skip must settle the live starter policy before its one onSkip() callback."
+            "Skip must refresh the live starter policy before its one onSkip() callback."
         )
     }
 

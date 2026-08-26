@@ -75,10 +75,10 @@ struct OnboardingDirectionDTests {
         let policyTask = try #require(source.range(of: ".task(id:StarterSelectionKey("))
         let chooser = try #require(source.range(of: "privatevarchooseModelStep:someView{"))
         let actionBoundary = try #require(source.range(
-            of: "privatefuncadvanceToModelChoice(){coordinator.settleDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])coordinator.advanceToChooseModel()}"
+            of: "privatefuncadvanceToModelChoice(){ifcatalogLoaded{coordinator.settleDefaultChoice(hardware:hardware,catalog:cachedModels)}else{coordinator.applyDefaultChoice(hardware:hardware,catalog:[])}coordinator.advanceToChooseModel()}"
         ))
         let skipRefresh = try #require(source.range(
-            of: "privatefuncskipForNow(){coordinator.settleDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])onSkip()}"
+            of: "privatefuncskipForNow(){coordinator.applyDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])onSkip()}"
         ))
 
         #expect(baseline.lowerBound > body.lowerBound)
