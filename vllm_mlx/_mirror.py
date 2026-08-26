@@ -1425,6 +1425,42 @@ def _safe_display_name(fname: str, max_len: int = 80) -> str:
     return cleaned
 
 
+def _blob_fingerprint(repo_root) -> tuple[tuple[str, int, int], ...]:
+    """Sorted ``(name, size, mtime_ns)`` of every real blob under ``blobs/``.
+
+    The mirror's stable transfer signal (Codex #2392): a NEW/MODIFIED blob is
+    the only thing meaning bytes crossed the wire. ``network_fetch`` compares
+    this before vs after the per-file pool, so a warm fallback that merely
+    re-links snapshot symlinks to ALREADY-LOCAL blobs is not counted as a
+    fetch — regardless of whether the catalog exposed a sha256 (the
+    ``expected_sha256``-only check missed non-LFS files, whose blobs HF stores
+    under their own blob id). ``.incomplete*`` scratch is excluded (HF churn).
+    """
+    import os as _os
+
+    if not repo_root:
+        return ()
+    blob_dir = repo_root / "blobs"
+    if not blob_dir.is_dir():
+        return ()
+    rows: list[tuple[str, int, int]] = []
+    try:
+        names = _os.listdir(blob_dir)
+    except OSError:
+        return ()
+    for name in names:
+        if name.startswith(".incomplete"):
+            continue
+        p = blob_dir / name
+        try:
+            if p.is_file():
+                st = p.stat()
+                rows.append((name, st.st_size, st.st_mtime_ns))
+        except OSError:
+            continue
+    return tuple(sorted(rows))
+
+
 def download_with_mirror_fallback(
     repo_id: str,
     cache_dir: Path | None = None,
@@ -1583,6 +1619,10 @@ def download_with_mirror_fallback(
     cache_root = cache_dir if cache_dir else _hf_cache_root()
     owner, _, repo = repo_id.partition("/")
     repo_root = cache_root / f"models--{owner}--{repo}"
+    # Stable transfer account (Codex #2392): fingerprint the BLOB store before
+    # the per-file pool so we can tell a warm re-link from a real fetch, even
+    # for non-LFS files with no catalog sha256.
+    blobs_before = _blob_fingerprint(repo_root)
     snap_dir = repo_root / "snapshots" / revision
     refs_dir = repo_root / "refs"
     # Codex round-14 BLOCKING #1+#2: keep ``.part`` and ``.lock``
@@ -2159,6 +2199,10 @@ def download_with_mirror_fallback(
         out["transferred_bytes"] = transferred_bytes
         # Authoritative "did we fetch anything over the wire this pull?" —
         # distinct from the byte count so a fetched zero-byte file still
-        # counts as a transfer (codex round-4 BLOCKING #4).
-        out["network_fetch"] = bool(r2_hits or hf_hits)
+        # counts as a transfer (codex round-4 BLOCKING #4). The verdict is the
+        # BLOB-store diff (Codex #2392): a new/modified blob means bytes
+        # crossed the wire; a warm re-link of already-local blobs does NOT
+        # (including non-LFS files with no catalog sha256, which the old
+        # ``bool(r2_hits or hf_hits)`` / sha256-only checks miscounted).
+        out["network_fetch"] = blobs_before != _blob_fingerprint(repo_root)
     return True

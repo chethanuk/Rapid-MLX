@@ -4203,7 +4203,14 @@ def test_mirror_download_reports_transfer_account_via_out(
         target = snap / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         expected_size = next(s for n, s in files if n == filename)
-        target.write_bytes(b"h" * expected_size)
+        # A genuine wire fetch materializes a BLOB in ``blobs/`` (HF writes
+        # the blob and links the snapshot to it); the blob diff is the
+        # network_fetch signal, so a real fetch flips it True.
+        repo_root = Path(cache_dir) / f"models--{repo_id.replace('/', '--')}"
+        blob = repo_root / "blobs" / filename.replace(".", "_")
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(b"h" * expected_size)
+        target.symlink_to(f"../../blobs/{blob.name}")
         return str(target)
 
     monkeypatch.setenv("RAPID_MLX_MODEL_MIRROR", "https://models.rapidmlx.com")
