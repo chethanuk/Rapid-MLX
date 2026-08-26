@@ -218,11 +218,9 @@ jobs:
   build:
     needs: changes
     if: needs.changes.outputs.desktop == 'true'
-    # macos-15 image; its default Xcode (16.4 / Swift 6.1) deterministically
-    # hangs one @MainActor UserDefaults test in this suite (#2366) that never
-    # hangs on Xcode 26.x, which is what the app is developed and released
-    # with. The step below pins the newest Xcode 26 the image ships.
-    # macos-latest still resolves to an older image on GitHub-hosted runners.
+    # macos-15 → default Xcode 16 → Swift 6.0, matching Package.swift's
+    # swift-tools-version and the release workflow's runner. macos-latest still
+    # resolves to macos-14 (Swift 5.x) on GitHub-hosted runners.
     runs-on: macos-15
     # A hung test would otherwise sit on the 6-hour default. The whole
     # job is ~2 min warm; 20 leaves room for a cold package resolve and
@@ -235,24 +233,6 @@ jobs:
         working-directory: apps/rapid-mac
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      # Pin the SwiftPM build/test toolchain to Xcode 26.3 (Swift 6.3). The
-      # image default (Xcode 16.4 / Swift 6.1) hangs `swift test` until the job
-      # timeout — see the runs-on comment above and #2366. Fail loudly if the
-      # image stops shipping this Xcode rather than silently falling back to
-      # the hanging default.
-      - name: select Xcode 26.3
-        run: |
-          set -euo pipefail
-          XCODE=/Applications/Xcode_26.3.app
-          if [ ! -d "$XCODE" ]; then
-            echo "::error::$XCODE not present on this runner image"
-            ls -d /Applications/Xcode*.app || true
-            exit 1
-          fi
-          sudo xcode-select -s "$XCODE"
-          xcodebuild -version
-          swift --version
 
       - name: swift build
         run: swift build
