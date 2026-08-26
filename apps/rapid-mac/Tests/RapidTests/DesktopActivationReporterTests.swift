@@ -58,7 +58,7 @@ struct DesktopActivationReporterTests {
             },
             sendEvent: { event in
                 await probe.didSend(event)
-                return true
+                return .accepted
             },
             markerDirectory: directory
         )
@@ -82,7 +82,7 @@ struct DesktopActivationReporterTests {
                 buildEvent: { event($0) },
                 sendEvent: { event in
                     await probe.didSend(event)
-                    return true
+                    return .accepted
                 },
                 markerDirectory: directory
             )
@@ -109,7 +109,7 @@ struct DesktopActivationReporterTests {
     func failedSendRetries() async {
         let directory = temporaryDirectory("retry")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let probe = ActivationReporterProbe(results: [false, true])
+        let probe = ActivationReporterProbe(results: [.retry, .accepted])
         let reporter = DesktopActivationReporter(
             isEnabled: { true },
             buildEvent: { event($0) },
@@ -130,6 +130,28 @@ struct DesktopActivationReporterTests {
         )
     }
 
+    @Test("A rejected activation never claims the accepted-delivery marker")
+    func rejectedSendDoesNotClaim() async {
+        let directory = temporaryDirectory("rejected")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reporter = DesktopActivationReporter(
+            isEnabled: { true },
+            buildEvent: { event($0) },
+            sendEvent: { _ in .discard },
+            markerDirectory: directory
+        )
+
+        await reporter.report(.firstChatReply)
+
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: directory
+                    .appendingPathComponent("activation_seen_desktop_first_chat_reply")
+                    .path
+            )
+        )
+    }
+
     @Test("Consent revoked during send never burns the once marker")
     func revokeDuringSendDoesNotClaim() async {
         let directory = temporaryDirectory("revoked")
@@ -141,7 +163,7 @@ struct DesktopActivationReporterTests {
             sendEvent: { event in
                 await probe.didSend(event)
                 probe.isEnabled = false
-                return true
+                return .accepted
             },
             markerDirectory: directory
         )
@@ -163,10 +185,10 @@ private final class ActivationReporterProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var builds = 0
     private var sent: [TelemetryEvent] = []
-    private var results: [Bool]
+    private var results: [TelemetryClient.BatchDelivery]
     private var enabled = true
 
-    init(results: [Bool] = []) {
+    init(results: [TelemetryClient.BatchDelivery] = []) {
         self.results = results
     }
 
@@ -191,10 +213,10 @@ private final class ActivationReporterProbe: @unchecked Sendable {
         lock.withLock { sent.append(event) }
     }
 
-    func nextResult(for event: TelemetryEvent) async -> Bool {
+    func nextResult(for event: TelemetryEvent) async -> TelemetryClient.BatchDelivery {
         lock.withLock {
             sent.append(event)
-            return results.isEmpty ? true : results.removeFirst()
+            return results.isEmpty ? .accepted : results.removeFirst()
         }
     }
 }

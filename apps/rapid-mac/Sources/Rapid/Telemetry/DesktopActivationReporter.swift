@@ -15,7 +15,7 @@ actor DesktopActivationReporter {
     typealias Kind = TelemetryEvent.Activation.Kind
     typealias Enabled = @Sendable () -> Bool
     typealias BuildEvent = @Sendable (Kind) -> TelemetryEvent
-    typealias SendEvent = @Sendable (TelemetryEvent) async -> Bool
+    typealias SendEvent = @Sendable (TelemetryEvent) async -> TelemetryClient.BatchDelivery
 
     static let shared = DesktopActivationReporter()
 
@@ -36,7 +36,7 @@ actor DesktopActivationReporter {
             )
         },
         sendEvent: @escaping SendEvent = { event in
-            await TelemetryClient().sendBatch([event])
+            await TelemetryClient().sendBatchDelivery([event])
         },
         markerDirectory: URL = TelemetryIdentity.sharedTelemetryDirectory()
     ) {
@@ -61,7 +61,7 @@ actor DesktopActivationReporter {
 
         inFlight.insert(kind)
         let event = buildEvent(kind)
-        let accepted = await sendEvent(event)
+        let delivery = await sendEvent(event)
         inFlight.remove(kind)
         // ``TelemetryClient.sendBatch`` deliberately reports opted-out as a
         // cleanup-success to its crash-marker caller. Re-check here before
@@ -69,7 +69,7 @@ actor DesktopActivationReporter {
         // can never retire a milestone that did not actually leave the Mac.
         // If consent changed after a real accepted send, leaving the marker
         // retryable permits only a harmless DISTINCT-client deduplicated replay.
-        guard accepted, isEnabled() else { return }
+        guard delivery == .accepted, isEnabled() else { return }
 
         _ = claimMarker(at: marker)
         resolvedThisProcess.insert(kind)
