@@ -64,5 +64,8 @@ in_fence {
 }
 { print }
 END {
-  if (in_comment) flush_pending()
+  # An unmatched opener can hide every generated line that follows in GitHub's
+  # Markdown renderer. Drop its buffered tail; preflight then rejects a file or
+  # section that contains no other visible content.
+  if (!in_comment) flush_pending()
 }

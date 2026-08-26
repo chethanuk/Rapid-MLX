@@ -184,8 +184,8 @@ contains "$BODY" "<!-- inner marker" "highlights: nested-fence comment opener is
 contains "$BODY" "INDENTED CODE COMMENT stays visible" "highlights: HTML comments in a 4-space indented code block are not stripped"
 contains "$BODY" "<!-- indented marker" "highlights: indented-code comment opener is preserved verbatim"
 lacks "$BODY" "later whole-line drafting note" "highlights: later whole-line comment is still stripped"
-contains "$BODY" "<!-- unmatched drafting note" "highlights: unmatched comment opener fails safe"
-contains "$BODY" "Visible after unmatched opener." "highlights: unmatched comment does not swallow following notes"
+lacks "$BODY" "<!-- unmatched drafting note" "highlights: unmatched comment opener cannot hide generated notes"
+lacks "$BODY" "Visible after unmatched opener." "highlights: unmatched comment tail is discarded"
 contains "$BODY" "Install:" "highlights: install line still last"
 # order: prose before <details> before Install
 check "highlights: prose is above All changes" \

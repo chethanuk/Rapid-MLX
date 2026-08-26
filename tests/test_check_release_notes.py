@@ -66,6 +66,15 @@ def test_rejects_notes_containing_only_stripped_drafting_comments(
         check_release_notes("0.13.1", changelog, notes_dir)
 
 
+def test_rejects_notes_with_unterminated_drafting_comment(tmp_path: Path) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    (notes_dir / "v0.13.1.md").write_text(
+        "<!-- unfinished draft that could hide generated notes\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="empty"):
+        check_release_notes("0.13.1", changelog, notes_dir)
+
+
 @pytest.mark.parametrize("version", ["0.13", "0.13.1-rc0", "../0.13.1", "v0.13.1"])
 def test_rejects_invalid_or_unsafe_version(tmp_path: Path, version: str) -> None:
     changelog, notes_dir = _inputs(tmp_path)
