@@ -3446,6 +3446,15 @@ class BatchedEngine(BaseEngine):
             videos=all_videos if all_videos else None,
             **kwargs,
         )
+        # Prime scheduler admission before exposing any synthetic prefix. The
+        # route publishes the public request id with its first SSE frame; if a
+        # forced prefix were yielded first, an immediate cancel could race the
+        # scheduler registration and return 404 for a live request.
+        routed_stream = self._stream_with_output_router(stream, router)
+        try:
+            first_output = await anext(routed_stream)
+        except StopAsyncIteration:
+            first_output = None
         # On the streaming path inject the forced prefix as a synthetic
         # first chunk so the route layer's streaming tool-call parser
         # sees the wire envelope opener from the very first delta.
@@ -3458,7 +3467,9 @@ class BatchedEngine(BaseEngine):
                 finished=False,
                 finish_reason=None,
             )
-        async for output in self._stream_with_output_router(stream, router):
+        if first_output is not None:
+            yield first_output
+        async for output in routed_stream:
             yield output
 
     def get_stats(self) -> dict[str, Any]:

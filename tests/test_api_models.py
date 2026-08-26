@@ -997,7 +997,8 @@ class TestStreamingModels:
             preserve_native_tool_format = False
             tokenizer = None
 
-            async def stream_chat(self, _messages, **_kwargs):
+            async def stream_chat(self, messages, **_kwargs):
+                del messages
                 yield GenerationOutput(
                     text="{}",
                     new_text="{}",
@@ -1026,6 +1027,48 @@ class TestStreamingModels:
         ]
         first = json.loads(chunks[0].removeprefix("data: "))
         assert first["id"].startswith("chatcmpl-")
+
+    @pytest.mark.asyncio
+    async def test_forced_prefix_waits_for_scheduler_admission(self):
+        """Synthetic tool prefixes cannot expose an unadmitted request id."""
+        from vllm_mlx.engine.base import GenerationOutput
+        from vllm_mlx.engine.batched import BatchedEngine
+
+        engine = BatchedEngine.__new__(BatchedEngine)
+        engine._loaded = True
+        engine._prepare_cache_stable_messages = lambda messages: (messages, None)
+        engine._apply_chat_template = lambda *_args, **_kwargs: "prompt"
+        engine._prepare_harmony_no_thinking_prompt = lambda prompt, **_kwargs: (
+            prompt,
+            None,
+        )
+        engine._needs_prefix_boundary_snapshot = lambda: False
+        engine._create_output_router = lambda: None
+        admitted = False
+
+        async def _stream_generate(**_kwargs):
+            nonlocal admitted
+            admitted = True
+            yield GenerationOutput(
+                text="answer",
+                new_text="answer",
+                prompt_tokens=1,
+                completion_tokens=1,
+                finished=True,
+                finish_reason="stop",
+            )
+
+        engine.stream_generate = _stream_generate
+        stream = engine.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            forced_assistant_prefix="<tool_call>",
+        )
+
+        first = await anext(stream)
+
+        assert admitted is True
+        assert first.new_text == "<tool_call>"
+        await stream.aclose()
 
 
 class TestModelSerialization:
