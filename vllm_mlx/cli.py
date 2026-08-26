@@ -6414,38 +6414,6 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
-def _hf_bytes_bar_class():
-    """Return a ``tqdm_class`` for ``snapshot_download`` that records bytes.
-
-    huggingface_hub accepts ``snapshot_download(..., tqdm_class=...)`` and
-    instantiates it exactly like ``tqdm``, calling ``update(n)`` per chunk and
-    setting ``total`` when the size is known. Subclassing the real bar keeps
-    the progress UX identical while we expose the aggregate bytes actually
-    fetched (issue #2349 — label the pull from the downloader's own transfer
-    result, not a filesystem guess). A fully-cached pull performs no file
-    transfer, so it records zero bytes and the summary says "nothing to
-    download" truthfully. Defined lazily to avoid a module-scope ``tqdm``
-    import (the mirror path never needs it).
-    """
-    from tqdm import tqdm
-
-    class _HFBytesBar(tqdm):
-        def __init__(self, *args, **kwargs):
-            self._recorded: list[int] = []
-            super().__init__(*args, **kwargs)
-
-        def update(self, n=1):
-            if n:
-                self._recorded.append(int(n))
-            super().update(n)
-
-        @property
-        def transferred_bytes(self) -> int:
-            return sum(self._recorded)
-
-    return _HFBytesBar
-
-
 def _print_pull_summary(
     repo_id: str,
     snapshot_dir,
@@ -6748,26 +6716,18 @@ def pull_command(args):
                     f"fetching only {_subfolder}/ (the folder rapid-mlx serves)."
                 )
             _allow = [f"{_subfolder}/*"] if _subfolder else None
-        _bar_cls = _hf_bytes_bar_class()
-        _bars: list = []
-
-        def _make_bar(*a, **k):
-            b = _bar_cls(*a, **k)
-            _bars.append(b)
-            return b
-
+        # HF-fallback runs only after a mirror miss (``_try_mirror_prefetch``
+        # returned False) — i.e. this is a fetch path and the transfer account
+        # is not authoritative here (a cached no-op is a rare fallback edge).
+        # So we intentionally do NOT pass a ``tqdm_class`` to count bytes, and
+        # the summary reports a download (``transferred`` stays ``None``). The
+        # truthful "already cached / nothing to download" label is produced by
+        # the mirror path's authoritative transfer account (issue #2349).
         path = (
-            snapshot_download(repo_id, allow_patterns=_allow, tqdm_class=_make_bar)
+            snapshot_download(repo_id, allow_patterns=_allow)
             if _allow
-            else snapshot_download(repo_id, tqdm_class=_make_bar)
+            else snapshot_download(repo_id)
         )
-        # ``_bars`` is populated only if the downloader actually constructed a
-        # progress bar. When it did, its byte count is the authoritative
-        # "bytes transferred this pull" truth; when it did NOT (a mocked or
-        # anomalous downloader), we cannot prove zero transfer, so leave
-        # ``transferred`` unknown and report a download rather than a lie.
-        if _bars:
-            transferred = sum(b.transferred_bytes for b in _bars)
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
