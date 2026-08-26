@@ -1388,6 +1388,72 @@ async def test_failed_performance_reload_restores_the_last_known_good_engine():
 
 
 @pytest.mark.asyncio
+async def test_double_failed_primary_reload_clears_every_serving_owner():
+    registry = ModelRegistry()
+    primary = entry("chat")
+    registry.add(primary, is_default=True)
+    primary_changes: list[ModelEntry | None] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        del path, performance
+        if name == "secondary":
+            return entry(name)
+        raise RuntimeError("loader unavailable")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_changed=primary_changes.append,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+    await manager.load("secondary", estimated_bytes=1 * GIB)
+
+    with pytest.raises(RuntimeError, match="loader unavailable"):
+        await manager.load(
+            "chat",
+            performance=ResidentPerformanceConfig(kv_cache_dtype="int4"),
+            reload_if_changed=True,
+        )
+
+    assert [item.model_name for item in registry.list_entries()] == ["secondary"]
+    assert registry.default_name is None
+    assert [item["id"] for item in manager.snapshot()["models"]] == ["secondary"]
+    assert registry.get_engine("secondary") is not None
+    with pytest.raises(KeyError, match="No default model set"):
+        registry.get_engine(None)
+    assert primary_changes == [None]
+
+
+def test_clearing_resident_primary_disables_legacy_routing_and_readiness(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx import server
+
+    cfg = SimpleNamespace()
+    monkeypatch.setattr(server, "get_config", lambda: cfg)
+    monkeypatch.setattr(server, "_engine", object())
+    monkeypatch.setattr(server, "_model_name", "chat")
+
+    server._set_resident_primary(None)
+
+    assert server._engine is None
+    assert server._model_name is None
+    assert server._model_alias is None
+    assert server._model_path is None
+    assert server._enable_auto_tool_choice is False
+    assert server._tool_call_parser is None
+    assert server._tool_parser_instance is None
+    assert server._reasoning_parser is None
+    assert server._reasoning_parser_name is None
+    assert cfg.engine is None
+    assert cfg.model_name is None
+    assert cfg.model_alias is None
+    assert cfg.model_path is None
+    assert cfg.ready is False
+
+
+@pytest.mark.asyncio
 async def test_failed_stop_rebuilds_the_existing_engine_before_rerouting():
     manager, registry, loaded, _ = manager_fixture(limit_gib=20)
     old_engine = registry.get_engine("chat")

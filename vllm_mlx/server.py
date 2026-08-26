@@ -2500,12 +2500,36 @@ def _handoff_resident_primary_audio_worker(
         ) from exc
 
 
-def _set_resident_primary(entry: ModelEntry) -> None:
+def _set_resident_primary(entry: ModelEntry | None) -> None:
     """Publish a replacement assistant as the legacy/default engine."""
 
     global _engine, _model_name, _model_alias, _model_path
     global _enable_auto_tool_choice, _tool_call_parser, _tool_parser_instance
     global _reasoning_parser, _reasoning_parser_name
+
+    if entry is None:
+        _engine = None
+        _model_name = None
+        _model_alias = None
+        _model_path = None
+        _enable_auto_tool_choice = False
+        _tool_call_parser = None
+        _tool_parser_instance = None
+        _reasoning_parser = None
+        _reasoning_parser_name = None
+
+        cfg = get_config()
+        cfg.engine = None
+        cfg.model_name = None
+        cfg.model_alias = None
+        cfg.model_path = None
+        cfg.enable_auto_tool_choice = False
+        cfg.tool_call_parser = None
+        cfg.tool_parser_instance = None
+        cfg.reasoning_parser = None
+        cfg.reasoning_parser_name = None
+        cfg.ready = False
+        return
 
     _engine = entry.engine
     _model_name = entry.model_name
