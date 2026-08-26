@@ -16,10 +16,11 @@ import urllib.request
 from pathlib import Path
 
 
-def _free_local_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _bound_local_listener() -> socket.socket:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    return listener
 
 
 def _completion_is_sensible(text: object) -> bool:
@@ -125,21 +126,33 @@ def main() -> int:
             raise SystemExit(f"vision smoke: {label} not found: {path}")
     model = _resolve_model(args.model, args.revision)
 
-    port = _free_local_port()
-    base_url = f"http://127.0.0.1:{port}"
+    listener = _bound_local_listener()
+    base_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
     with tempfile.NamedTemporaryFile(
         prefix="rapid-sidecar-vision-", suffix=".log", delete=False
     ) as log:
         log_path = Path(log.name)
-        process = subprocess.Popen(
-            [str(executable), "serve", str(model), "--mllm", "--port", str(port)],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env={**os.environ, "PYTHONNOUSERSITE": "1"},
-        )
+        try:
+            process = subprocess.Popen(
+                [
+                    str(executable),
+                    "serve",
+                    str(model),
+                    "--mllm",
+                    "--listen-fd",
+                    str(listener.fileno()),
+                ],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                pass_fds=(listener.fileno(),),
+                env={**os.environ, "PYTHONNOUSERSITE": "1"},
+            )
+        finally:
+            # Popen duplicates pass_fds into the child before it returns. Close
+            # the parent's copy only after that atomic handoff.
+            listener.close()
 
-    succeeded = False
     try:
         _wait_until_ready(base_url, process, args.startup_timeout)
         image = base64.b64encode(args.image.read_bytes()).decode("ascii")
@@ -173,7 +186,6 @@ def main() -> int:
                 f"vision smoke returned an implausible description: {content!r}"
             )
         print(f"vision smoke: HTTP 200; description={content!r}")
-        succeeded = True
         return 0
     except Exception:
         print(f"vision smoke server log: {log_path}")
@@ -181,8 +193,7 @@ def main() -> int:
         raise
     finally:
         _stop_process(process)
-        if succeeded:
-            log_path.unlink(missing_ok=True)
+        log_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

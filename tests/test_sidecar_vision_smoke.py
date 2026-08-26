@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import socket
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,18 @@ def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
 def test_repository_model_without_revision_fails_closed() -> None:
     with pytest.raises(SystemExit, match="requires --revision"):
         _MODULE._resolve_model("owner/model", None)
+
+
+def test_bound_listener_holds_port_until_socket_activation_handoff() -> None:
+    listener = _MODULE._bound_local_listener()
+    host, port = listener.getsockname()
+    contender = socket.socket()
+    try:
+        with pytest.raises(OSError):
+            contender.bind((host, port))
+    finally:
+        contender.close()
+        listener.close()
 
 
 class _FakeProcess:
