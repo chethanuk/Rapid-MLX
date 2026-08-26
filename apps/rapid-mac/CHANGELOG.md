@@ -30,7 +30,12 @@ can actually understand.
 - **Assistant changes are explicit, safe transactions.** API clients can choose
   whether a busy text or vision model switch should reject, wait, or abort
   active assistant work. Desktop rejects a busy switch safely, and auxiliary
-  speech models remain resident. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
+  speech models remain resident. The replacement API accepts
+  `memory_policy=keep_then_commit` or `evict_first_if_needed`; the default
+  projection-gated policy evicts the replaced model only when both cannot fit
+  and the projected replacement fits, otherwise returning a typed 507 with
+  `replacement_projection` before eviction. Use `keep_then_commit` to require
+  a rollback-safe load. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
 - **Large multi-variant repositories can download one serving format.** The CLI
   accepts `--bits` or `--format`, so users do not need to fetch every
   quantization in a repository. ([#2145](https://github.com/raullenchai/Rapid-MLX/issues/2145),
