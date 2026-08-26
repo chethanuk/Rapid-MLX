@@ -19,8 +19,8 @@ import json
 import sys
 from pathlib import Path
 
+import mlx.core as mx
 import numpy as np
-from safetensors.numpy import save_file
 
 
 def build(
@@ -33,7 +33,7 @@ def build(
 
     rng = np.random.default_rng(0)
     weight_map: dict[str, str] = {}
-    shards: list[dict[str, np.ndarray]] = []
+    shards: list[dict[str, np.ndarray | mx.array]] = []
     total = 5
 
     def put(tensors: dict[str, np.ndarray]):
@@ -48,7 +48,7 @@ def build(
     # Shard 1: MoE expert matrices (quantisable, 2-D divisible).
     moe = {}
     for e in range(num_experts):
-        pre = f"layers.0.mlp.experts.{e}"
+        pre = f"model.language_model.layers.0.mlp.experts.{e}"
         moe[f"{pre}.down_proj.weight"] = f32(inter, hidden)
         moe[f"{pre}.gate_proj.weight"] = f32(hidden, inter)
         moe[f"{pre}.up_proj.weight"] = f32(hidden, inter)
@@ -57,44 +57,57 @@ def build(
     # Shard 2: dense attention + a 1-D RMS norm (COPY), and an A_log buffer
     # (COPY — shape [heads]).
     dense = {}
-    dense["model.embed_tokens.weight"] = f32(64, hidden)  # PLE/embed -> quantize
-    dense["layers.0.self_attn.q_proj.weight"] = f32(hidden, hidden)
-    dense["layers.0.self_attn.o_proj.weight"] = f32(hidden, hidden)
-    dense["model.norm.weight"] = f32(hidden)  # 1-D -> copy
-    dense["layers.0.safegate.A_log"] = f32(2)  # buffer suffix -> copy
+    dense["model.language_model.embed_tokens.weight"] = f32(64, hidden)
+    dense["model.language_model.layers.0.self_attn.q_proj.weight"] = f32(
+        hidden, hidden
+    )
+    dense["model.language_model.layers.0.self_attn.o_proj.weight"] = f32(
+        hidden, hidden
+    )
+    dense["model.language_model.layers.0.mlp.gate.weight"] = f32(512, hidden)
+    dense["model.language_model.layers.0.mlp.shared_expert_gate.weight"] = f32(
+        1, hidden
+    )
+    dense["model.language_model.norm.weight"] = mx.array(f32(hidden)).astype(
+        mx.bfloat16
+    )
+    dense["model.language_model.layers.0.linear_attn.A_log"] = f32(2)
     put(dense)
 
-    # Shard 3: PLE embedding rows (quantisable 2-D) + mm.embedding (quantize),
-    # and a buffer flag (U8) that must be copied.
+    # Shard 3: exact PLE shard names and width 160 exercise q4-g32.
     ple = {}
     for i in range(2):
-        ple[f"ple_embed.rows.{i}.weight"] = f32(32, hidden).astype(
-            np.float16
-        )  # PLE rows fp16
-    ple["mm.embedding.weight"] = f32(16, hidden).astype(np.float16)
-    ple["layers.0.attention.rotary_emb.inv_freq"] = f32(
-        1, hidden // 2
-    )  # aux float copied (buffer-like, non-quant 1-D-ish)
+        name = (
+            "model.language_model.layers.1.ple.ple_embedding."
+            f"ngram_embedding.shard_{i}.weight"
+        )
+        ple[name] = f32(32, 160).astype(np.float16)
+    ple["model.language_model.layers.1.ple.ple_embedding.layer_multipliers"] = f32(
+        8
+    )
     put(ple)
 
     # Shard 4: a non-divisible-by-group-size 2-D tensor (COPY) and a true
     # 1-D bias (COPY), plus an int aux buffer.
     misc = {}
-    misc["layers.0.mlp.gate.bias"] = f32(inter)  # 1-D -> copy
+    misc["model.language_model.layers.0.mlp.gate.bias"] = f32(inter)
     misc["projector.non_divisible.weight"] = f32(5, 100)  # 100 % 32 != 0 -> copy
-    misc["model.rotary_emb.inv_freq"] = np.zeros(
+    misc["model.language_model.rotary_emb.inv_freq"] = np.zeros(
         hidden // 2, dtype=np.float32
     )  # 1-D copy
-    misc["layers.0.attention.num_buckets"] = np.array(
+    misc["model.language_model.layers.0.attention.num_buckets"] = np.array(
         [64], dtype=np.int32
     )  # int buffer copy
     put(misc)
 
     # Shard 5: dense logits head (2-D divisible, quantize).
-    put({"model.lm_head.weight": f32(64, hidden)})
+    put({"lm_head.weight": f32(64, hidden)})
 
     for tensors, slot in zip(shards, range(1, total + 1)):
-        save_file(tensors, str(out / f"model-{slot:05d}-of-{total:05d}.safetensors"))
+        mx.save_safetensors(
+            str(out / f"model-{slot:05d}-of-{total:05d}.safetensors"),
+            {name: mx.array(value) for name, value in tensors.items()},
+        )
 
     index = {
         "metadata": {"total_size": sum(t.nbytes for sh in shards for t in sh.values())},

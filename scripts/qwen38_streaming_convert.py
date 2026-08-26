@@ -40,18 +40,21 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from safetensors.numpy import save_file
 
 DEFAULT_MAX_SHARD_BYTES = 4 * 1024**3
 GUARD_EXPERT_SSD = "/Volumes/Extreme SSD"
 
-# Explicit embedding/PLE tensor names that are quantised (contract, not
-# substring heuristic).
-_EMBED_TENSOR_NAMES = ("model.embed_tokens.weight", "mm.embedding.weight")
 # Buffers / special params copied as-is (never quantised).
 _BUFFER_SUFFIXES = (".A_log",)
 # dtypes that are aux/buffer-like and copied as-is rather than quantised.
-_NON_QUANT_DTYPES = {"BF16", "F64", "F8", "F4", "I8", "I16", "I32", "I64", "U8", "BOOL"}
+_NON_QUANT_DTYPES = {"F64", "F8", "F4", "I8", "I16", "I32", "I64", "U8", "BOOL"}
+_FLOAT_DTYPES = {"BF16", "F16", "F32"}
+
+_PLE_PREFIX = (
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_"
+)
+_PLE_SUFFIX = ".weight"
+_ROUTING_GATE_SUFFIXES = (".mlp.gate.weight", ".mlp.shared_expert_gate.weight")
 
 _NP_DTYPES = {
     "F16": np.float16,
@@ -67,11 +70,6 @@ _NP_DTYPES = {
 _DTYPE_BYTES = {"F8": 1, "F16": 2, "BF16": 2, "F32": 4, "F64": 8}
 
 
-def _bf16_to_f32(raw_uint16: np.ndarray) -> np.ndarray:
-    """Widen raw bfloat16 bit-patterns to float32 (numpy has no bfloat16)."""
-    return (raw_uint16.astype(np.uint32) << 16).view(np.float32)
-
-
 def peak_rss_bytes() -> int:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return rss if sys.platform == "darwin" else rss * 1024
@@ -84,8 +82,15 @@ def _dtype_bytes(dtype: str) -> int:
 # ---------------------------------------------------------------------------
 # Manifest classification (Vector's per-tensor quantise / copy predicate)
 # ---------------------------------------------------------------------------
-def classify_tensor(name: str, shape: list[int], dtype: str, group_size: int) -> str:
-    """Return ``"quantize"`` or ``"copy"`` for a source tensor.
+def _is_ple_shard(name: str) -> bool:
+    if not (name.startswith(_PLE_PREFIX) and name.endswith(_PLE_SUFFIX)):
+        return False
+    shard = name[len(_PLE_PREFIX) : -len(_PLE_SUFFIX)]
+    return shard.isdecimal() and 0 <= int(shard) < 128
+
+
+def classify_tensor(name: str, shape: list[int], dtype: str) -> tuple[str, int, int]:
+    """Return ``(action, group_size, bits)`` for one source tensor.
 
     Explicit contract first, then the manifest predicate:
       * 1-D weights (norms, biases) are copy/fp.
@@ -93,26 +98,44 @@ def classify_tensor(name: str, shape: list[int], dtype: str, group_size: int) ->
       * widths whose last dim is not divisible by ``group_size`` are copy/fp.
       * everything else (2-D + divisible, incl. embed/PLE tables) is quantised.
     """
-    if len(shape) <= 1:
-        return "copy"
-    if name.endswith(_BUFFER_SUFFIXES):
-        return "copy"
-    if dtype.upper() in _NON_QUANT_DTYPES:
-        return "copy"
-    if shape[-1] % group_size != 0:
-        return "copy"
-    return "quantize"
+    up = dtype.upper()
+    if len(shape) <= 1 or name.endswith(_BUFFER_SUFFIXES):
+        return "copy", 0, 0
+    if up in _NON_QUANT_DTYPES or up not in _FLOAT_DTYPES:
+        return "copy", 0, 0
+    if _is_ple_shard(name):
+        if shape[-1] != 160 or shape[-1] % 32:
+            raise RuntimeError(f"invalid Qwen4-Exp PLE shape for {name}: {shape}")
+        return "quantize", 32, 4
+    if name.endswith(_ROUTING_GATE_SUFFIXES):
+        if shape[-1] % 64:
+            raise RuntimeError(f"invalid Qwen4-Exp routing-gate shape for {name}: {shape}")
+        return "quantize", 64, 8
+    if shape[-1] % 64:
+        return "copy", 0, 0
+    return "quantize", 64, 4
 
 
 # ---------------------------------------------------------------------------
 # Streaming helpers
 # ---------------------------------------------------------------------------
-def _safe_abs(root: Path, p: Path) -> Path:
-    rootr = root.resolve()
-    candidate = (root / p).resolve()
-    if candidate != rootr and not candidate.is_relative_to(rootr):
-        raise RuntimeError(f"path escapes source root: {p}")
-    return candidate
+def _safe_source_shard(snapshot: Path, relative: Path) -> Path:
+    """Resolve a flat HF shard name, including standard snapshot symlinks.
+
+    HF snapshot files point into the repository cache's sibling ``blobs``
+    directory.  The index is allowed to name one basename only, and the
+    resolved target must remain inside that model-cache root.
+    """
+    if relative.is_absolute() or len(relative.parts) != 1:
+        raise RuntimeError(f"source index contains a non-flat shard path: {relative}")
+    candidate = snapshot / relative
+    if not candidate.is_file():
+        raise RuntimeError(f"missing source shard: {relative}")
+    resolved = candidate.resolve()
+    model_cache_root = snapshot.parent.parent.resolve()
+    if resolved != model_cache_root and not resolved.is_relative_to(model_cache_root):
+        raise RuntimeError(f"source shard escapes model cache root: {relative}")
+    return resolved
 
 
 def _read_shard_layout(shard: Path) -> tuple[int, dict]:
@@ -138,23 +161,26 @@ def _tensor_bytes(shard: Path, header_len: int, header: dict, name: str) -> byte
         return bytes(mem[begin:end])
 
 
-def _numpy_from_bytes(data: bytes, dtype: str, shape: list[int]) -> np.ndarray:
+def _mlx_from_bytes(data: bytes, dtype: str, shape: list[int]) -> mx.array:
     up = dtype.upper()
     if up == "BF16":
-        return _bf16_to_f32(np.frombuffer(data, dtype=np.uint16).reshape(shape))
+        return mx.array(np.frombuffer(data, dtype=np.uint16).reshape(shape)).view(
+            mx.bfloat16
+        )
     np_dtype = _NP_DTYPES.get(up)
     if np_dtype is None:
         raise RuntimeError(f"unsupported source dtype {dtype} for tensor")
-    return np.frombuffer(data, dtype=np_dtype).reshape(shape)
+    return mx.array(np.frombuffer(data, dtype=np_dtype).reshape(shape))
 
 
-def quantize_affine_q4_g32(
-    arr: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def quantize_affine(
+    arr: mx.array, *, group_size: int, bits: int
+) -> tuple[mx.array, mx.array, mx.array]:
     q, scales, biases = mx.quantize(
-        mx.array(arr.astype(np.float32)), group_size=32, bits=4, mode="affine"
+        arr, group_size=group_size, bits=bits, mode="affine"
     )
-    return np.asarray(q), np.asarray(scales), np.asarray(biases)
+    mx.eval(q, scales, biases)
+    return q, scales, biases
 
 
 def _sha256(path: Path) -> str:
@@ -187,10 +213,74 @@ def _copy_aux_metadata(source: Path, output: Path) -> list[str]:
     for name in _AUX_COPY_NAMES:
         src = source / name
         if src.is_file():
-            _safe_abs(source, Path(name))
+            _safe_source_shard(source, Path(name))
             shutil.copyfile(src, output / name)
             copied.append(name)
     return copied
+
+
+def _module_path_for_override(source_weight: str) -> str:
+    key = source_weight.removesuffix(".weight")
+    if key.startswith("model.language_model"):
+        key = key.replace("model.language_model", "language_model.model", 1)
+    if ".ngram_embedding.shard_" in key:
+        prefix, shard = key.split(".ngram_embedding.shard_", 1)
+        key = f"{prefix}.ngram_embedding.shards.{int(shard)}"
+    return key
+
+
+def _write_quantized_config(source: Path, output: Path, overrides: dict[str, dict]) -> None:
+    config_path = source / "config.json"
+    if not config_path.is_file():
+        raise RuntimeError("source has no config.json")
+    config = json.loads(config_path.read_text())
+    quantization = {"group_size": 64, "bits": 4, "mode": "affine"}
+    quantization.update(dict(sorted(overrides.items())))
+    config["quantization"] = quantization
+    config["quantization_config"] = quantization
+    (output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
+def inspect_manifest(source: Path) -> dict:
+    """Classify the real headers without reading tensor payloads."""
+    source = source.resolve()
+    index_path = source / "model.safetensors.index.json"
+    if not index_path.is_file():
+        raise RuntimeError("source has no model.safetensors.index.json")
+    weight_map: dict[str, str] = json.loads(index_path.read_text()).get(
+        "weight_map", {}
+    )
+    layouts: dict[str, tuple[int, dict]] = {}
+    counts = {"q4_g32_ple": 0, "q8_g64_gate": 0, "q4_g64": 0, "copy": 0}
+    source_bytes = 0
+    for name in sorted(weight_map):
+        shard = _safe_source_shard(source, Path(weight_map[name]))
+        if str(shard) not in layouts:
+            layouts[str(shard)] = _read_shard_layout(shard)
+        _, header = layouts[str(shard)]
+        info = header.get(name)
+        if info is None:
+            raise RuntimeError(f"weight {name!r} not in source shard {shard}")
+        shape, dtype = list(info["shape"]), info["dtype"]
+        source_bytes += math.prod(shape) * _dtype_bytes(dtype)
+        action, group_size, bits = classify_tensor(name, shape, dtype)
+        if action == "copy":
+            counts["copy"] += 1
+        elif (group_size, bits) == (32, 4):
+            counts["q4_g32_ple"] += 1
+        elif (group_size, bits) == (64, 8):
+            counts["q8_g64_gate"] += 1
+        elif (group_size, bits) == (64, 4):
+            counts["q4_g64"] += 1
+        else:
+            raise RuntimeError(f"unrecognized classification for {name}")
+    if sum(counts.values()) != len(weight_map):
+        raise RuntimeError("manifest classification is not one-to-one")
+    # 48 decoder layers carry two routing gates each; the checkpoint's one
+    # MTP layer carries the same pair and is retained for milestone M2.
+    if counts["q4_g32_ple"] != 128 or counts["q8_g64_gate"] != 98:
+        raise RuntimeError(f"checkpoint contract count mismatch: {counts}")
+    return {"weights": len(weight_map), "source_bytes": source_bytes, **counts}
 
 
 # ---------------------------------------------------------------------------
@@ -207,27 +297,29 @@ class _ShardWriter:
         self.files: list[Path] = []
         self.weight_map: dict[str, str] = {}
         # current buffer: list of (base_name, tensors_dict), + running bytes
-        self._buf: list[tuple[str, dict[str, np.ndarray]]] = []
+        self._buf: list[dict[str, mx.array]] = []
         self._buf_bytes = 0
+        self.total_output_bytes = 0
 
-    def add(self, base: str, tensors: dict[str, np.ndarray]) -> None:
+    def add(self, tensors: dict[str, mx.array]) -> None:
         nbytes = sum(t.nbytes for t in tensors.values())
         if self._buf and self._buf_bytes + nbytes > self.max_bytes:
             self._flush()
-        self._buf.append((base, tensors))
+        self._buf.append(tensors)
         self._buf_bytes += nbytes
+        self.total_output_bytes += nbytes
 
     def _flush(self) -> None:
         if not self._buf:
             return
         self.index += 1
         path = self.output / f"model-{self.index:05d}-of-00000.safetensors"
-        payload: dict[str, np.ndarray] = {}
-        for base, tensors in self._buf:
+        payload: dict[str, mx.array] = {}
+        for tensors in self._buf:
             for key, value in tensors.items():
                 payload[key] = value
-            self.weight_map[base] = path.name
-        save_file(payload, str(path))
+                self.weight_map[key] = path.name
+        mx.save_safetensors(str(path), payload, metadata={"format": "mlx"})
         self.files.append(path)
         self._buf = []
         self._buf_bytes = 0
@@ -257,7 +349,6 @@ def convert(
     output: Path,
     *,
     max_shard_bytes: int,
-    group_size: int = 32,
     min_free_bytes: int = 140 * 1024**3,
     max_rss_bytes: int = int(220.0 * 1024**3),
 ) -> dict:
@@ -291,13 +382,14 @@ def convert(
 
     shard_layouts: dict[str, tuple[int, dict]] = {}
     for n in weight_map:
-        sh = _safe_abs(source, Path(weight_map[n]))
+        sh = _safe_source_shard(source, Path(weight_map[n]))
         if str(sh) not in shard_layouts:
             shard_layouts[str(sh)] = _read_shard_layout(sh)
 
     writer = _ShardWriter(output, max_shard_bytes)
     total_weight_bytes = 0  # Σ numel*dtype_bytes over ALL source weights
     n_quant = n_copy = 0
+    quant_overrides: dict[str, dict] = {}
 
     for name in sorted(weight_map):
         if peak_rss_bytes() > max_rss_bytes:
@@ -305,7 +397,7 @@ def convert(
                 f"process footprint aborted: peak RSS {peak_rss_bytes() / 1024**3:.1f} "
                 f"GiB > guard {max_rss_bytes / 1024**3:.1f} GiB"
             )
-        src = _safe_abs(source, Path(weight_map[name]))
+        src = _safe_source_shard(source, Path(weight_map[name]))
         header_len, header = shard_layouts[str(src)]
         info = header.get(name)
         if info is None:
@@ -314,21 +406,35 @@ def convert(
         dtype = info["dtype"]
         total_weight_bytes += math.prod(shape) * _dtype_bytes(dtype)
 
-        action = classify_tensor(name, shape, dtype, group_size)
+        action, group_size, bits = classify_tensor(name, shape, dtype)
         data = _tensor_bytes(src, header_len, header, name)
         if action == "copy":
-            arr = _numpy_from_bytes(data, dtype, shape)
-            writer.add(name, {name: arr})
+            arr = _mlx_from_bytes(data, dtype, shape)
+            mx.eval(arr)
+            writer.add({name: arr})
             n_copy += 1
         else:
-            arr = _numpy_from_bytes(data, dtype, shape).astype(np.float32)
-            q, scales, biases = quantize_affine_q4_g32(arr)
+            arr = _mlx_from_bytes(data, dtype, shape)
+            q, scales, biases = quantize_affine(
+                arr, group_size=group_size, bits=bits
+            )
             writer.add(
-                name,
                 {name: q, name + ".scales": scales, name + ".biases": biases},
             )
+            if (group_size, bits) != (64, 4):
+                quant_overrides[_module_path_for_override(name)] = {
+                    "group_size": group_size,
+                    "bits": bits,
+                    "mode": "affine",
+                }
             n_quant += 1
         del data, arr
+        if peak_rss_bytes() > max_rss_bytes:
+            raise RuntimeError(
+                f"process footprint aborted after {name}: peak RSS "
+                f"{peak_rss_bytes() / 1024**3:.1f} GiB > guard "
+                f"{max_rss_bytes / 1024**3:.1f} GiB"
+            )
 
     quant_shards = writer.finalize()
 
@@ -336,13 +442,14 @@ def convert(
     # semantic "model size"), NOT source *.safetensors file sizes (which carry
     # per-shard headers and would over-count / drift across re-bundles).
     out_index = {
-        "metadata": {"total_size": total_weight_bytes},
+        "metadata": {"total_size": writer.total_output_bytes},
         "weight_map": dict(sorted(writer.weight_map.items())),
     }
     (output / "model.safetensors.index.json").write_text(
         json.dumps(out_index, indent=2)
     )
     aux = _copy_aux_metadata(source, output)
+    _write_quantized_config(source, output, quant_overrides)
     _write_sha256sums(output)
 
     files = sorted(p for p in output.rglob("*") if p.is_file())
@@ -354,10 +461,11 @@ def convert(
         "peak_rss_bytes": peak_rss_bytes(),
         "wall_s": round(time.monotonic() - started, 3),
         "shards": [p.name for p in files if p.name.startswith("model-")],
-        "group_size": group_size,
+        "default_group_size": 64,
         "n_quant": n_quant,
         "n_copy": n_copy,
         "total_weight_bytes": total_weight_bytes,
+        "total_output_weight_bytes": writer.total_output_bytes,
         "aux_copied": aux,
         "status": "ok",
     }
@@ -366,16 +474,24 @@ def convert(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", required=True, type=Path)
-    ap.add_argument("--output", required=True, type=Path)
+    ap.add_argument("--output", type=Path)
     ap.add_argument("--max-shard-bytes", type=int, default=DEFAULT_MAX_SHARD_BYTES)
-    ap.add_argument("--group-size", type=int, default=32)
+    ap.add_argument(
+        "--inspect-only",
+        action="store_true",
+        help="validate and classify all headers without creating output",
+    )
     args = ap.parse_args()
     try:
+        if args.inspect_only:
+            print(json.dumps(inspect_manifest(args.source), indent=2))
+            return 0
+        if args.output is None:
+            ap.error("--output is required unless --inspect-only is set")
         ledger = convert(
             args.source,
             args.output,
             max_shard_bytes=args.max_shard_bytes,
-            group_size=args.group_size,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"CONVERT FAILED (fail-closed): {exc}", file=sys.stderr)
