@@ -132,9 +132,12 @@ struct DictationView: View {
         if controller.phase == .preparingModel {
             return "Loading \(controller.modelAlias) into memory…"
         }
-        return controller.phase == .off
-            ? "Not listening — the hotkey isn't armed"
-            : "Listening — press \(controller.trigger.label) in any app"
+        if controller.phase == .off {
+            return controller.isHotkeyArmed
+                ? "Listening paused — reconnecting the speech model"
+                : "Not listening — the hotkey isn't armed"
+        }
+        return "Listening — press \(controller.trigger.label) in any app"
     }
 
     private var statusDetail: String {

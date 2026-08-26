@@ -182,6 +182,7 @@ struct AudioCatalogTests {
         #expect(!source.contains("Dictation.Arm"))
         #expect(source.contains("controller.isHotkeyArmed"))
         #expect(source.contains("Listening — press"))
+        #expect(source.contains("Listening paused — reconnecting the speech model"))
         #expect(source.contains("Rapid will reconnect the speech model automatically."))
     }
 
