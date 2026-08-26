@@ -1598,6 +1598,8 @@ class _StatusSpinner:
 def _try_mirror_prefetch(
     model_name: str,
     on_pull_start: Callable[[], None] | None = None,
+    *,
+    out: dict | None = None,
 ) -> bool:
     """Pre-fetch a HuggingFace repo via R2-first / HF-fallback (per file).
 
@@ -1640,7 +1642,10 @@ def _try_mirror_prefetch(
         # deliberately removed). Use the legacy HF path.
         return False
     return download_with_mirror_fallback(
-        model_name, on_pull_start=on_pull_start, allow_patterns=allow_patterns
+        model_name,
+        on_pull_start=on_pull_start,
+        allow_patterns=allow_patterns,
+        out=out,
     )
 
 
@@ -6522,25 +6527,133 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
-def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
-    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary."""
+def _narrow_to_subfolder(repo_id: str, snapshot_dir):
+    """Narrow a snapshot root to the catalog subfolder a filtered pull serves.
+
+    A repo that ships one folder per quantization holds far more on disk than
+    any single alias needs; sizing or fingerprinting the ROOT would include
+    sibling quant folders left by earlier pulls. Returns the subfolder path
+    when ``repo_id`` is a catalog alias with one, else the root unchanged.
+    Shared by the transfer account and the pull summary so both key on the
+    same directory.
+    """
     import os as _os
 
     from vllm_mlx.model_aliases import resolve_subfolder
 
-    # A filtered pull fetched one folder, but the snapshot root may also
-    # hold quant folders left by earlier pulls of a sibling alias. Sizing
-    # the root would report those as part of THIS download.
     _sub = resolve_subfolder(repo_id)
     if _sub:
         _candidate = _os.path.join(str(snapshot_dir), _sub)
         if _os.path.isdir(_candidate):
-            snapshot_dir = _candidate
+            return _candidate
+    return snapshot_dir
+
+
+def _hf_cache_root(repo_id: str):
+    """HF cache ``models--<id>`` dir for ``repo_id``, or None.
+
+    Pure path computation from the hub cache (no network). Handles BOTH
+    ``owner/repo`` and single-component repo ids (Codex #2392 #2): ``owner/repo``
+    maps to ``models--owner--repo``; a bare ``repo`` (no ``/``) maps to
+    ``models--repo`` — HF's real layout. Prefers HF's own ``repo_name_to_id``
+    when the installed version exposes it, else reconstructs locally.
+    """
+    from pathlib import Path
+
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:
+        return None
+    try:
+        from huggingface_hub.utils import repo_name_to_id  # type: ignore[attr-defined]
+
+        _cache_id = repo_name_to_id(repo_id)
+    except Exception:
+        _cache_id = repo_id.replace("/", "--")
+    return Path(HF_HUB_CACHE) / f"models--{_cache_id}"
+
+
+def _blob_identifier(repo_root) -> tuple[tuple[str, int, int], ...]:
+    """Sorted ``(name, size, mtime_ns)`` for every real blob under ``blobs/``.
+
+    The stable transfer signal for the pull account (Codex #2392): a NEW or
+    MODIFIED blob is the only thing that means bytes crossed the wire. A warm
+    pull that merely re-links snapshot symlinks to already-present blobs
+    leaves ``blobs/`` untouched (identical fingerprint => cached); a genuine
+    fetch creates a new blob (changed); a repair of a corrupt/truncated blob
+    changes its size/mtime (changed). This is robust to ``main`` moving to a
+    snapshot assembled entirely from blobs already present locally — which
+    transfers NOTHING and must be reported cached, whereas comparing the
+    snapshot TREE (changed paths) would falsely report a download (Codex #2392).
+
+    ``.incomplete*`` scratch files are excluded — HF prunes/creates them as
+    churn that has nothing to do with this pull's outcome. ``repo_root`` may
+    be None (no cache entry yet) -> empty fingerprint.
+    """
+    import os as _os
+
+    if not repo_root:
+        return ()
+    blob_dir = repo_root / "blobs"
+    if not blob_dir.is_dir():
+        return ()
+    rows: list[tuple[str, int, int]] = []
+    try:
+        names = _os.listdir(blob_dir)
+    except OSError:
+        return ()
+    for name in names:
+        if name.startswith(".incomplete"):
+            continue
+        p = blob_dir / name
+        try:
+            if p.is_file():
+                st = p.stat()
+                rows.append((name, st.st_size, st.st_mtime_ns))
+        except OSError:
+            continue
+    return tuple(sorted(rows))
+
+
+def _print_pull_summary(
+    repo_id: str,
+    snapshot_dir,
+    elapsed: float,
+    *,
+    was_cached: bool | None = None,
+) -> None:
+    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
+
+    ``was_cached`` is the downloader's authoritative "nothing was transferred
+    this pull" verdict (issue #2349):
+    * ``True``  — the mirror/HF transfer account proves zero bytes were
+      fetched -> "Already cached ... verified (nothing to download)".
+    * ``False`` — the downloader reports it fetched bytes -> "Downloaded".
+    * ``None``  — unknown (e.g. the HF-fallback's downloader could not prove
+      either way) -> "Downloaded", never a false cache claim.
+    For the HF-fallback path the account is the on-disk snapshot file
+    inventory before vs after the pull (a stable seam, Codex #2392) — never
+    huggingface_hub's tqdm progress internals. A moved ``main`` that fetches
+    new blobs changes the inventory and reports a real download.
+    """
+    # A filtered pull fetched one folder, but the snapshot root may also
+    # hold quant folders left by earlier pulls of a sibling alias. Sizing
+    # the root would report those as part of THIS download.
+    snapshot_dir = _narrow_to_subfolder(repo_id, snapshot_dir)
     size = _snapshot_size_bytes(snapshot_dir)
-    print(
-        f"  Downloaded {repo_id} — {_format_bytes(size)} in "
-        f"{_format_pull_duration(elapsed)}"
-    )
+    # "Already cached" only on a proven no-transfer (``was_cached is True``);
+    # ``None`` (unknown) falls through to "Downloaded" rather than a false
+    # cache claim.
+    if was_cached is True:
+        print(
+            f"  Already cached {repo_id} — {_format_bytes(size)} verified "
+            f"(nothing to download)"
+        )
+    else:
+        print(
+            f"  Downloaded {repo_id} — {_format_bytes(size)} in "
+            f"{_format_pull_duration(elapsed)}"
+        )
 
     # Activation funnel (docs/telemetry-activation.md): a successful pull is
     # the ``model_pull`` milestone (an activation, NOT inference-engaged).
@@ -6671,6 +6784,12 @@ def pull_command(args):
         )
         sys.exit(1)
 
+    # The pull summary says "already cached / nothing to download" only from
+    # the DOWNLOADER's own transfer account (mirror/HF bytes fetched), never
+    # from a filesystem guess. ``_was_cached`` is threaded to the summary.
+    _was_cached: bool | None = None
+    _mirror_out: dict = {}
+
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
     # before adding more. huggingface_hub gives each attempt a uniquely-named
     # ``.incomplete`` blob and removes it while unwinding, which a killed
@@ -6703,7 +6822,7 @@ def pull_command(args):
             "  R2 mirror skipped: a --bits/--format variant was requested "
             "(the mirror cannot narrow to one variant yet)."
         )
-    if variant_allow is None and _try_mirror_prefetch(repo_id):
+    if variant_allow is None and _try_mirror_prefetch(repo_id, out=_mirror_out):
         from pathlib import Path
 
         try:
@@ -6721,7 +6840,15 @@ def pull_command(args):
         except OSError:
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
-        _print_pull_summary(repo_id, snapshot_dir, time.monotonic() - t0)
+        # ``network_fetch`` is the mirror's authoritative "any bytes fetched
+        # this pull" verdict (covers a fetched zero-byte file, codex #4).
+        _was_cached = not _mirror_out.get("network_fetch", True)
+        _print_pull_summary(
+            repo_id,
+            snapshot_dir,
+            time.monotonic() - t0,
+            was_cached=_was_cached,
+        )
         return
     # Mirror returned False — fall through to plain snapshot_download.
     # Either the catalog was unreachable, the alias isn't catalog-listed,
@@ -6785,11 +6912,34 @@ def pull_command(args):
                     f"fetching only {_subfolder}/ (the folder rapid-mlx serves)."
                 )
             _allow = [f"{_subfolder}/*"] if _subfolder else None
+        # HF-fallback runs only after a mirror miss — but a cached HF no-op is
+        # still possible and must be labelled "Already cached", so account the
+        # TRANSFER from the BLOB store (Codex #2392), never huggingface_hub's
+        # tqdm progress internals and never the snapshot tree: a NEW/MODIFIED
+        # blob is the only thing meaning bytes crossed the wire. Capture the
+        # repo's ``blobs/`` inventory BEFORE the pull then AFTER. Identical =>
+        # zero bytes crossed this pull (cache hit) — even if ``main`` moved to
+        # a snapshot assembled from blobs already present locally, or a warm
+        # re-link recreated snapshot symlinks; any changed blob (new file, or
+        # a repaired corrupt/truncated blob whose size/mtime changed) => a real
+        # download. ``_hf_cache_root`` resolves the cache entry (no network).
+        # The mirror may have ALREADY fetched some blobs before it returned
+        # False (a partial/failed attempt). Those bytes must still count: honor
+        # whatever the mirror reported on ANY exit path (Codex #2353). The R5
+        # per-file aggregation sets ``_mirror_out["network_fetch"]`` on the
+        # mirror's success AND partial-miss returns, so a partial mirror
+        # transfer forces "Downloaded" even when the snapshot_download that
+        # follows is a no-op.
+        _mirror_fetched = _mirror_out.get("network_fetch", False)
+        _cache_root = _hf_cache_root(repo_id)
+        _before = _blob_identifier(_cache_root)
         path = (
             snapshot_download(repo_id, allow_patterns=_allow)
             if _allow
             else snapshot_download(repo_id)
         )
+        _after = _blob_identifier(_cache_root)
+        _was_cached = (_before == _after and _before != ()) and not _mirror_fetched
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
@@ -6816,7 +6966,12 @@ def pull_command(args):
             sys.exit(1)
         raise
     print(f"  Cached at: {path}")
-    _print_pull_summary(repo_id, path, time.monotonic() - t0)
+    _print_pull_summary(
+        repo_id,
+        path,
+        time.monotonic() - t0,
+        was_cached=_was_cached,
+    )
 
 
 def rm_command(args):
