@@ -1675,7 +1675,8 @@ def _offline_uncached_error(model_name: str) -> str:
     return (
         f"\n  Error: {model_name} is not cached and the network is "
         "unavailable (offline mode is enabled).\n"
-        f"  After connectivity is restored, download it with "
+        f"  After connectivity is restored, disable offline mode "
+        f"(unset HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE) and run "
         f"`rapid-mlx pull {model_name}`, then serve again.\n"
         f"  Expected cache location: {HF_HUB_CACHE}\n"
     )
@@ -11771,6 +11772,16 @@ def main():
     _chat_spawn_child = os.environ.pop("RAPID_MLX_CHAT_SPAWN", "") == "1"
 
     _GATED_COMMANDS = {"chat", "run", "serve", "pull", "bench"}
+    # Attached client (chat/bench pointed at an existing server via
+    # --base-url/--port): the named model lives remotely and is NOT meant to
+    # be downloaded into the local HF cache, so neither the confirm gate nor
+    # the offline+uncached refusal applies (codex #2357-P1). --port on a
+    # top-level serve means "bind here", not "attach", so only the
+    # client-capable commands are exempted.
+    _attached_remote = (
+        getattr(args, "command", None) in {"chat", "run", "bench"}
+        and (getattr(args, "base_url", None) or getattr(args, "port", None) is not None)
+    )
     if (
         getattr(args, "command", None) in _GATED_COMMANDS
         and hasattr(args, "model")
@@ -11778,6 +11789,7 @@ def main():
         and "/" in args.model  # only HF-style repo ids; local paths skip
         and not os.path.exists(args.model)
         and not _chat_spawn_child
+        and not _attached_remote
     ):
         # Cheap checks first: env override and non-TTY both short-circuit
         # without touching the HF API. ``confirm_or_abort`` re-checks

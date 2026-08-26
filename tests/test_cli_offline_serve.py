@@ -329,3 +329,39 @@ def test_gate_wan_dir_set_does_not_exempt_text_model(monkeypatch, capsys, tmp_pa
     out = capsys.readouterr()
     assert "mlx-community/Qwen3.5-4B-4bit is not cached" in out.err
     assert "network is unavailable (offline mode is enabled)" in out.err
+
+
+def test_gate_skips_offline_refusal_for_attached_client(monkeypatch, capsys):
+    """A chat/bench attached client (--base-url/--port pointing at an existing
+    server) must NOT be refused for a model absent from the local cache — the
+    named model lives remotely and is never meant to be downloaded locally
+    (codex #2357-P1)."""
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
+    monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("RAPID_MLX_AUTO_PULL", "")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    dispatched = []
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "rapid-mlx",
+                "chat",
+                "mlx-community/Qwen3.5-4B-4bit",
+                "--base-url",
+                "http://127.0.0.1:9999",
+            ],
+        ),
+        patch.object(cli, "chat_command", side_effect=dispatched.append),
+    ):
+        cli.main()
+
+    out = capsys.readouterr()
+    assert "is not cached and the network is unavailable" not in out.err
+    assert dispatched != []  # attached client proceeded to chat_command
