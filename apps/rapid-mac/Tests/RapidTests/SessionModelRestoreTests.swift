@@ -169,7 +169,10 @@ struct SessionModelRestoreTests {
         #expect(!SessionModelRestore.shouldPersistChatAlias(catalogEntry: nil))
     }
 
-    @Test("ensureVoiceLane audio ready never overwrites the chat-lane key")
+    @Test(
+        "ensureVoiceLane audio ready never overwrites the chat-lane key",
+        .timeLimit(.minutes(1))
+    )
     @MainActor
     func audioOnlyReadyPreservesPersistedChat() async throws {
         let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
@@ -187,7 +190,7 @@ struct SessionModelRestoreTests {
             binaryPath: fakeServer,
             sessionDefaults: defaults
         )
-        defer { server.shutdownSync() }
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
 
         // Drive the exact production regression vector through the fake
         // sidecar: ensureVoiceLane → ensureServing(residencyEligible: false)
@@ -200,9 +203,13 @@ struct SessionModelRestoreTests {
         #expect(ready)
         #expect(server.servingAlias == stt.alias)
         #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        await server.stop()
     }
 
-    @Test("ensureServing carries chat provenance when its ready-time catalog probe fails")
+    @Test(
+        "ensureServing carries chat provenance when its ready-time catalog probe fails",
+        .timeLimit(.minutes(1))
+    )
     @MainActor
     func ensureServingPersistsHintedChatAfterProbeFailure() async throws {
         let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
@@ -220,7 +227,7 @@ struct SessionModelRestoreTests {
             binaryPath: fakeServer,
             sessionDefaults: defaults
         )
-        defer { server.shutdownSync() }
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
 
         let ready = await server.ensureServing(
             alias: chat.alias,
@@ -233,6 +240,14 @@ struct SessionModelRestoreTests {
         #expect(ready)
         #expect(server.servingAlias == chat.alias)
         #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        await server.stop()
+    }
+
+    private static var safeMemorySnapshot: MemoryProbe.Snapshot {
+        MemoryProbe.Snapshot(
+            totalBytes: 64 * 1_024 * 1_024 * 1_024,
+            usedBytes: 0
+        )
     }
 
     @Test("A catalog-proven chat ready transition owns the chat-lane key")

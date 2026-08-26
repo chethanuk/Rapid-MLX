@@ -114,7 +114,36 @@ final class DictationController {
     private let server: ServerManager
     private let client: AudioClient
     private let hotkey = DictationHotkey()
-    private let recorder = DictationRecorder()
+    /// Constructing `DictationRecorder` initializes AVAudioEngine/CoreAudio.
+    /// Keep that work behind the first real capture so state-only controllers
+    /// (including launch restore and tests) never claim audio resources.
+    private final class CaptureLifecycle: @unchecked Sendable {
+        var recorder: DictationRecorder?
+        var ticker: Timer?
+
+        deinit {
+            ticker?.invalidate()
+            recorder?.shutdown()
+        }
+    }
+
+    private let captureLifecycle = CaptureLifecycle()
+    private var recorderStorage: DictationRecorder? {
+        get { captureLifecycle.recorder }
+        set { captureLifecycle.recorder = newValue }
+    }
+    private var recorder: DictationRecorder {
+        if let recorderStorage { return recorderStorage }
+        let recorder = DictationRecorder()
+        recorder.onLevel = { [weak self] value in
+            Task { @MainActor in self?.level = value }
+        }
+        recorder.onFirstSample = { [weak self] in
+            Task { @MainActor in self?.markRecordingStarted() }
+        }
+        recorderStorage = recorder
+        return recorder
+    }
     private let hud = DictationHUD()
     /// `nil` means the catalog probe itself failed; an array is authoritative.
     /// Keeping those states distinct prevents a transient CLI failure from
@@ -128,7 +157,10 @@ final class DictationController {
     private let testingRecorderCancel: (@MainActor () -> Void)?
     private let testingTranscribeCancel: (@MainActor () -> Void)?
 
-    private var tickTimer: Timer?
+    private var tickTimer: Timer? {
+        get { captureLifecycle.ticker }
+        set { captureLifecycle.ticker = newValue }
+    }
     private var recordingStart: Date?
     private var capturingApp: String?
     private var level: Float = 0
@@ -218,12 +250,6 @@ final class DictationController {
         hotkey.trigger = trigger
         hotkey.onTap = { [weak self] in self?.handleHotkey() }
 
-        recorder.onLevel = { [weak self] value in
-            Task { @MainActor in self?.level = value }
-        }
-        recorder.onFirstSample = { [weak self] in
-            Task { @MainActor in self?.markRecordingStarted() }
-        }
     }
 
     // MARK: - Readiness
@@ -405,7 +431,7 @@ final class DictationController {
         enableRequestID = nil
         modelPreparationDeferred = false
         stopTicking()
-        recorder.shutdown()
+        recorderStorage?.shutdown()
         hud.hide()
         phase = .off
     }
@@ -422,7 +448,7 @@ final class DictationController {
             if let testingRecorderCancel {
                 testingRecorderCancel()
             } else {
-                recorder.cancelCapture()
+                recorderStorage?.cancelCapture()
             }
         } else if phase == .transcribing {
             testingTranscribeCancel?()
@@ -779,7 +805,7 @@ final class DictationController {
 
     private func finishRecording() {
         stopTicking()
-        let audio = recorder.stopCapture()
+        let audio = recorderStorage?.stopCapture()
         let duration = recordingStart.map { Date().timeIntervalSince($0) } ?? 0
         recordingStart = nil
 
@@ -957,6 +983,12 @@ final class DictationController {
         tickTimer?.invalidate()
         tickTimer = nil
     }
+
+    /// Lifecycle assertions for state-only tests. These intentionally expose
+    /// no way to drive capture; they only prove tests leave no run-loop or
+    /// CoreAudio work behind for the next MainActor test.
+    internal var testingHasActiveTicker: Bool { tickTimer?.isValid == true }
+    internal var testingHasRecorder: Bool { recorderStorage != nil }
 
     // MARK: - Text
 
