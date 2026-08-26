@@ -17,6 +17,48 @@ struct SessionModelRestoreTests {
         }
     }
 
+    private actor ReentrantCatalogLoader {
+        private var callCount = 0
+        private var firstStarted = false
+        private var firstStartWaiters: [CheckedContinuation<Void, Never>] = []
+        private var firstResult: CheckedContinuation<[ModelEntry], Never>?
+        private let newerResult: [ModelEntry]
+
+        init(newerResult: [ModelEntry]) {
+            self.newerResult = newerResult
+        }
+
+        func load() async -> [ModelEntry] {
+            callCount += 1
+            switch callCount {
+            case 1:
+                firstStarted = true
+                let waiters = firstStartWaiters
+                firstStartWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                return await withCheckedContinuation { continuation in
+                    firstResult = continuation
+                }
+            case 2:
+                return newerResult
+            default:
+                return []
+            }
+        }
+
+        func waitUntilFirstStarted() async {
+            if firstStarted { return }
+            await withCheckedContinuation { continuation in
+                firstStartWaiters.append(continuation)
+            }
+        }
+
+        func releaseFirst(with entries: [ModelEntry]) {
+            firstResult?.resume(returning: entries)
+            firstResult = nil
+        }
+    }
+
     private let chat = ModelEntry(
         alias: "qwen3.5-4b-4bit",
         hfRepo: "mlx-community/Qwen3.5-4B-MLX-4bit",
@@ -305,6 +347,125 @@ struct SessionModelRestoreTests {
                 "retained chat-lane proof must not retain stale launch capabilities")
         #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
             == authoritativeChat.alias)
+        await server.stop()
+    }
+
+    @Test(
+        "A nonempty authoritative catalog invalidates missing-alias chat proof",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func authoritativeCatalogMissingAliasInvalidatesChatProof() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let removedChat = ModelEntry(
+            alias: "removed-chat",
+            hfRepo: "example/removed-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let remainingChat = ModelEntry(
+            alias: "remaining-chat",
+            hfRepo: "example/remaining-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let catalog = SequencedCatalogLoader([[removedChat], [remainingChat]])
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in await catalog.load() }
+
+        let firstReady = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo
+        )
+        #expect(firstReady)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == removedChat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo
+        )
+        #expect(restarted)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
+        await server.stop()
+    }
+
+    @Test(
+        "A superseded catalog probe cannot restore stale chat provenance",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func supersededProbeCannotRewriteChatProvenance() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let sharedAlias = "lane-reclassified-model"
+        let formerlyChat = ModelEntry(
+            alias: sharedAlias,
+            hfRepo: "example/former-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let nowAudio = ModelEntry(
+            alias: sharedAlias,
+            hfRepo: "example/now-audio",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .audio,
+            audioCapability: .transcription
+        )
+        let catalog = ReentrantCatalogLoader(newerResult: [nowAudio])
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in await catalog.load() }
+
+        let older = Task { await server.start(alias: sharedAlias) }
+        await catalog.waitUntilFirstStarted()
+        let newer = Task { await server.start(alias: sharedAlias) }
+        await newer.value
+        await catalog.releaseFirst(with: [formerlyChat])
+        await older.value
+
+        #expect(server.servingAlias == sharedAlias)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
+
+        await server.stop()
+        let restarted = await server.ensureServing(alias: sharedAlias, hfPath: nil)
+        #expect(restarted)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
         await server.stop()
     }
 

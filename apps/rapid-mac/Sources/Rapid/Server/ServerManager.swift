@@ -1984,19 +1984,12 @@ final class ServerManager {
         // launch a visual checkpoint in its text lane. Keeping this await
         // before `isOperating = true` preserves the cancellable startup
         // contract; re-check every entry guard after actor reentrancy.
-        let probedCatalogEntry = await catalogEntries(
+        let probedCatalogEntries = await catalogEntries(
             binary: binary,
             generation: downloads?.cacheGeneration ?? 0
-        ).first {
+        )
+        let probedCatalogEntry = probedCatalogEntries.first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
-        }
-        let provenanceKey = trimmedAlias.lowercased()
-        if let probedCatalogEntry {
-            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
-                catalogProvenChatAliases.insert(provenanceKey)
-            } else {
-                catalogProvenChatAliases.remove(provenanceKey)
-            }
         }
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
@@ -2006,6 +1999,17 @@ final class ServerManager {
         )
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }
+        let provenanceKey = trimmedAlias.lowercased()
+        if let probedCatalogEntry {
+            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
+                catalogProvenChatAliases.insert(provenanceKey)
+            } else {
+                catalogProvenChatAliases.remove(provenanceKey)
+            }
+        }
+        let retainedChatProof = catalogEntry == nil
+            && probedCatalogEntries.isEmpty
+            && catalogProvenChatAliases.contains(provenanceKey)
         let catalogSupportsImageInput = ModelBrandStyle.supportsImageInput(
             forAlias: trimmedAlias,
             isBuiltinProfile: catalogEntry?.isBuiltinProfile,
@@ -2463,8 +2467,7 @@ final class ServerManager {
                 recordReadySelection(
                     alias: trimmedAlias,
                     catalogEntry: catalogEntry,
-                    retainedChatProof: catalogEntry == nil
-                        && catalogProvenChatAliases.contains(provenanceKey)
+                    retainedChatProof: retainedChatProof
                 )
                 await refreshResidency()
                 // v0.6 audit P1 (silent-crash detection): now that
