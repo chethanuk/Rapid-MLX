@@ -3,6 +3,7 @@
 
 import sys
 import time
+import uuid
 from collections.abc import Callable
 
 
@@ -15,7 +16,11 @@ class FirstRequestTTFT:
         self._started_at: float | None = None
         self._emitted = False
 
-    def admitted(self, request_id: str) -> None:
+    @property
+    def started(self) -> bool:
+        return self._request_id is not None
+
+    def begin(self, request_id: str) -> None:
         if self._request_id is None:
             self._request_id = request_id
             self._started_at = self._clock()
@@ -32,34 +37,59 @@ class FirstRequestTTFT:
         return self._clock() - self._started_at
 
 
-def main() -> None:
-    from vllm_mlx.engine_core import AsyncEngineCore
+def install_observer(
+    engine_class,
+    collector_class,
+    *,
+    clock: Callable[[], float] = time.perf_counter,
+    emit: Callable[[str, float], None],
+) -> FirstRequestTTFT:
+    """Observe producer-side first output without changing bench scheduling."""
 
-    add_request = AsyncEngineCore.add_request
-    stream_outputs = AsyncEngineCore.stream_outputs
-    observer = FirstRequestTTFT()
+    add_request = engine_class.add_request
+    put_output = collector_class.put
+    observer = FirstRequestTTFT(clock=clock)
 
     async def observed_add_request(self, *args, **kwargs):
-        request_id = await add_request(self, *args, **kwargs)
-        observer.admitted(request_id)
-        return request_id
+        if not observer.started:
+            # The CLI does not supply request IDs. Pin one before entering
+            # add_request so the boundary includes admission and producer-side
+            # output can be attributed even if it is buffered before return.
+            request_id = kwargs.get("request_id") or str(uuid.uuid4())
+            kwargs["request_id"] = request_id
+            observer.begin(request_id)
+        return await add_request(self, *args, **kwargs)
 
-    async def observed_stream_outputs(self, request_id, *args, **kwargs):
-        async for output in stream_outputs(self, request_id, *args, **kwargs):
-            elapsed = observer.observe(
-                request_id,
-                has_token=bool(output.new_token_ids or output.new_text),
-            )
-            if elapsed is not None:
-                print(
-                    f"PERF_TTFT request_id={request_id} seconds={elapsed:.9f}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            yield output
+    def observed_put_output(self, output):
+        elapsed = observer.observe(
+            output.request_id,
+            has_token=bool(output.new_token_ids or output.new_text),
+        )
+        if elapsed is not None:
+            emit(output.request_id, elapsed)
+        return put_output(self, output)
 
-    AsyncEngineCore.add_request = observed_add_request
-    AsyncEngineCore.stream_outputs = observed_stream_outputs
+    engine_class.add_request = observed_add_request
+    collector_class.put = observed_put_output
+    return observer
+
+
+def main() -> None:
+    from vllm_mlx.engine_core import AsyncEngineCore
+    from vllm_mlx.output_collector import RequestOutputCollector
+
+    def emit(request_id: str, elapsed: float) -> None:
+        print(
+            f"PERF_TTFT request_id={request_id} seconds={elapsed:.9f}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    install_observer(
+        AsyncEngineCore,
+        RequestOutputCollector,
+        emit=emit,
+    )
 
     from vllm_mlx.cli import cli_entrypoint
 
