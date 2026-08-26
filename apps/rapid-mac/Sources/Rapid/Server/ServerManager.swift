@@ -4014,6 +4014,10 @@ final class ProcessGroupChild: @unchecked Sendable {
     let isStub: Bool
 
     private let lock = NSLock()
+    /// Serializes the event-source reaper with the non-blocking liveness
+    /// fallback. The fallback can race the exit event on hosted runners; one
+    /// waiter must reap and publish the lifecycle transition exactly once.
+    private let reapLock = NSLock()
     private var running: Bool = true
     private var monitorStarted: Bool = false
     private var rawTerminationStatus: Int32 = 0
@@ -4041,6 +4045,12 @@ final class ProcessGroupChild: @unchecked Sendable {
 
     var isProcessGroupAlive: Bool {
         if isStub { return false }
+        // DispatchSourceProcess delivery has occasionally been deferred on a
+        // saturated hosted runner. Reap an already-exited leader without
+        // blocking before asking whether anything remains in its process
+        // group; otherwise the zombie leader makes kill(-pgid, 0) report a
+        // false live group through the entire shutdown grace period.
+        _ = reapExitedProcess(waitOptions: WNOHANG)
         if kill(-processGroupID, 0) == 0 { return true }
         return errno == EPERM
     }
@@ -4225,7 +4235,7 @@ final class ProcessGroupChild: @unchecked Sendable {
             queue: Self.exitMonitorQueue
         )
         source.setEventHandler { [weak self] in
-            self?.reapExitedProcess()
+            self?.reapExitedProcess(waitOptions: 0)
         }
         lock.lock()
         exitSource = source
@@ -4236,13 +4246,26 @@ final class ProcessGroupChild: @unchecked Sendable {
     /// Reap only after the process-exit source fires, so `waitpid` is no
     /// longer a blocking worker-pool reservation. Retry EINTR, then publish
     /// the same once-only lifecycle callback as the prior monitor.
-    private func reapExitedProcess() {
+    @discardableResult
+    private func reapExitedProcess(waitOptions: Int32) -> Bool {
+        reapLock.lock()
+        lock.lock()
+        guard running else {
+            lock.unlock()
+            reapLock.unlock()
+            return true
+        }
+        lock.unlock()
+
         var waitStatus: Int32 = 0
         var waited: pid_t
         repeat {
-            waited = waitpid(processIdentifier, &waitStatus, 0)
+            waited = waitpid(processIdentifier, &waitStatus, waitOptions)
         } while waited == -1 && errno == EINTR
-        guard waited == processIdentifier else { return }
+        guard waited == processIdentifier else {
+            reapLock.unlock()
+            return false
+        }
 
         let decoded = Self.decode(waitStatus: waitStatus)
         lock.lock()
@@ -4253,8 +4276,10 @@ final class ProcessGroupChild: @unchecked Sendable {
         let source = exitSource
         exitSource = nil
         lock.unlock()
+        reapLock.unlock()
         source?.cancel()
         handler?(self)
+        return true
     }
 
     private static func dup(

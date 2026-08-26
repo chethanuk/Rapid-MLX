@@ -32,6 +32,19 @@ struct ServerManagerStateTests {
         }
     }
 
+    private final class ExitObservationBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Int32] = []
+
+        func record(_ status: Int32) {
+            lock.withLock { values.append(status) }
+        }
+
+        var snapshot: [Int32] {
+            lock.withLock { values }
+        }
+    }
+
     private func waitUntil(
         deadline: Date,
         predicate: () -> Bool
@@ -110,6 +123,36 @@ struct ServerManagerStateTests {
 
         #expect(body.contains("DispatchSource.makeProcessSource"))
         #expect(!body.contains("DispatchQueue.global"))
+    }
+
+    @Test("Process liveness reaps an exited leader when the event source is delayed")
+    func processLivenessHasNonblockingReapFallback() async throws {
+        let observations = ExitObservationBox()
+        let child = try ProcessGroupChild.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "exit 31"],
+            standardInput: .nullDevice,
+            standardOutput: Pipe(),
+            standardError: Pipe(),
+            startMonitorImmediately: false
+        ) { child in
+            observations.record(child.terminationStatus)
+        }
+        defer {
+            if child.isProcessGroupAlive {
+                child.signalProcessGroup(SIGKILL)
+            }
+        }
+
+        let reaped = await waitUntil(deadline: Date().addingTimeInterval(3)) {
+            !child.isProcessGroupAlive
+        }
+
+        #expect(reaped)
+        #expect(!child.isRunning)
+        #expect(observations.snapshot == [31])
+        #expect(!child.isProcessGroupAlive)
+        #expect(observations.snapshot == [31], "exit publication must remain once-only")
     }
 
     @Test("dismissTerminalState: .crashed with a binary path → .idle")
