@@ -5666,11 +5666,13 @@ def _cache_entry_is_runnable(repo: str) -> bool:
         from vllm_mlx.audio.registry import resolve_audio_alias
 
         audio_entry = resolve_audio_alias(repo)
-        if audio_entry is not None:
+        if audio_entry is not None and audio_entry.family in ("whisper", "kokoro"):
             # Audio repos don't share the text ``model*.safetensors`` layout;
-            # judge them by their family-appropriate weight file (Whisper
-            # ``weights.npz``/``weights.safetensors``, Kokoro
-            # ``kokoro-v1_0.safetensors``, etc.) just like a text cache.
+            # judge whisper/kokoro by their family-appropriate VERIFIED weight
+            # file (Whisper ``weights.npz``/``weights.safetensors``, Kokoro
+            # ``kokoro-v1_0.safetensors``) just like a text cache. Other audio
+            # families fall through to the generic cache probes below — their
+            # layout is not pinned here, so never claim them non-runnable.
             return _snapshot_is_complete_audio_model(repo, audio_entry.family)
         return (
             is_repo_cached(repo)

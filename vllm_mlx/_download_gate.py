@@ -781,8 +781,8 @@ def _snapshot_is_complete_audio_model(repo_id: str, family: str) -> bool:
       * Whisper (STT) historically ships ``weights.npz`` + ``config.json``
         with no safetensors; the ``whisper-large-v3-turbo`` upload ships
         ``weights.safetensors`` instead. Both count as runnable.
-      * Kokoro (TTS) ships ``kokoro-v1_0.safetensors`` (index-sharded or a
-        single shard).
+      * Kokoro (TTS) ships a single ``kokoro-v1_0.safetensors`` (the canonical
+        base weights; sharded Kokoro layouts are out of #2406 scope).
 
     Mirror ``_snapshot_is_complete_whisper_model``: resolve the pinned sha,
     require ``config.json`` present + on-this-repo (no crafted symlink
