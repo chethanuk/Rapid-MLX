@@ -977,10 +977,12 @@ fi
 # release operator supplies the immutable local snapshot explicitly.
 if [[ -n "${SIDECAR_VISION_SMOKE_MODEL:-}" ]]; then
     SIDECAR_VISION_SMOKE_IMAGE="${SIDECAR_VISION_SMOKE_IMAGE:-$REPO_ROOT/Sources/Rapid/Resources/cheetah.png}"
+    SIDECAR_VISION_SMOKE_NEGATIVE_IMAGE="${SIDECAR_VISION_SMOKE_NEGATIVE_IMAGE:-$REPO_ROOT/Sources/Rapid/Resources/Assets.xcassets/RapidLogo.imageset/RapidLogo.png}"
     SIDECAR_VISION_SMOKE_ARGS=(
         --sidecar-root "$STAGE"
         --model "$SIDECAR_VISION_SMOKE_MODEL"
         --image "$SIDECAR_VISION_SMOKE_IMAGE"
+        --negative-image "$SIDECAR_VISION_SMOKE_NEGATIVE_IMAGE"
     )
     if [[ -n "${SIDECAR_VISION_SMOKE_REVISION:-}" ]]; then
         SIDECAR_VISION_SMOKE_ARGS+=(--revision "$SIDECAR_VISION_SMOKE_REVISION")

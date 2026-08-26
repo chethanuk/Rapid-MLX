@@ -13,27 +13,25 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 
-def test_sensible_completion_accepts_known_fixture_descriptions() -> None:
-    assert _MODULE._completion_is_sensible("SPOTTED_CAT")
-    assert _MODULE._completion_is_sensible(" spotted_cat. ")
+def test_completion_matches_exact_expected_fixture_class() -> None:
+    assert _MODULE._completion_matches("SPOTTED_CAT", "SPOTTED_CAT")
+    assert _MODULE._completion_matches(" other. ", "OTHER")
 
 
-def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
-    assert not _MODULE._completion_is_sensible(None)
-    assert not _MODULE._completion_is_sensible("")
-    assert not _MODULE._completion_is_sensible("Internal server error")
-    assert not _MODULE._completion_is_sensible("A blue square is visible.")
-    assert not _MODULE._completion_is_sensible("OTHER")
-    assert not _MODULE._completion_is_sensible("This is not a cheetah.")
-    assert not _MODULE._completion_is_sensible("A dog is chasing a cat.")
-    assert not _MODULE._completion_is_sensible("A cheetah is sitting, not running.")
+def test_completion_rejects_empty_error_wrong_or_unrelated_output() -> None:
+    assert not _MODULE._completion_matches(None, "SPOTTED_CAT")
+    assert not _MODULE._completion_matches("", "SPOTTED_CAT")
+    assert not _MODULE._completion_matches("Internal server error", "SPOTTED_CAT")
+    assert not _MODULE._completion_matches("A blue square is visible.", "OTHER")
+    assert not _MODULE._completion_matches("OTHER", "SPOTTED_CAT")
+    assert not _MODULE._completion_matches("SPOTTED_CAT", "OTHER")
 
 
 def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github/workflows/auto-release.yml"
     ).read_text()
-    assert "timeout-minutes: 155" in workflow
+    assert "timeout-minutes: 165" in workflow
     assert "SIDECAR_VISION_SMOKE_MODEL: mlx-community/Qwen3.5-9B-4bit" in workflow
     assert (
         "SIDECAR_VISION_SMOKE_REVISION: 8b2b98c00a6b4d291155e4890773ca8f769aee53"
@@ -47,6 +45,10 @@ def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
     assert "HF_HUB_OFFLINE=1 bash apps/rapid-mac/scripts/build-sidecar.sh" in workflow
     assert '"$SIDE/python/bin/python3.12"' in workflow
     assert '--model "$SIDECAR_GEMMA_SMOKE_MODEL"' in workflow
+    assert (
+        "--negative-image apps/rapid-mac/Sources/Rapid/Resources/Assets.xcassets/RapidLogo.imageset/RapidLogo.png"
+        in workflow
+    )
     assert "apps/rapid-mac/scripts/build-sidecar.sh" in workflow
 
 
@@ -69,6 +71,7 @@ def test_bound_listener_holds_port_until_socket_activation_handoff() -> None:
 
 _FAKE_SIDECAR = """#!/usr/bin/env python3
 import http.server
+import base64
 import json
 import socket
 import sys
@@ -95,9 +98,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         content = payload["messages"][0]["content"]
         assert content[0]["type"] == "text"
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-        body = json.dumps({
-            "choices": [{"message": {"content": "SPOTTED_CAT"}}]
-        }).encode()
+        encoded = content[1]["image_url"]["url"].split(",", 1)[1]
+        image = base64.b64decode(encoded)
+        verdict = "SPOTTED_CAT" if image == b"positive-image" else "OTHER"
+        body = json.dumps({"choices": [{"message": {"content": verdict}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -123,7 +127,9 @@ def test_main_executes_socket_activated_http_image_journey(
     model = tmp_path / "model"
     model.mkdir()
     image = tmp_path / "fixture.png"
-    image.write_bytes(b"fixture-image-bytes")
+    image.write_bytes(b"positive-image")
+    negative_image = tmp_path / "negative.png"
+    negative_image.write_bytes(b"negative-image")
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -134,6 +140,8 @@ def test_main_executes_socket_activated_http_image_journey(
             str(model),
             "--image",
             str(image),
+            "--negative-image",
+            str(negative_image),
             "--startup-timeout",
             "5",
             "--request-timeout",
@@ -155,6 +163,8 @@ def test_main_cleans_log_when_process_creation_fails(
     model.mkdir()
     image = tmp_path / "fixture.png"
     image.write_bytes(b"fixture")
+    negative_image = tmp_path / "negative.png"
+    negative_image.write_bytes(b"negative")
     original_named_temporary_file = _MODULE.tempfile.NamedTemporaryFile
 
     def local_temporary_file(**kwargs):
@@ -175,6 +185,8 @@ def test_main_cleans_log_when_process_creation_fails(
             str(model),
             "--image",
             str(image),
+            "--negative-image",
+            str(negative_image),
         ],
     )
     with pytest.raises(OSError, match="exec failed"):

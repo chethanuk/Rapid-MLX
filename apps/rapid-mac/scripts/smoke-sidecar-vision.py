@@ -23,11 +23,11 @@ def _bound_local_listener() -> socket.socket:
     return listener
 
 
-def _completion_is_sensible(text: object) -> bool:
-    """Accept only the deterministic answer requested for the known fixture."""
+def _completion_matches(text: object, expected: str) -> bool:
+    """Accept only the deterministic class requested for a fixture."""
     if not isinstance(text, str):
         return False
-    return text.strip().rstrip(".!?").casefold() == "spotted_cat"
+    return text.strip().rstrip(".!?").casefold() == expected.casefold()
 
 
 def _request_json(url: str, payload: dict | None, timeout: float) -> dict:
@@ -101,6 +101,7 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
     parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--negative-image", type=Path, required=True)
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--request-timeout", type=float, default=240)
     args = parser.parse_args()
@@ -109,6 +110,7 @@ def main() -> int:
     for path, label in (
         (executable, "sidecar executable"),
         (args.image, "image"),
+        (args.negative_image, "negative image"),
     ):
         if not path.exists():
             raise SystemExit(f"vision smoke: {label} not found: {path}")
@@ -146,41 +148,47 @@ def main() -> int:
                 listener.close()
 
         _wait_until_ready(base_url, process, args.startup_timeout)
-        image = base64.b64encode(args.image.read_bytes()).decode("ascii")
-        payload = {
-            "model": str(model),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Reply with exactly SPOTTED_CAT if the main animal "
-                                "in this image is a spotted wild cat such as a "
-                                "cheetah or leopard; otherwise reply OTHER."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64," + image},
-                        },
-                    ],
-                }
-            ],
-            "temperature": 0,
-            "max_tokens": 16,
-            "stream": False,
-        }
-        body = _request_json(
-            f"{base_url}/v1/chat/completions", payload, args.request_timeout
-        )
-        content = body.get("choices", [{}])[0].get("message", {}).get("content")
-        if not _completion_is_sensible(content):
-            raise RuntimeError(
-                f"vision smoke returned an incorrect fixture verdict: {content!r}"
+        for image_path, expected in (
+            (args.image, "SPOTTED_CAT"),
+            (args.negative_image, "OTHER"),
+        ):
+            image = base64.b64encode(image_path.read_bytes()).decode("ascii")
+            payload = {
+                "model": str(model),
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Classify the main subject in this image. Reply "
+                                    "with exactly SPOTTED_CAT for a spotted wild cat "
+                                    "such as a cheetah or leopard, or OTHER for "
+                                    "anything else."
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64," + image},
+                            },
+                        ],
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": 16,
+                "stream": False,
+            }
+            body = _request_json(
+                f"{base_url}/v1/chat/completions", payload, args.request_timeout
             )
-        print("vision smoke: HTTP 200; fixture verdict=SPOTTED_CAT")
+            content = body.get("choices", [{}])[0].get("message", {}).get("content")
+            if not _completion_matches(content, expected):
+                raise RuntimeError(
+                    f"vision smoke expected {expected} for {image_path.name}, "
+                    f"got: {content!r}"
+                )
+        print("vision smoke: HTTP 200; fixture verdicts=SPOTTED_CAT,OTHER")
         return 0
     except Exception:
         print(f"vision smoke server log: {log_path}")

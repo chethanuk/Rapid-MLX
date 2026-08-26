@@ -225,15 +225,15 @@ jobs:
     # rounded to 125. Measured on the Studio, dsh solves the task in 17-64s
     # (warm/cold) — the budget is for the pathological retry path, not the
     # expected one.
-    # 155, not 125: the release-shaped Desktop sidecar build and two real-image
-    # requests now follow the agent gate. The agent path retains its documented
-    # ~121-minute worst case; each image smoke is independently bounded to
-    # 4 minutes of startup plus 4 minutes of inference (16 minutes total), and
+    # 165, not 125: the release-shaped Desktop sidecar build and two-model,
+    # positive/negative real-image checks now follow the agent gate. The agent
+    # path retains its documented ~121-minute worst case; each model is bounded
+    # to 4 minutes of startup plus two 4-minute requests (24 minutes total), and
     # the measured clean sidecar build gets 15 minutes of fail-closed headroom.
-    # 121 + 16 + 15 = 152, rounded to 155 for setup and cleanup. This outer cap
+    # 121 + 24 + 15 = 160, rounded to 165 for setup and cleanup. This outer cap
     # is not a substitute for the per-request bounds: it only prevents healthy
     # checks near their individual budgets from being guillotined by the job.
-    timeout-minutes: 155
+    timeout-minutes: 165
     # Serialize with the manual agent-gate.yml so two runs never contend for the
     # single runner / the serve port.
     concurrency:
@@ -297,7 +297,8 @@ jobs:
             --sidecar-root "$SIDE" \
             --model "$SIDECAR_GEMMA_SMOKE_MODEL" \
             --revision "$SIDECAR_GEMMA_SMOKE_REVISION" \
-            --image apps/rapid-mac/Sources/Rapid/Resources/cheetah.png
+            --image apps/rapid-mac/Sources/Rapid/Resources/cheetah.png \
+            --negative-image apps/rapid-mac/Sources/Rapid/Resources/Assets.xcassets/RapidLogo.imageset/RapidLogo.png
           rm -rf "$V"
 
   # 2b) Desktop candidate gate (macos-15). Builds + signs + notarises + DMG-
