@@ -586,6 +586,15 @@ class TestIsTextOnlyOverride:
         info = models_route._build_model_info(model_id)
         assert info.capabilities == ["text", "experimental"]
 
+    def test_published_qwen4_exp_alias_emits_experimental_capability(self, monkeypatch):
+        from vllm_mlx.routes import models as models_route
+
+        monkeypatch.setattr(models_route, "is_mllm_model", lambda _mid: False)
+
+        info = models_route._build_model_info("qwen3.8-flash-next-4bit")
+
+        assert info.capabilities == ["text", "tools", "experimental"]
+
     def test_build_model_info_forwards_is_text_only_for_bonsai_alias(self, monkeypatch):
         """Integration guard (codex #1116 NIT): the direct-helper tests
         above stay green even if ``_build_model_info`` STOPS forwarding

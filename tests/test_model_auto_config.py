@@ -960,6 +960,16 @@ class TestVisibility:
         assert "✗ disabled (hybrid arch)" in table
         assert "✓ 200ms gap" in table
 
+    def test_qwen4_exp_alias_surfaces_experimental_status(self):
+        cfg = detect_model_config("qwen3.8-flash-next-4bit")
+        assert cfg is not None and cfg.experimental is True
+
+        summary = format_profile_summary("qwen3.8-flash-next-4bit", cfg)
+        table = format_profile_table("qwen3.8-flash-next-4bit", cfg)
+
+        assert "experimental" in summary
+        assert "Status           : ⚠ experimental" in table
+
     def test_table_for_pure_attention_shows_supported(self):
         cfg = detect_model_config("mlx-community/Qwen3-0.6B-8bit")
         table = format_profile_table("mlx-community/Qwen3-0.6B-8bit", cfg)

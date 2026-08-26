@@ -1,7 +1,8 @@
 # Qwen3.8-Flash-Next text-lane M1
 
-Status: experimental, local artifact only. The checkpoint has not been uploaded
-or published. MTP and vision are separate milestones.
+Status: experimental text lane. The immutable release artifact is being
+published as `rapid-mlx/Qwen3.8-Flash-Next-4bit`; this PR must not land before
+that repository resolves. MTP and vision remain separate milestones.
 
 ## Architecture and conversion contract
 
@@ -21,9 +22,12 @@ The converted q4 artifact uses:
 
 `scripts/qwen38_streaming_convert.py` streams source shards, emits MLX sibling
 `weight` / `scales` / `biases` keys, preserves the fused MoE gate-up/down
-contract, and writes a complete index plus SHA-256 manifest. The verified local
-artifact contains 28 shards / 98 GiB. Strict loading reports zero missing and
-zero unexpected parameters.
+contract, and writes a complete index plus SHA-256 manifest. The verified
+release artifact contains 28 shards / 97.51 GiB (104,695,602,743 bytes). Strict
+loading reports zero missing and zero unexpected parameters. Its model card
+records source revision `f5d08274`, the Qwen Apache-2.0 license, this
+mixed-group quantization contract, and the generated `SHA256SUMS.txt` whole-tree
+manifest.
 
 ## Reference and numerical gate
 
@@ -79,12 +83,13 @@ swap. The four long prefills completed in 130.209, 130.739, 145.181, and 136.935
 seconds. Answers included the exact four recall facts and well-formed tool calls
 for weather, stock price, meeting scheduling, and local-document search.
 
-An explicitly served local checkpoint advertises the `experimental` capability
-from its `qwen4_exp` architecture metadata. M1 deliberately publishes no alias,
-catalog row, or model-size entry: there is no immutable public artifact for
-those surfaces to resolve yet. The measured peak means 128 GB is a tight
-operator tier; 192 GB remains the recommended tier for local evaluation
-headroom.
+Both an explicitly served local checkpoint and the
+`qwen3.8-flash-next-4bit` alias advertise the `experimental` capability. The
+alias resolves to the immutable release artifact and declares a 128 GB minimum
+memory floor; the exact 104,695,602,743-byte download footprint is part of the
+model-size manifest. The measured peak means 128 GB remains a tight operator
+tier, while 192 GB is recommended for evaluation headroom. M1 is CLI/API only;
+Desktop catalog exposure remains a later product milestone.
 
 ## Remaining milestones
 
@@ -93,6 +98,5 @@ headroom.
 - M2: MTP head extraction and batched-consistent lossless verification before
   choosing any speculative-token default.
 - M3: vision tower/processor integration and real-image correctness.
-- M4: publish only with an explicit release guard, then add the alias,
-  model-size row, >=128 GB catalog profile, Desktop, and mirror integration as
-  one immutable-artifact contract.
+- M4: Desktop catalog exposure and mirror integration for the already
+  immutable CLI/API artifact.
