@@ -1,9 +1,12 @@
 import Foundation
 import Observation
 
-/// Owns the one-time, post-value telemetry invitation. Feature models report
-/// only successful product outcomes; this coordinator alone decides whether a
-/// durable consent decision is still owed and presents at most one invitation.
+/// The product-approved, closed trigger set for the one-time telemetry
+/// invitation. These are consent-timing policy, not an inventory of every
+/// successful feature: Audio-tab file transcription and speech synthesis are
+/// deliberately excluded, as are edits of an existing image. Expanding this
+/// enum requires an explicit product decision rather than wiring every new
+/// feature into consent automatically.
 enum ProductValueKind: Equatable, Sendable {
     case chatReply
     case dictationTranscript
