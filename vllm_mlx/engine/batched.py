@@ -2303,6 +2303,7 @@ class BatchedEngine(BaseEngine):
         images: list[str] | None = None,
         videos: list[str] | None = None,
         request_id: str | None = None,
+        request_admitted_event: asyncio.Event | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         """
@@ -2319,6 +2320,8 @@ class BatchedEngine(BaseEngine):
             request_id: Optional caller-provided request identity. Streaming
                 API routes use the public response id so cancellation and
                 scheduler admission address the same request.
+            request_admitted_event: Optional route notification set after
+                scheduler admission, before waiting for the first output.
             **kwargs: Additional model-specific parameters. C-01:
                 ``request_id_holder`` (``list[str | None]``) — when
                 provided, the engine writes the admitted scheduler
@@ -2398,6 +2401,8 @@ class BatchedEngine(BaseEngine):
                         "[stream_generate] request_id_holder publish failed",
                         exc_info=True,
                     )
+            if request_admitted_event is not None:
+                request_admitted_event.set()
 
             async for output in self._mllm_scheduler.stream_outputs(request_id):
                 # ``logprobs`` is now wired through from
@@ -2498,6 +2503,8 @@ class BatchedEngine(BaseEngine):
                     "[stream_generate] request_id_holder publish failed",
                     exc_info=True,
                 )
+        if request_admitted_event is not None:
+            request_admitted_event.set()
 
         # F-012 belt-and-suspenders: ``stream_outputs.finally`` already
         # aborts on any abnormal exit AFTER it enters its ``try`` block.

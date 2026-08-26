@@ -1071,6 +1071,45 @@ class TestStreamingModels:
         assert first.new_text == "<tool_call>"
         await stream.aclose()
 
+    @pytest.mark.asyncio
+    async def test_role_frame_waits_for_admission_not_first_token(self):
+        """Slow prefill still exposes a cancellable ID immediately after admit."""
+        import asyncio
+
+        from vllm_mlx.config import reset_config
+        from vllm_mlx.engine.base import GenerationOutput
+        from vllm_mlx.routes.chat import stream_chat_completion
+
+        class _SlowPrefillEngine:
+            preserve_native_tool_format = False
+            tokenizer = None
+
+            async def stream_chat(self, messages, **kwargs):
+                del messages
+                kwargs["request_admitted_event"].set()
+                await asyncio.Event().wait()
+                yield GenerationOutput(text="unreachable")
+
+        cfg = reset_config()
+        cfg.model_name = "test-model"
+        request = ChatCompletionRequest(
+            model="test-model",
+            stream=True,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        stream = stream_chat_completion(
+            _SlowPrefillEngine(),
+            request.messages,
+            request,
+            response_id="chatcmpl-" + "d" * 32,
+            request_id="chatcmpl-" + "d" * 32,
+        )
+
+        first = await asyncio.wait_for(anext(stream), timeout=0.2)
+
+        assert '"role":"assistant"' in first
+        await stream.aclose()
+
     def test_stream_request_ids_keep_full_entropy_past_shared_prefix(self, monkeypatch):
         """Two UUIDs sharing the old 32-bit prefix remain distinct IDs."""
         from vllm_mlx.routes import chat
@@ -1146,6 +1185,7 @@ class TestStreamingModels:
         engine._request_cancels = {}
         engine._request_cancels_lock = threading.Lock()
         public_id = "chatcmpl-" + "c" * 32
+        admitted = asyncio.Event()
 
         async def _consume():
             return [
@@ -1155,6 +1195,7 @@ class TestStreamingModels:
                     max_tokens=8,
                     temperature=0.0,
                     request_id=public_id,
+                    request_admitted_event=admitted,
                 )
             ]
 
@@ -1163,6 +1204,7 @@ class TestStreamingModels:
             await asyncio.sleep(0)
         _, _, _, worker_output, cancel_event, done_event = engine._jobs.get_nowait()
 
+        assert admitted.is_set()
         assert await engine.abort_request(public_id) is True
         assert cancel_event.is_set()
         worker_output.put(_STREAM_DONE)
