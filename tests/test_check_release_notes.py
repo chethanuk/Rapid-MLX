@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,6 +94,27 @@ def test_rejects_container_wrapped_comment_only_notes(
     (notes_dir / "v0.13.1.md").write_text(markdown, encoding="utf-8")
     with pytest.raises(ValueError, match="empty"):
         check_release_notes("0.13.1", changelog, notes_dir)
+
+
+def test_multiline_comment_keeps_visible_close_suffix_without_private_body(
+    tmp_path: Path,
+) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    notes = notes_dir / "v0.13.1.md"
+    notes.write_text(
+        "<!-- internal draft\nsecret roadmap\n--> Public note\n", encoding="utf-8"
+    )
+    check_release_notes("0.13.1", changelog, notes_dir)
+    normalizer = Path("scripts/strip_release_note_comments.awk")
+    result = subprocess.run(
+        ["awk", "-f", str(normalizer), str(notes)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Public note" in result
+    assert "internal draft" not in result
+    assert "secret roadmap" not in result
 
 
 @pytest.mark.parametrize("version", ["0.13", "0.13.1-rc0", "../0.13.1", "v0.13.1"])

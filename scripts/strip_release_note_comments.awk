@@ -46,7 +46,11 @@ in_comment {
   if ($0 ~ /-->/) {
     in_comment = 0
     if (rest_is_clean(tail_after_close($0))) pending_count = 0
-    else flush_pending()
+    else {
+      visible_tail = tail_after_close($0)
+      pending_count = 0
+      print visible_tail
+    }
   }
   next
 }
