@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from pathlib import Path
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?$")
@@ -26,7 +27,14 @@ def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
     notes = notes_dir / f"v{version}.md"
     if not notes.is_file():
         raise ValueError(f"release notes are missing: {notes}")
-    if not notes.read_text(encoding="utf-8").strip():
+    normalizer = Path(__file__).with_name("strip_release_note_comments.awk")
+    normalized = subprocess.run(
+        ["awk", "-f", str(normalizer), str(notes)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if not normalized.strip():
         raise ValueError(f"release notes are empty: {notes}")
 
 

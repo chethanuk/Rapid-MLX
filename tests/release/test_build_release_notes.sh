@@ -85,6 +85,7 @@ cd "$SB"
 git init -q .
 git config user.email t@t; git config user.name t; git config commit.gpgsign false
 cp "$SCRIPT" "$SB/build.sh"
+cp "$REPO_ROOT/scripts/strip_release_note_comments.awk" "$SB/strip_release_note_comments.awk"
 
 commit() { printf '%s\n' "$2" > "$1"; git add -A; git commit -qm "$3"; }
 

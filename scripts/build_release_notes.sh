@@ -24,10 +24,10 @@
 #   ## Community contributors
 #   Install: …
 #
-#   When no highlights file exists the commit list is emitted flat and
-#   un-collapsed, i.e. byte-identical to the pre-highlights behaviour. Prose is
-#   never required: a release must never be blocked on someone having written
-#   it.
+#   Release preflight requires visible curated highlights for new releases.
+#   The historical fallback remains for direct/offline use and old release
+#   commits, but the canonical bump and post-merge paths fail before this script
+#   when the file is missing or normalizes to empty.
 #
 # Required env:
 #   VERSION            X.Y.Z being released
@@ -40,6 +40,8 @@
 #   SKIP_CONTRIBUTORS  "1" → skip the ``gh`` calls (offline tests)
 
 set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 : "${VERSION:?VERSION is required}"
 : "${RELEASE_SHA:?RELEASE_SHA is required}"
@@ -120,7 +122,7 @@ while IFS= read -r sha; do
 done < <(printf '%s\n' "$COMMITS" | cited_shas)
 
 # --------------------------------------------------------------------------
-# 3. Human-authored highlights (optional).
+# 3. Human-authored highlights (required by canonical release preflight).
 #
 # Read out of the release commit itself, not the working tree, so the prose can
 # only ever be the prose that was committed to the tree being tagged.
@@ -229,6 +231,10 @@ if git cat-file -e "$RELEASE_SHA:$HIGHLIGHTS_PATH" 2>/dev/null; then
           if (in_comment) flush_pending()
         }
       ' |
+      # Keep the preflight and publisher on one executable normalization SSOT.
+      # The legacy inline pass remains for compatibility; the shared pass is
+      # idempotent and is what the bump validator invokes directly.
+      awk -f "$SCRIPT_DIR/strip_release_note_comments.awk" |
       # Trim leading blank lines ($( ) trims trailing ones).
       sed -e '/./,$!d'
   )

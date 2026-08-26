@@ -15,11 +15,11 @@ for **`docs/release-notes/v<X.Y.Z>.md`** *in the commit being tagged*.
 - **File present** → its contents are the top of the GitHub Release body,
   verbatim, and the auto-generated commit list is appended below it inside a
   collapsed `<details><summary>All changes</summary>`.
-- **File absent or empty** → the release publishes exactly as it always has: a
-  flat commit list, no `<details>`.
+- **File absent, empty, or only drafting comments** → the version-bump preflight
+  fails before merge. Add curated visible prose for the exact version.
 
-**A release is never blocked on prose.** Forgetting to write highlights costs
-you nice notes, never a release.
+**Curated prose is a release input.** The bump PR and the post-merge release
+preparation both fail closed if it is missing or normalizes to no visible text.
 
 The machinery around the prose is unchanged either way: the
 `## What's new in vX.Y.Z` heading, the ⚠️ emergency-release banner when the

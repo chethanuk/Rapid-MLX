@@ -68,8 +68,9 @@ The full path from "I want to release" to "users on `brew upgrade` see the new v
 
    While you're in this PR, also roll the release notes:
    `git mv docs/release-notes/unreleased.md docs/release-notes/vX.Y.Z.md`,
-   tidy the prose, and recreate an empty `unreleased.md`. Optional — skipping
-   it just gives you a plain commit list. See `docs/release-notes/README.md`.
+   tidy the prose, and recreate an empty `unreleased.md`. This is required:
+   release pre-flight rejects a missing, empty, or drafting-comment-only file.
+   See `docs/release-notes/README.md`.
 
 3. **`auto-release.yml` fires** — the jobs run in this order; automation proceeds automatically up to a visible **approval wait** at the protected `rapid-mac-tag` gate, then resumes after a human approves:
 
@@ -79,7 +80,7 @@ The full path from "I want to release" to "users on `brew upgrade` see the new v
    4. **`release-prep`** (pre-approval evidence, no environment) — resolves the release commit, verifies the accepted candidate SHA, verifies the **live `main` head** still equals it, gathers **live release-blocker evidence** against the per-version waiver file, prints all of it, and uploads the evidence. This is the exact identity a reviewer approves.
    5. **`release`** (environment-gated **`rapid-mac-tag`**) — a human approves the exact printed SHA, then it re-queries the live blocker set and live `main` head (TOCTOU) and claims the desktop tag at that validated commit. `tag_desktop_app.sh` refuses `RELEASE_SHA != ACCEPTED_SHA`.
    6. **Tagged Desktop publish** — the `rapid-mac-v*` tag triggers `rapid-mac-release.yml`, which re-runs the SAME shared `desktop-releasable` validation contract on the tagged commit, re-verifies the tag binding BEFORE uploading, then publishes the DMG + Sparkle appcast/latest.json. The environment-gated release job waits for the exact tagged run to succeed, the canonical non-empty DMG to exist, and the tag to re-resolve to the accepted SHA. A same-SHA tag no-op alone is not publication evidence.
-   7. **Engine release** — only after that Desktop publication evidence passes, tags `vX.Y.Z`, builds the release notes via `scripts/build_release_notes.sh` (curated `docs/release-notes/vX.Y.Z.md` if present, plus the commit list for `<nearest ancestor tag>..<release commit>`), adds a linked **Community contributors** entry for every merged PR author other than the repository owner, and creates tag + GitHub Release **at that same commit**. Missing/failed Desktop evidence, timeout, API/auth failure or SHA mismatch fails closed; recover by rerunning/dispatching the exact immutable Desktop tag workflow and rerunning auto-release, never by moving the tag.
+   7. **Engine release** — only after that Desktop publication evidence passes, tags `vX.Y.Z`, builds the release notes via `scripts/build_release_notes.sh` (required curated `docs/release-notes/vX.Y.Z.md`, plus the commit list for `<nearest ancestor tag>..<release commit>`), adds a linked **Community contributors** entry for every merged PR author other than the repository owner, and creates tag + GitHub Release **at that same commit**. Missing/failed Desktop evidence, timeout, API/auth failure or SHA mismatch fails closed; recover by rerunning/dispatching the exact immutable Desktop tag workflow and rerunning auto-release, never by moving the tag.
 
 4. **`publish.yml` fires on `release: published`** (~3min) — builds sdist + wheel, uploads to PyPI (via the `pypi` deployment environment).
 
