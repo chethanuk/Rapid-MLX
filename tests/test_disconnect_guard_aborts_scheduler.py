@@ -766,3 +766,156 @@ async def test_batched_engine_publishes_request_id_into_holder():
         break
 
     assert holder[0] == "req-engine-issued-7777"
+
+
+@pytest.mark.asyncio
+async def test_batched_engine_admits_caller_provided_public_request_id():
+    """The public SSE id is the scheduler identity used by cancellation."""
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.engine.batched import BatchedEngine
+    from vllm_mlx.request import RequestOutput
+
+    eng = BatchedEngine.__new__(BatchedEngine)
+    eng._loaded = True
+    eng._is_mllm = False
+    eng._mllm_scheduler = None
+    eng._stream_interval = 1
+    eng._is_hybrid_model = lambda: False
+    eng._create_output_router = lambda: None
+    eng._admission_lock = threading.Lock()
+    eng._admission_reservations = 0
+    eng._admission_tokens = set()
+    eng._admission_tasks = {}
+    eng._lifecycle_aborted_tasks = set()
+    eng._generation_paused = False
+    eng._generation_pause_mode = None
+    eng._scheduler_config = None
+
+    admitted_kwargs: dict = {}
+    fake_engine = MagicMock()
+
+    async def add_request(**kwargs):
+        admitted_kwargs.update(kwargs)
+        kwargs["on_request_committed"]()
+        return kwargs.get("request_id", "scheduler-generated")
+
+    async def stream_outputs(request_id):
+        yield RequestOutput(
+            request_id=request_id,
+            new_token_ids=[1],
+            new_text="x",
+            output_token_ids=[1],
+            output_text="x",
+            finished=True,
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    fake_engine.add_request = MagicMock(side_effect=add_request)
+    fake_engine.stream_outputs = stream_outputs
+    fake_engine.engine = None
+    fake_engine.scheduler = MagicMock()
+    fake_engine.scheduler.abort_request = MagicMock(return_value=True)
+    fake_engine._cleanup_request = MagicMock()
+    eng._engine = fake_engine
+
+    public_id = "chatcmpl-public1"
+    holder: list[str | None] = [None]
+    async for _ in eng.stream_generate(
+        prompt="hi",
+        max_tokens=8,
+        request_id=public_id,
+        request_id_holder=holder,
+    ):
+        break
+
+    assert admitted_kwargs["request_id"] == public_id
+    assert holder[0] == public_id
+
+
+@pytest.mark.asyncio
+async def test_mllm_scheduler_admits_caller_provided_public_request_id():
+    """Vision streams use the same public cancellation identity contract."""
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.engine.batched import BatchedEngine
+    from vllm_mlx.request import RequestOutput
+
+    eng = BatchedEngine.__new__(BatchedEngine)
+    eng._loaded = True
+    eng._is_mllm = True
+    eng._stream_interval = 1
+    eng._is_hybrid_model = lambda: False
+    eng._create_output_router = lambda: None
+    eng._admission_lock = threading.Lock()
+    eng._admission_reservations = 0
+    eng._admission_tokens = set()
+    eng._admission_tasks = {}
+    eng._lifecycle_aborted_tasks = set()
+    eng._generation_paused = False
+    eng._generation_pause_mode = None
+    eng._scheduler_config = None
+
+    admitted_kwargs: dict = {}
+    scheduler = MagicMock()
+    scheduler.config.max_concurrent_requests = 256
+
+    async def add_request_async(**kwargs):
+        admitted_kwargs.update(kwargs)
+        kwargs["on_request_committed"]()
+        return kwargs.get("request_id", "scheduler-generated")
+
+    async def stream_outputs(request_id):
+        yield RequestOutput(
+            request_id=request_id,
+            new_token_ids=[1],
+            new_text="x",
+            output_token_ids=[1],
+            output_text="x",
+            finished=True,
+            finish_reason="stop",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    scheduler.add_request_async = MagicMock(side_effect=add_request_async)
+    scheduler.stream_outputs = stream_outputs
+    eng._mllm_scheduler = scheduler
+    eng._engine = None
+
+    public_id = "chatcmpl-vision1"
+    holder: list[str | None] = [None]
+    async for _ in eng.stream_generate(
+        prompt="hi",
+        max_tokens=8,
+        request_id=public_id,
+        request_id_holder=holder,
+    ):
+        break
+
+    assert admitted_kwargs["request_id"] == public_id
+    assert holder[0] == public_id
+
+
+def test_text_scheduler_rejects_duplicate_public_request_id():
+    """A duplicate cannot replace the text request cancellation addresses."""
+    from types import SimpleNamespace
+
+    from vllm_mlx.request import Request, SamplingParams
+    from vllm_mlx.scheduler import Scheduler
+
+    public_id = "chatcmpl-" + "a" * 32
+    tokenizer = SimpleNamespace(eos_token_id=2, encode=lambda _text: [1, 2])
+    scheduler = Scheduler(SimpleNamespace(), tokenizer)
+    request = Request(
+        request_id=public_id,
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    scheduler.add_request(request)
+    with pytest.raises(ValueError, match="already exists"):
+        scheduler.add_request(request)
+    assert scheduler.requests[public_id] is request
