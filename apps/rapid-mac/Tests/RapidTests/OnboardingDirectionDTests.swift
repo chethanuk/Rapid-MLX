@@ -71,9 +71,13 @@ struct OnboardingDirectionDTests {
         let source = try Self.strippedSource("Sources/Rapid/UI/QuickstartView.swift")
         let body = try #require(source.range(of: "varbody:someView{"))
         let content = try #require(source.range(of: "privatevarcontent:someView{"))
+        let baseline = try #require(source.range(of: ".onAppear{coordinator.applyDefaultChoice(hardware:hardware,catalog:[])"))
         let policyTask = try #require(source.range(of: ".task(id:StarterSelectionKey("))
         let chooser = try #require(source.range(of: "privatevarchooseModelStep:someView{"))
 
+        #expect(baseline.lowerBound > body.lowerBound)
+        #expect(baseline.lowerBound < content.lowerBound,
+                "the RAM baseline must be synchronous in the root view")
         #expect(policyTask.lowerBound > body.lowerBound)
         #expect(policyTask.lowerBound < content.lowerBound,
                 "the policy task must mount with the root view before welcome Skip is actionable")

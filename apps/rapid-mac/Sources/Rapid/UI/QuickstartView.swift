@@ -1481,6 +1481,13 @@ struct QuickstartView: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(RapidTheme.canvas)
+            // Establish the RAM-only baseline synchronously before welcome
+            // actions become interactive. The catalog task below may replace
+            // it with an eligible cached model, but an immediate Skip can
+            // never leak the static 16 GB starter onto a smaller Mac.
+            .onAppear {
+                coordinator.applyDefaultChoice(hardware: hardware, catalog: [])
+            }
             // Observe serve transitions so we can flip to ``.ready`` (and
             // seed the welcome message) as soon as the sidecar comes
             // online. ``.task(id:)`` re-fires on every ``server.state``

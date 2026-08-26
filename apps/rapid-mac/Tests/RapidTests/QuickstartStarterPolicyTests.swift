@@ -49,6 +49,14 @@ struct QuickstartStarterPolicyTests {
         ).alias == "qwen3.5-4b-4bit")
     }
 
+    @Test("The synchronous no-catalog baseline is safe before welcome Skip")
+    func immediateWelcomeBaseline() {
+        let coordinator = QuickstartCoordinator()
+        coordinator.applyDefaultChoice(hardware: hardware(8), catalog: [])
+
+        #expect(coordinator.selection.alias == "lfm2.5-2.6b-4bit")
+    }
+
     @Test("An eligible cached chat model wins without a download")
     func cachedEligibleWins() {
         let pick = QuickstartCoordinator.defaultChoice(
