@@ -94,8 +94,11 @@ can actually understand.
   to its worker, so the original assistant continues answering instead of
   losing its GPU stream. ([#2441](https://github.com/raullenchai/Rapid-MLX/pull/2441))
 - **Model-switch memory projections credit the assistant being replaced.** The
-  estimate uses the same fit thresholds as the replacement transaction and no
-  longer warns about memory that will be freed before the new model starts.
+  estimate uses the same fit thresholds as the replacement transaction.
+  Desktop's low-memory threshold moves from 85% to 100%: 95–100% shows
+  advisory guidance and above 100% requires confirmation. The previous
+  conservative threshold is superseded now that projections credit memory
+  freed by the model being replaced.
   ([#2443](https://github.com/raullenchai/Rapid-MLX/pull/2443),
   [#2444](https://github.com/raullenchai/Rapid-MLX/pull/2444))
 - **Speech to Text arms itself after model lifecycle changes.** When speech
@@ -103,6 +106,10 @@ can actually understand.
   ([#2448](https://github.com/raullenchai/Rapid-MLX/pull/2448))
 <!-- TRAIN-6 PLACEHOLDER: add the Claude Code connection correction only after
 the bisect identifies and validates the exact landed fix. -->
+<!-- KNOWN-ISSUE CONDITIONAL: include only if the train-6c suffix-decoding fix
+does not land: "Suffix decoding with sliding-window models such as Gemma 4 and
+GPT-OSS can abort a request at a window boundary. Workaround: disable suffix
+decoding." -->
 - **Photo rejection and multimodal reloads recover cleanly.** A rejected image
   cannot poison the next text turn, and a reloaded vision model cannot reuse a
   stale generation worker. ([#2379](https://github.com/raullenchai/Rapid-MLX/pull/2379),
