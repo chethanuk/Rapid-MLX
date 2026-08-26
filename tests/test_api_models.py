@@ -8,6 +8,7 @@ These are pure Pydantic models with no MLX dependency.
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -1069,6 +1070,63 @@ class TestStreamingModels:
         assert admitted is True
         assert first.new_text == "<tool_call>"
         await stream.aclose()
+
+    def test_stream_request_ids_keep_full_entropy_past_shared_prefix(self, monkeypatch):
+        """Two UUIDs sharing the old 32-bit prefix remain distinct IDs."""
+        from vllm_mlx.routes import chat
+
+        values = iter(
+            [
+                SimpleNamespace(hex="12345678" + "a" * 24),
+                SimpleNamespace(hex="12345678" + "b" * 24),
+            ]
+        )
+        monkeypatch.setattr(chat.uuid, "uuid4", lambda: next(values))
+
+        first = chat._new_stream_request_id()
+        second = chat._new_stream_request_id()
+
+        assert first == "chatcmpl-12345678" + "a" * 24
+        assert second == "chatcmpl-12345678" + "b" * 24
+        assert first != second
+
+    def test_text_and_mllm_schedulers_reject_duplicate_public_ids(self):
+        """A duplicate cannot replace the request cancellation will address."""
+        from collections import deque
+
+        from vllm_mlx.mllm_scheduler import MLLMScheduler
+        from vllm_mlx.request import Request, SamplingParams
+        from vllm_mlx.scheduler import Scheduler
+
+        public_id = "chatcmpl-" + "a" * 32
+        tokenizer = SimpleNamespace(eos_token_id=2, encode=lambda _text: [1, 2])
+        text_scheduler = Scheduler(SimpleNamespace(), tokenizer)
+        text_request = Request(
+            request_id=public_id,
+            prompt="hello",
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        text_scheduler.add_request(text_request)
+        with pytest.raises(ValueError, match="already exists"):
+            text_scheduler.add_request(text_request)
+        assert text_scheduler.requests[public_id] is text_request
+
+        mllm_scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        mllm_scheduler._generation_paused = False
+        mllm_scheduler._paused_admission_tokens = set()
+        mllm_scheduler._paused_add_allowance = 0
+        mllm_scheduler.requests = {}
+        mllm_scheduler.waiting = deque()
+        mllm_scheduler._cancelled_request_ids = set()
+        mllm_scheduler._disconnect_abort_ids = set()
+        mllm_request = SimpleNamespace(
+            request_id=public_id,
+            lifecycle_admission_token=None,
+        )
+        mllm_scheduler._commit_request(mllm_request)
+        with pytest.raises(ValueError, match="already exists"):
+            mllm_scheduler._commit_request(mllm_request)
+        assert mllm_scheduler.requests[public_id] is mllm_request
 
 
 class TestModelSerialization:
