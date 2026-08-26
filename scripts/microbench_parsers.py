@@ -261,10 +261,16 @@ def bench_one(
     total_ms = (time.perf_counter() - t_total0) * 1000
     iters_executed = sum(per_round)
     # Worst-case ε across all paired rounds (max(parser_us / (base × speedup))).
-    eps = max(us / (base_us * speedup) for us, speedup in pairs)
-    last_speedup = pairs[-1][1]
-    threshold_us = base_us * REGRESSION_LIMIT * last_speedup
-    us_per_call = pairs[0][0]
+    # The reported us_per_call and threshold come from the SAME pair that
+    # produced the verdict (the max-ε pair), so the printed numbers always
+    # agree with pass/fail (issue #2344 review).
+    worst_pair_idx = max(
+        range(len(pairs)), key=lambda i: pairs[i][0] / (base_us * pairs[i][1])
+    )
+    worst_us, worst_speedup = pairs[worst_pair_idx]
+    eps = worst_us / (base_us * worst_speedup)
+    threshold_us = base_us * REGRESSION_LIMIT * worst_speedup
+    us_per_call = worst_us
     return BenchResult(
         name=name,
         total_ms=total_ms,
