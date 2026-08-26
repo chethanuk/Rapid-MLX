@@ -2040,7 +2040,7 @@ struct ComposeField: View {
     /// when nothing is streaming.
     var onCancel: () -> Void
     var onPasteAttachments: () -> Bool = { false }
-    var onDropAttachments: ([URL]) -> Bool = { _ in false }
+    var onDropAttachments: (([URL]) -> Bool)?
     /// Resolves the text of the last user message in the active
     /// session, or ``nil`` when there's nothing to recall. Bound to
     /// the Up-arrow-in-empty-compose recall affordance (Claude /
@@ -2217,8 +2217,8 @@ final class AutosizingTextView: NSTextView {
     @discardableResult
     func consumeFileDrop(from pasteboard: NSPasteboard) -> Bool {
         let urls = Self.fileURLs(from: pasteboard)
-        guard !urls.isEmpty else { return false }
-        _ = onDropAttachments?(urls)
+        guard !urls.isEmpty, let onDropAttachments else { return false }
+        _ = onDropAttachments(urls)
         return true
     }
 
@@ -2344,7 +2344,7 @@ struct ComposeTextEditor: NSViewRepresentable {
     var onSubmit: () -> Void
     var onCancel: () -> Void
     var onPasteAttachments: () -> Bool
-    var onDropAttachments: ([URL]) -> Bool
+    var onDropAttachments: (([URL]) -> Bool)?
     var onRecallLastUser: () -> String?
     /// Accessibility identity of the underlying ``NSTextView``. Defaults to
     /// the chat compose field so every existing call site — and the external

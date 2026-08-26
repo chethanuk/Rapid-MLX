@@ -297,6 +297,18 @@ struct ChatFileAttachmentTests {
         #expect(textView.string.isEmpty)
     }
 
+    @Test("A composer without an attachment handler leaves file drops to AppKit")
+    func nativeTextViewWithoutDropHandlerDoesNotInterceptFiles() {
+        let textView = AutosizingTextView.makeForComposer()
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("rapid.chat.drop.no-handler.\(UUID().uuidString)")
+        )
+        pasteboard.clearContents()
+        pasteboard.writeObjects([URL(fileURLWithPath: "/tmp/unhandled.txt") as NSURL])
+
+        #expect(!textView.consumeFileDrop(from: pasteboard))
+    }
+
     @Test("Retry preserves the locally extracted source")
     func retryPreservesAttachment() throws {
         let attachment = try ChatFileAttachment(
