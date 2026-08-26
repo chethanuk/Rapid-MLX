@@ -862,6 +862,14 @@ class ResidentModelManager:
                         record.model_id,
                     )
                 _release_allocator_cache()
+                if record.primary and self._on_primary_changed is not None:
+                    try:
+                        self._on_primary_changed(None)
+                    except BaseException:
+                        logger.exception(
+                            "Failed to clear serving-layer primary after "
+                            "restore publication failure"
+                        )
                 restored_entry = None
             if record.primary:
                 self.registry.clear_default()

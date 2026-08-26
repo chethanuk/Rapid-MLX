@@ -1521,6 +1521,49 @@ async def test_primary_reload_clear_callback_failure_restores_old_owner():
     assert manager.snapshot()["models"][0]["primary"] is True
 
 
+@pytest.mark.asyncio
+async def test_restore_publication_failure_clears_partially_published_primary():
+    registry = ModelRegistry()
+    primary = entry("chat")
+    registry.add(primary, is_default=True)
+    published: list[ModelEntry | None] = [primary]
+    restored_engines: list[FakeEngine] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        del path
+        if performance is not None:
+            raise RuntimeError("replacement failed")
+        restored = FakeEngine()
+        restored_engines.append(restored)
+        return entry(name, restored)
+
+    def publish(value: ModelEntry | None) -> None:
+        published[0] = value
+        if value is not None and value is not primary:
+            raise RuntimeError("restore publication failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_reader=lambda: 0,
+        on_primary_changed=publish,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        await manager.load(
+            "chat",
+            performance=ResidentPerformanceConfig(kv_cache_dtype="int4"),
+            reload_if_changed=True,
+        )
+
+    assert published == [None]
+    assert restored_engines[0].stopped is True
+    assert registry.list_entries() == []
+    assert registry.default_name is None
+    assert manager.snapshot()["models"] == []
+
+
 def test_clearing_resident_primary_disables_legacy_routing_and_readiness(monkeypatch):
     from types import SimpleNamespace
 
