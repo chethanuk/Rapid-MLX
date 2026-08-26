@@ -1199,8 +1199,14 @@ def section_shell_integration(
         # from the one actually running this doctor (e.g. inside a venv whose
         # bin/ precedes a global ~/.local/bin install). Surface the divergence
         # with both paths and an actionable fix instead of a silently-green
-        # "PATH OK" that points troubleshooting at the wrong install.
-        if running_exe and os.path.abspath(running_exe) != os.path.abspath(cli_path):
+        # "PATH OK" that points troubleshooting at the wrong install. Compare
+        # with realpath + normcase so a console-script symlink (Homebrew/PyPI)
+        # that resolves to the same binary is NOT a false mismatch — the
+        # running-CLI detector already realpaths sys.argv[0].
+        if running_exe and (
+            os.path.normcase(os.path.realpath(running_exe))
+            != os.path.normcase(os.path.realpath(cli_path))
+        ):
             s.add(
                 f"running rapid-mlx ({running_exe}) differs from the $PATH "
                 f"rapid-mlx ({cli_path}) — activate this environment or reorder "
