@@ -660,6 +660,48 @@ class TestPsCommandPortParsing:
         assert port == "8000"
 
 
+class TestPsCommandServedNameDisplay:
+    """Issue #2353: ``rapid-mlx ps`` must surface ``--served-model-name`` as the
+    API identity, with the requested alias/checkpoint shown as secondary."""
+
+    def _serve(self, capsys, *extra: str):
+        """Run ``ps_command`` against a single fake serve process with ``extra``
+        argv appended, and return its printed rows."""
+        import time as _time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from vllm_mlx import cli
+
+        class _Proc:
+            info = {
+                "pid": 1234,
+                "cmdline": ["rapid-mlx", "serve", "lfm2.5-1b-4bit", *extra],
+                "create_time": _time.time() - 60,
+            }
+
+        with patch("psutil.process_iter", return_value=[_Proc()]):
+            cli.ps_command(SimpleNamespace())
+        return capsys.readouterr().out
+
+    def test_served_model_name_leads_the_model_cell(self, capsys):
+        out = self._serve(
+            capsys,
+            "--port",
+            "8123",
+            "--served-model-name",
+            "studio-assistant",
+        )
+        assert "studio-assistant (lfm2.5-1b-4bit)" in out, out
+        # The API identity is what the process row leads with.
+        assert "MODEL" in out
+
+    def test_no_served_model_name_shows_alias(self, capsys):
+        out = self._serve(capsys)
+        assert "lfm2.5-1b-4bit" in out, out
+        assert "studio-assistant" not in out
+
+
 class TestCompletionsSuffixRejection:
     def _build_completions_app(self, patch_cfg, monkeypatch):
         from vllm_mlx.routes import completions as comp_route
