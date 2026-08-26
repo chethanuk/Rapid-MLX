@@ -52,3 +52,40 @@ def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
 def test_repository_model_without_revision_fails_closed() -> None:
     with pytest.raises(SystemExit, match="requires --revision"):
         _MODULE._resolve_model("owner/model", None)
+
+
+class _FakeProcess:
+    pid = 12345
+
+    def __init__(self, poll_result: int | None) -> None:
+        self.poll_result = poll_result
+        self.wait_calls: list[int] = []
+
+    def poll(self) -> int | None:
+        return self.poll_result
+
+    def wait(self, timeout: int) -> int:
+        self.wait_calls.append(timeout)
+        return 0
+
+
+def test_stop_process_is_noop_after_server_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess(0)
+    monkeypatch.setattr(_MODULE.os, "killpg", lambda *_: pytest.fail("must not signal"))
+    _MODULE._stop_process(process)
+    assert process.wait_calls == []
+
+
+def test_stop_process_tolerates_exit_between_poll_and_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess(None)
+
+    def process_gone(*_: object) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(_MODULE.os, "killpg", process_gone)
+    _MODULE._stop_process(process)
+    assert process.wait_calls == [15]

@@ -89,6 +89,23 @@ def _resolve_model(model: str, revision: str | None) -> Path:
     )
 
 
+def _stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sidecar-root", type=Path, required=True)
@@ -122,6 +139,7 @@ def main() -> int:
             env={**os.environ, "PYTHONNOUSERSITE": "1"},
         )
 
+    succeeded = False
     try:
         _wait_until_ready(base_url, process, args.startup_timeout)
         image = base64.b64encode(args.image.read_bytes()).decode("ascii")
@@ -155,20 +173,15 @@ def main() -> int:
                 f"vision smoke returned an implausible description: {content!r}"
             )
         print(f"vision smoke: HTTP 200; description={content!r}")
+        succeeded = True
         return 0
     except Exception:
         print(f"vision smoke server log: {log_path}")
         print(log_path.read_text(errors="replace"))
         raise
     finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-        if process.returncode == 0:
+        _stop_process(process)
+        if succeeded:
             log_path.unlink(missing_ok=True)
 
 
