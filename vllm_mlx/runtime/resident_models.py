@@ -409,6 +409,10 @@ class ResidentModelManager:
         self.idle_ttl_seconds = max(0.0, float(idle_ttl_seconds))
         self._clock = clock
         self._memory_reader = memory_reader
+        # Residency is configured before startup loading. Preserve the process
+        # baseline so the protected startup model receives an attributable
+        # footprint instead of treating Python/server memory as releasable.
+        self._baseline_memory_bytes = self._read_memory()
         self._on_primary_handoff = on_primary_handoff
         self._on_primary_changed = on_primary_changed
         self._records: dict[str, ResidencyRecord] = {}
@@ -451,10 +455,10 @@ class ResidentModelManager:
             estimated_bytes=max(
                 1, estimated_bytes or estimate_model_bytes(entry.model_name)
             ),
-            # Process footprint is exposed separately as the authoritative
-            # total. Charging it to the primary row would make that one model
-            # appear to own Python, uvicorn, Metal caches, and every secondary.
-            measured_bytes=0,
+            measured_bytes=max(
+                0,
+                self._read_memory() - self._baseline_memory_bytes,
+            ),
             loaded_at=now,
             last_used_at=now,
             pinned=True,
@@ -822,80 +826,92 @@ class ResidentModelManager:
     ) -> ReplacementProjection:
         """Choose rollback-safe or destructive admission before mutation."""
 
-        current = self._accounted_usage()
+        measured = self._read_memory()
+        reserved = sum(
+            max(record.estimated_bytes, record.measured_bytes)
+            for record in self._records.values()
+            if record.state == "resident"
+        )
+        current = max(measured, reserved)
         limit = self.memory_limit_bytes
-        keep_projected = current + incoming_bytes
-        replacement_releasable = tuple(
-            (record.model_id, max(record.estimated_bytes, record.measured_bytes))
-            for record in candidates
-        )
         replacement_ids = {record.model_id for record in candidates}
-        idle_releasable = tuple(
-            (record.model_id, max(record.estimated_bytes, record.measured_bytes))
-            for record in self._eviction_candidates_locked(replacement_ids)
-        )
-        replacement_bytes = sum(size for _, size in replacement_releasable)
-        evict_projected = max(0, current - replacement_bytes) + incoming_bytes
+        idle_candidates = self._eviction_candidates_locked(replacement_ids)
+
+        def payload(records: list[ResidencyRecord]) -> tuple[tuple[str, int], ...]:
+            return tuple(
+                (
+                    record.model_id,
+                    max(record.estimated_bytes, record.measured_bytes),
+                )
+                for record in records
+            )
+
+        def projected(records: list[ResidencyRecord]) -> int:
+            released_measured = sum(record.measured_bytes for record in records)
+            released_reserved = sum(
+                max(record.estimated_bytes, record.measured_bytes) for record in records
+            )
+            remaining = max(
+                max(0, measured - released_measured),
+                max(0, reserved - released_reserved),
+            )
+            return remaining + incoming_bytes
+
+        keep_projected = current + incoming_bytes
+        evict_projected = projected(candidates)
         if limit <= 0 or keep_projected <= limit:
             return ReplacementProjection(
                 strategy="keep_then_commit",
                 reason="keep_both_fits",
-                models_to_free=replacement_releasable,
+                models_to_free=payload(candidates),
                 current_bytes=current,
                 requested_bytes=incoming_bytes,
                 projected_bytes=evict_projected,
                 limit_bytes=limit,
             )
         if memory_policy == "evict_first_if_needed":
-            selected = list(replacement_releasable)
-            for item in idle_releasable:
+            selected = list(candidates)
+            for record in idle_candidates:
                 if evict_projected <= limit:
                     break
-                selected.append(item)
-                evict_projected = max(0, evict_projected - item[1])
+                selected.append(record)
+                evict_projected = projected(selected)
             if evict_projected <= limit:
                 return ReplacementProjection(
                     strategy="evict_first",
                     reason="role_capacity_evict_first_required",
-                    models_to_free=tuple(selected),
+                    models_to_free=payload(selected),
                     current_bytes=current,
                     requested_bytes=incoming_bytes,
                     projected_bytes=evict_projected,
                     limit_bytes=limit,
                 )
         else:
-            selected_idle: list[tuple[str, int]] = []
+            selected_idle: list[ResidencyRecord] = []
             keep_after_lru = keep_projected
-            for item in idle_releasable:
+            for record in idle_candidates:
                 if keep_after_lru <= limit:
                     break
-                selected_idle.append(item)
-                keep_after_lru = max(0, keep_after_lru - item[1])
+                selected_idle.append(record)
+                keep_after_lru = projected(selected_idle)
             if keep_after_lru <= limit:
                 return ReplacementProjection(
                     strategy="keep_then_commit",
                     reason="keep_both_fits",
-                    models_to_free=tuple(selected_idle) + replacement_releasable,
+                    models_to_free=payload(selected_idle + candidates),
                     current_bytes=current,
                     requested_bytes=incoming_bytes,
-                    projected_bytes=max(0, keep_after_lru - replacement_bytes),
+                    projected_bytes=projected(selected_idle + candidates),
                     limit_bytes=limit,
                 )
-        all_releasable = replacement_releasable + idle_releasable
-        projected_after_all = (
-            max(
-                0,
-                current - sum(size for _, size in all_releasable),
-            )
-            + incoming_bytes
-        )
+        all_releasable = candidates + idle_candidates
         return ReplacementProjection(
             strategy="reject",
             reason="role_capacity_insufficient_after_eviction",
-            models_to_free=all_releasable,
+            models_to_free=payload(all_releasable),
             current_bytes=current,
             requested_bytes=incoming_bytes,
-            projected_bytes=projected_after_all,
+            projected_bytes=projected(all_releasable),
             limit_bytes=limit,
         )
 

@@ -1395,6 +1395,88 @@ async def test_evict_first_falls_back_to_safe_admission_without_group_metadata()
 
 
 @pytest.mark.asyncio
+async def test_evict_first_never_subtracts_unattributed_process_footprint():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+    footprint = [4 * GIB]
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: footprint[0],
+    )
+    footprint[0] = 6 * GIB
+    # Only the 2 GiB growth after manager configuration is attributable to the
+    # startup model; the 4 GiB server baseline cannot be projected as freed.
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(ResidentModelCapacityError) as exc_info:
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
+        )
+
+    projection = exc_info.value.replacement_projection
+    assert projection is not None
+    assert projection.reason == "role_capacity_insufficient_after_eviction"
+    assert projection.current_bytes == 6 * GIB
+    assert projection.projected_bytes == 8 * GIB
+    loader.assert_not_awaited()
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+
+
+@pytest.mark.asyncio
+async def test_evict_first_credits_only_attributed_startup_model_footprint():
+    footprint = [2 * GIB]
+
+    class FootprintEngine(FakeLifecycleEngine):
+        async def stop(self):
+            await super().stop()
+            footprint[0] = 2 * GIB
+
+    registry = ModelRegistry()
+    old_engine = FootprintEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+
+    async def loader(name: str, path: str | None, performance=None):
+        assert old_engine.stopped is True
+        assert footprint[0] == 2 * GIB
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: footprint[0],
+    )
+    footprint[0] = 6 * GIB
+    primary_record = manager.register_primary(primary, estimated_bytes=4 * GIB)
+    assert primary_record.measured_bytes == 4 * GIB
+
+    replacement = await manager.load(
+        "chat-new",
+        estimated_bytes=4 * GIB,
+        replace_group="assistant",
+        memory_policy="evict_first_if_needed",
+        resolved_group="assistant",
+    )
+
+    assert replacement.replacement_projection is not None
+    assert replacement.replacement_projection.strategy == "evict_first"
+    assert replacement.replacement_projection.current_bytes == 6 * GIB
+    assert replacement.replacement_projection.projected_bytes == 6 * GIB
+    assert registry.default_name == "chat-new"
+
+
+@pytest.mark.asyncio
 async def test_busy_reject_precedes_unrelated_capacity_eviction():
     registry = ModelRegistry()
     chat_engine = FakeLifecycleEngine()
