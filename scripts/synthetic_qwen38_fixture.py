@@ -112,6 +112,19 @@ def build(out: Path, num_experts: int = 16, ple_tensors_per_shard: int = 2) -> N
         "weight_map": weight_map,
     }
     (out / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+    # Minimal config so the converter's aux-metadata passthrough is exercised.
+    (out / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "hidden_size": hidden,
+                "num_experts": num_experts,
+                "num_experts_per_tok": 10,
+                "moe_intermediate_size": 640,
+            },
+            indent=2,
+        )
+    )
     print(f"fixture written to {out}: {total_shards} shards, "
           f"{len(weight_map)} weights")
 

@@ -79,6 +79,9 @@ operator confirms ≥140 GiB free at the output root before starting.
 * PLE weights → copied **byte-for-byte** into `model-ple-00001.safetensors` via
   mmap byte-slices (never materialised), preserving source dtype/shape so the
   shard is a fully valid safetensors file.
+* Non-weight metadata (config.json, generation_config.json, tokenizer files)
+  copied verbatim (root level) so the output tree is self-contained loader
+  input; these are never quantized.
 * `model.safetensors.index.json` → covers every original weight exactly once
   (2 extra keys per quantised tensor for scales/biases).
 * `SHA256SUMS.txt` → byte-sorted `sha256  <relative path>` per output file.

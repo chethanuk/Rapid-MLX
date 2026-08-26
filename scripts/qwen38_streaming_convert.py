@@ -142,6 +142,31 @@ def _write_sha256sums(output: Path) -> None:
     (output / "SHA256SUMS.txt").write_text("".join(lines))
 
 
+# Non-weight metadata files copied verbatim from the source root into the
+# output tree (never quantized). Kept explicit rather than a wildcard so we
+# never pull arbitrary blobs (e.g. embedded safetensors dumps) into the output.
+_AUX_COPY_NAMES = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+)
+
+
+def _copy_aux_metadata(source: Path, output: Path) -> list[str]:
+    """Copy non-weight metadata files from ``source`` (shallow, root level only)
+    into ``output`` verbatim. Returns the names copied."""
+    copied: list[str] = []
+    for name in _AUX_COPY_NAMES:
+        src = source / name
+        if src.is_file():
+            _safe_abs(source, Path(name))  # reject symlink escape
+            shutil.copyfile(src, output / name)
+            copied.append(name)
+    return copied
+
+
 # ---------------------------------------------------------------------------
 # Core converter
 # ---------------------------------------------------------------------------
@@ -260,6 +285,12 @@ def convert(
     if current:
         _flush_quantised(output, current, shard_idx, new_weight_map)
 
+    # --- Aux model metadata passthrough -------------------------------
+    # Copy non-weight model metadata (config etc.) verbatim so the output tree
+    # is a self-contained loader input. These files never go through
+    # quantization (they are JSON/tokenizer text, not safetensors shards).
+    aux_copied = _copy_aux_metadata(source, output)
+
     # --- Output index + checksums + ledger ---------------------------------
     out_index = {
         "metadata": {"total_size": source_total_size},
@@ -282,6 +313,7 @@ def convert(
         "shards": [p.name for p in files if p.name.startswith("model-")],
         "num_ple_tensors": len(ple_names),
         "num_quant_tensors": len(q_names),
+        "aux_copied": aux_copied,
         "status": "ok",
     }
 
