@@ -70,6 +70,12 @@ def test_summary_printed_on_hf_success(
 
     with (
         patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        # Not cached at entry — this pull actually transfers bytes, so the
+        # summary reports a download (issue #2349 keeps "Downloaded" for this).
+        patch(
+            "vllm_mlx._download_gate.is_repo_cached",
+            return_value=False,
+        ),
         patch(
             "huggingface_hub.snapshot_download",
             return_value=str(snapshot_dir),
@@ -115,7 +121,12 @@ def test_summary_printed_on_mirror_success(
 
     args = argparse.Namespace(model=repo_id)
 
-    with patch.object(cli, "_try_mirror_prefetch", return_value=True):
+    with (
+        # The snapshot was NOT complete before this pull (the mirror just
+        # fetched it), so the summary reports a real download.
+        patch("vllm_mlx._download_gate.is_repo_cached", return_value=False),
+        patch.object(cli, "_try_mirror_prefetch", return_value=True),
+    ):
         cli.pull_command(args)
 
     out = capsys.readouterr().out
@@ -124,6 +135,44 @@ def test_summary_printed_on_mirror_success(
     parts = line.split()
     assert any(_looks_like_size(p) for p in parts), line
     assert any(p.endswith("s") and p[0].isdigit() for p in parts), line
+
+
+def test_cached_pull_reports_verified_not_downloaded(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully-cached pull must say the cache was verified, not ``Downloaded``.
+
+    Issue #2349: ``rapid-mlx pull <cached-model>`` printed
+    ``Downloaded ... in 3.8s`` after "[10/10] ... cached". The final outcome
+    now reserves ``Downloaded`` + transfer timing for a pull that actually
+    fetched bytes; an already-complete snapshot reports the cache was reused.
+    """
+    repo_id = "mlx-community/Qwen3-0.6B-4bit"
+    revision = "abc123" * 6
+    cache_root = tmp_path / "hub"
+    repo_root = cache_root / "models--mlx-community--Qwen3-0.6B-4bit"
+    refs_dir = repo_root / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    (refs_dir / "main").write_text(revision)
+    snapshot_dir = repo_root / "snapshots" / revision
+    _make_fake_snapshot(snapshot_dir, total_bytes=4096)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    args = argparse.Namespace(model=repo_id)
+
+    with (
+        patch("vllm_mlx._download_gate.is_repo_cached", return_value=True),
+        patch.object(cli, "_try_mirror_prefetch", return_value=True),
+    ):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Already cached" in out, out
+    assert "Downloaded" not in out, out
+    assert "verified (nothing to download)" in out, out
 
 
 def test_summary_not_printed_on_404(

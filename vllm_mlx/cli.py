@@ -6409,8 +6409,19 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
-def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
-    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary."""
+def _print_pull_summary(
+    repo_id: str,
+    snapshot_dir,
+    elapsed: float,
+    *,
+    was_cached: bool = False,
+) -> None:
+    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
+
+    When ``was_cached`` is true the pull reused an already-complete snapshot
+    (nothing was transferred), so the summary says the cache was verified
+    rather than claiming a download + transfer time (issue #2349).
+    """
     import os as _os
 
     from vllm_mlx.model_aliases import resolve_subfolder
@@ -6424,10 +6435,16 @@ def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
         if _os.path.isdir(_candidate):
             snapshot_dir = _candidate
     size = _snapshot_size_bytes(snapshot_dir)
-    print(
-        f"  Downloaded {repo_id} — {_format_bytes(size)} in "
-        f"{_format_pull_duration(elapsed)}"
-    )
+    if was_cached:
+        print(
+            f"  Already cached {repo_id} — {_format_bytes(size)} verified "
+            f"(nothing to download)"
+        )
+    else:
+        print(
+            f"  Downloaded {repo_id} — {_format_bytes(size)} in "
+            f"{_format_pull_duration(elapsed)}"
+        )
 
     # Activation funnel (docs/telemetry-activation.md): a successful pull is
     # the ``model_pull`` milestone (an activation, NOT inference-engaged).
@@ -6558,6 +6575,16 @@ def pull_command(args):
         )
         sys.exit(1)
 
+    # Was the snapshot already complete before this pull? If so, nothing
+    # will be transferred — the final summary must say the cache was verified
+    # rather than claiming a download + transfer time (issue #2349).
+    try:
+        from vllm_mlx._download_gate import is_repo_cached
+
+        was_cached = is_repo_cached(repo_id)
+    except Exception:
+        was_cached = False
+
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
     # before adding more. huggingface_hub gives each attempt a uniquely-named
     # ``.incomplete`` blob and removes it while unwinding, which a killed
@@ -6608,7 +6635,9 @@ def pull_command(args):
         except OSError:
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
-        _print_pull_summary(repo_id, snapshot_dir, time.monotonic() - t0)
+        _print_pull_summary(
+            repo_id, snapshot_dir, time.monotonic() - t0, was_cached=was_cached
+        )
         return
     # Mirror returned False — fall through to plain snapshot_download.
     # Either the catalog was unreachable, the alias isn't catalog-listed,
@@ -6703,7 +6732,7 @@ def pull_command(args):
             sys.exit(1)
         raise
     print(f"  Cached at: {path}")
-    _print_pull_summary(repo_id, path, time.monotonic() - t0)
+    _print_pull_summary(repo_id, path, time.monotonic() - t0, was_cached=was_cached)
 
 
 def rm_command(args):
