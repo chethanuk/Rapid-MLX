@@ -949,6 +949,84 @@ class TestStreamingModels:
         )
         assert chunk.usage.total_tokens == 15
 
+    @pytest.mark.asyncio
+    async def test_guided_stream_helper_generates_default_response_id(self):
+        """Direct helper callers retain the existing generated-ID contract."""
+        from vllm_mlx.config import reset_config
+        from vllm_mlx.engine.base import GenerationOutput
+        from vllm_mlx.routes.chat import stream_chat_completion_guided
+
+        class _GuidedEngine:
+            async def generate_with_schema(self, **_kwargs):
+                return GenerationOutput(
+                    text="{}",
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        cfg = reset_config()
+        cfg.model_name = "test-model"
+        request = ChatCompletionRequest(
+            model="test-model",
+            stream=True,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        chunks = [
+            chunk
+            async for chunk in stream_chat_completion_guided(
+                _GuidedEngine(),
+                request.messages,
+                request,
+                {"type": "object"},
+            )
+        ]
+        first = json.loads(chunks[0].removeprefix("data: "))
+        assert first["id"].startswith("chatcmpl-")
+
+    @pytest.mark.asyncio
+    async def test_strict_stream_helper_generates_default_response_id(self):
+        """Strict helper direct callers also retain generated IDs."""
+        from vllm_mlx.config import reset_config
+        from vllm_mlx.engine.base import GenerationOutput
+        from vllm_mlx.routes.chat import stream_chat_completion_strict_postgen
+
+        class _StreamEngine:
+            preserve_native_tool_format = False
+            tokenizer = None
+
+            async def stream_chat(self, _messages, **_kwargs):
+                yield GenerationOutput(
+                    text="{}",
+                    new_text="{}",
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        cfg = reset_config()
+        cfg.model_name = "test-model"
+        request = ChatCompletionRequest(
+            model="test-model",
+            stream=True,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        chunks = [
+            chunk
+            async for chunk in stream_chat_completion_strict_postgen(
+                _StreamEngine(),
+                request.messages,
+                request,
+                {"type": "object"},
+            )
+        ]
+        first = json.loads(chunks[0].removeprefix("data: "))
+        assert first["id"].startswith("chatcmpl-")
+
 
 class TestModelSerialization:
     """Tests for model serialization (model_dump / JSON)."""
