@@ -81,6 +81,10 @@ def _load(checkpoint: Path, backend: str):
     return model, language.model.layers, language
 
 
+def _logits(result, backend: str) -> mx.array:
+    return result if backend == "rapid" else result.logits
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=("rapid", "upstream"), required=True)
@@ -123,8 +127,37 @@ def main() -> int:
         result = language(token_ids, cache=full_cache)
     finally:
         layer_class.__call__ = original_layer_call
-    logits = result if args.backend == "rapid" else result.logits
+    logits = _logits(result, args.backend)
     layer_last = mx.stack([value[:, -1, :] for value in captured_layers])
+
+    # Cross the checkpoint-declared 2,048-token QSA admission budget by the
+    # smallest complete compressed block. This keeps the pinned reference's
+    # dense selector bounded while forcing both implementations through sparse
+    # block selection. The following one-token call then proves that the
+    # prefill-owned GDN/QSA/PLE caches remain numerically aligned at decode.
+    sparse_length = 2052
+    sparse_ids = (mx.arange(sparse_length, dtype=mx.int32) % 32000)[None, :]
+    sparse_hidden = _input((1, sparse_length, 2560), scale=0.02)
+    sparse_qsa_cache = language.make_cache()[3]
+    if args.backend == "rapid":
+        sparse_qsa = layers[3].self_attn(sparse_hidden, cache=sparse_qsa_cache)
+    else:
+        sparse_qsa = layers[3].self_attn(
+            sparse_hidden,
+            mask="causal",
+            cache=sparse_qsa_cache,
+            position_ids=None,
+        )
+    mx.eval(sparse_qsa)
+
+    sparse_full_cache = language.make_cache()
+    sparse_result = language(sparse_ids, cache=sparse_full_cache)
+    sparse_logits = _logits(sparse_result, args.backend)
+    sparse_last = sparse_logits[:, -1, :]
+    mx.eval(sparse_last)
+    next_token = mx.argmax(sparse_last, axis=-1).astype(mx.int32)[:, None]
+    decode_result = language(next_token, cache=sparse_full_cache)
+    decode_logits = _logits(decode_result, args.backend)[:, -1, :]
 
     probes = {
         "gdn": gdn,
@@ -134,6 +167,9 @@ def main() -> int:
         "moe": moe,
         "layer_last": layer_last,
         "logits_last": logits[:, -1, :],
+        "sparse_qsa_last": sparse_qsa[:, -1, :],
+        "sparse_logits_last": sparse_last,
+        "cached_decode_logits_last": decode_logits,
     }
     mx.eval(list(probes.values()))
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +185,11 @@ def main() -> int:
                 "backend": args.backend,
                 "output": str(args.output),
                 "probes": {name: list(value.shape) for name, value in probes.items()},
-                "greedy_token": int(mx.argmax(logits[:, -1, :], axis=-1).item()),
+                "greedy_tokens": {
+                    "short": int(mx.argmax(logits[:, -1, :], axis=-1).item()),
+                    "sparse_prefill": int(mx.argmax(sparse_last, axis=-1).item()),
+                    "cached_decode": int(mx.argmax(decode_logits, axis=-1).item()),
+                },
             },
             indent=2,
         )

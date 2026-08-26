@@ -65,6 +65,11 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 python -m pytest -q tests/test_qwen4_exp_artifact_parity.py
 ```
 
+The gate covers the fixed short component/logit probes, then a 2,052-token
+probe that crosses the 2,048-token sparse-QSA budget by one complete compressed
+block, followed by the first cached decode token. Both logit probes require the
+same greedy token in addition to the component tolerance.
+
 ## Real-model evidence
 
 The original 20-case panel covers reasoning, code, Chinese, tool calls, and four

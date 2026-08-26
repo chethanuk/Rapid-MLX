@@ -75,4 +75,9 @@ def test_real_qwen4_exp_q4_matches_pinned_reference(tmp_path: Path) -> None:
         for probe in rapid.files:
             difference = np.abs(rapid[probe] - expected[probe])
             assert float(difference.max(initial=0.0)) <= 1e-3, probe
-        assert np.argmax(rapid["logits_last"]) == np.argmax(expected["logits_last"])
+        for logits_probe in (
+            "logits_last",
+            "sparse_logits_last",
+            "cached_decode_logits_last",
+        ):
+            assert np.argmax(rapid[logits_probe]) == np.argmax(expected[logits_probe])
