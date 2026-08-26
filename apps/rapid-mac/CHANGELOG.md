@@ -38,6 +38,21 @@ can actually understand.
   prevents models from selecting general web search or claiming the advertised
   Weather tool is unavailable. ([#2222](https://github.com/raullenchai/Rapid-MLX/issues/2222),
   [#2327](https://github.com/raullenchai/Rapid-MLX/pull/2327))
+- **Desktop photo input uses the updated bundled vision runtime.** Release
+  validation now requires image-dependent answers from two cached vision
+  families before the sidecar can ship. ([#2384](https://github.com/raullenchai/Rapid-MLX/pull/2384),
+  [#2380](https://github.com/raullenchai/Rapid-MLX/issues/2380))
+- **API validation fails early with actionable fields.** Requests accept scalar
+  or array `stop`, reject invalid timeouts and non-boolean residency controls,
+  and identify the exact invalid load field. ([#2367](https://github.com/raullenchai/Rapid-MLX/pull/2367),
+  [#2371](https://github.com/raullenchai/Rapid-MLX/pull/2371),
+  [#2372](https://github.com/raullenchai/Rapid-MLX/pull/2372))
+- **Guided setup accurately describes data preservation.** Its confirmation no
+  longer implies that onboarding reset deletes user data. ([#2239](https://github.com/raullenchai/Rapid-MLX/issues/2239),
+  [#2322](https://github.com/raullenchai/Rapid-MLX/pull/2322))
+- **Share CLI contracts use supported invocation forms and run in CI.**
+  ([#2377](https://github.com/raullenchai/Rapid-MLX/issues/2377),
+  [#2382](https://github.com/raullenchai/Rapid-MLX/pull/2382))
 
 ### Documentation
 
