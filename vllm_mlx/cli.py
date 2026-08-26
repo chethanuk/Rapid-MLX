@@ -1656,9 +1656,12 @@ def _offline_hub_mode_active() -> bool:
     """
     from huggingface_hub.constants import _is_true
 
-    return _is_true(
+    # huggingface_hub's `_is_true` is untyped (returns Any); narrow to bool so
+    # this helper stays on the shrink-only mypy budget (no-any-return).
+    offline: bool = _is_true(
         os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
     )
+    return offline
 
 
 def _offline_uncached_error(model_name: str) -> str:
