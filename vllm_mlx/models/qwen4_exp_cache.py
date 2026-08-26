@@ -10,6 +10,7 @@ filter, extend, and extract it without a model-specific scheduler patch.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 
 import mlx.core as mx
@@ -201,17 +202,23 @@ class QSAIndexCache(ArraysCache):
 
     @property
     def meta_state(self):
-        return (
-            self.compress_ratio,
-            list(self._offsets),
-            list(self._compressed_counts),
+        return json.dumps(
+            {
+                "compress_ratio": self.compress_ratio,
+                "offsets": self._offsets,
+                "compressed_counts": self._compressed_counts,
+            },
+            separators=(",", ":"),
         )
 
     @meta_state.setter
     def meta_state(self, value):
-        self.compress_ratio = int(value[0])
-        self._offsets = [int(item) for item in value[1]]
-        self._compressed_counts = [int(item) for item in value[2]]
+        decoded = json.loads(value)
+        self.compress_ratio = int(decoded["compress_ratio"])
+        self._offsets = [int(item) for item in decoded["offsets"]]
+        self._compressed_counts = [
+            int(item) for item in decoded["compressed_counts"]
+        ]
         self._valid_until = None
         self._right_padding = None
         self.left_padding = (

@@ -127,7 +127,10 @@ def _vendored_cache_class_names(cache: list[Any]) -> set[str]:
     pending = list(cache)
     while pending:
         item = pending.pop()
-        if type(item).__module__ == "vllm_mlx.models.deepseek_v4_cache":
+        if type(item).__module__ in {
+            "vllm_mlx.models.deepseek_v4_cache",
+            "vllm_mlx.models.qwen4_exp_cache",
+        }:
             found.add(type(item).__name__)
         pending.extend(getattr(item, "caches", ()))
     return found
@@ -210,6 +213,7 @@ def _load_prompt_cache_compat(path: str) -> list[Any]:
         DeepseekV4PoolingCache,
         PoolingCache,
     )
+    from vllm_mlx.models.qwen4_exp_cache import QSAIndexCache
 
     registry = {
         cls.__name__: cls
@@ -218,6 +222,7 @@ def _load_prompt_cache_compat(path: str) -> list[Any]:
             BatchPoolingCache,
             DeepseekV4PoolingCache,
             BatchDeepseekV4PoolingCache,
+            QSAIndexCache,
         )
     }
     declared_vendored = set(json.loads(metadata.get(_VENDORED_STATE_METADATA, "[]")))
