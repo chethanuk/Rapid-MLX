@@ -323,7 +323,7 @@ enum ModelSizing {
             let toFree = max(0, usedGB + footprintGB - threshold / 100 * totalGB)
             let freeAction = max(1, Int(toFree.rounded(.up)))
             let release = plannedReleaseGB > 0
-                ? "Rapid will first release about \(max(1, Int(plannedReleaseGB.rounded()))) GB from the current model. "
+                ? "The switch accounts for about \(max(1, Int(plannedReleaseGB.rounded()))) GB released from the previous model. "
                 : ""
             let facts = "Loading it would then put memory use at about \(projectedPercent)% of \(Int(totalGB.rounded())) GB."
             switch severity {

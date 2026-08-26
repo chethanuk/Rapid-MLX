@@ -484,6 +484,36 @@ struct ModelResidencyTests {
         ) == nil)
     }
 
+    @Test("Post-stop host growth wins over the earlier replacement projection")
+    func postStopGrowthUsesConservativeAdmission() throws {
+        let planned = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14),
+            residency: residency(alias: "old-chat", measuredGB: 6, modality: "text"),
+            plan: .releaseResidentModels
+        ))
+        let resolved = try #require(ServerManager.memorySnapshotForAdmission(
+            planned: planned,
+            live: memorySnapshot(totalGB: 18, usedGB: 10)
+        ))
+
+        #expect(resolved.usedBytes == 10 * UInt64(1 << 30))
+    }
+
+    @Test("A slower post-stop probe cannot discard the measured release credit")
+    func stalePostStopProbeUsesConservativeProjection() throws {
+        let planned = try #require(ServerManager.memoryAdmissionForTransition(
+            host: memorySnapshot(totalGB: 18, usedGB: 14),
+            residency: residency(alias: "old-chat", measuredGB: 6, modality: "text"),
+            plan: .releaseResidentModels
+        ))
+        let resolved = try #require(ServerManager.memorySnapshotForAdmission(
+            planned: planned,
+            live: memorySnapshot(totalGB: 18, usedGB: 6)
+        ))
+
+        #expect(resolved.usedBytes == 8 * UInt64(1 << 30))
+    }
+
     @Test("Engine replacement projection produces a truthful insufficient-budget reason")
     func replacementProjectionRejectionCopy() {
         let gib = UInt64(1) << 30

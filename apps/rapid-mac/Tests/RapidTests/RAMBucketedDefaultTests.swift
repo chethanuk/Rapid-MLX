@@ -95,13 +95,14 @@ struct RAMBucketedDefaultTests {
         let gib = Double(UInt64(1) << 30)
         for tier in RAMBucketedDefault.tiers {
             for pick in tier.picks {
-                // The transition plan has already released the outgoing model.
-                // Pin the boundary at exactly physical RAM: advisory is allowed,
-                // but a curated pick must not be blocked as "risky" there.
-                let baselineGB = max(0, tier.floorGB - pick.footprintGB)
+                // Footprint and tier floor are independent measured/catalog
+                // values. A curated pick larger than its Mac is invalid even
+                // before live host pressure enters the projection.
+                #expect(pick.footprintGB <= tier.floorGB,
+                        "\(pick.alias) exceeds its own \(tier.floorGB) GB tier")
                 let safety = ModelSizing.memorySafety(
                     footprintGB: pick.footprintGB,
-                    usedBytes: UInt64(baselineGB * gib),
+                    usedBytes: 0,
                     totalBytes: UInt64(tier.floorGB * gib)
                 )
                 #expect(!ModelSizing.requiresMemoryConfirmation(safety),

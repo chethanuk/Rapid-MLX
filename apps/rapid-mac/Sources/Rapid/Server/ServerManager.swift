@@ -1552,6 +1552,26 @@ final class ServerManager {
         let plannedReleaseBytes: UInt64
     }
 
+    /// Resolve one process-replacement admission against post-stop host truth.
+    /// The projected pre-stop sample knows which model bytes the transition
+    /// releases; the live sample catches memory another process consumed while
+    /// `stop()` was awaiting termination. The larger used value is the safe
+    /// answer. If either probe is unavailable, retain the evidence we do have.
+    nonisolated static func memorySnapshotForAdmission(
+        planned: MemoryAdmissionContext?,
+        live: MemoryProbe.Snapshot?
+    ) -> MemoryProbe.Snapshot? {
+        guard let planned else { return live }
+        guard let live else { return planned.snapshot }
+        return MemoryProbe.Snapshot(
+            totalBytes: live.totalBytes,
+            usedBytes: min(
+                live.totalBytes,
+                max(live.usedBytes, planned.snapshot.usedBytes)
+            )
+        )
+    }
+
     /// One-shot host-memory view for the transition the lifecycle will run.
     ///
     /// A process replacement releases every resident engine before spawning
@@ -1956,7 +1976,10 @@ final class ServerManager {
         // started; a genuine free-RAM drop is bounded by the respawn-attempt
         // budget, and the user's manual restart still routes through the guard.
         if !bypassMemoryGuard, !isAutoRespawn,
-           let snapshot = memoryAdmission?.snapshot ?? memorySnapshotProvider() {
+           let snapshot = Self.memorySnapshotForAdmission(
+               planned: memoryAdmission,
+               live: memorySnapshotProvider()
+           ) {
             let footprint = ModelSizing.estimate(alias: trimmedAlias)
             let safety = ModelSizing.memorySafety(
                 footprint: footprint,
