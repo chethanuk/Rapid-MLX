@@ -1598,6 +1598,8 @@ class _StatusSpinner:
 def _try_mirror_prefetch(
     model_name: str,
     on_pull_start: Callable[[], None] | None = None,
+    *,
+    out: dict | None = None,
 ) -> bool:
     """Pre-fetch a HuggingFace repo via R2-first / HF-fallback (per file).
 
@@ -1640,7 +1642,10 @@ def _try_mirror_prefetch(
         # deliberately removed). Use the legacy HF path.
         return False
     return download_with_mirror_fallback(
-        model_name, on_pull_start=on_pull_start, allow_patterns=allow_patterns
+        model_name,
+        on_pull_start=on_pull_start,
+        allow_patterns=allow_patterns,
+        out=out,
     )
 
 
@@ -6409,8 +6414,89 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
-def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
-    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary."""
+def _hf_bytes_bar_class():
+    """Return a ``tqdm_class`` for ``snapshot_download`` that records bytes.
+
+    huggingface_hub builds its ``snapshot_download`` progress from several
+    bars via ``tqdm_class``: a network-transfer bar (``unit="B"``, desc
+    "Download complete"/"Downloading bytes"), a local-reconstruction bar
+    (``unit="B"``, desc "Reconstruction…"),
+    and a file bar (``unit="it"``, desc "Fetching N files") that advances once
+    per completed file, cache hits included.
+
+    Only the NETWORK-TRANSFER bar measures actual bytes fetched; the
+    reconstruction and file bars count local disk writes / file completions,
+    so they must NOT count as network traffic (codex round-4 BLOCKING #2).
+    We therefore track instances only for the transfer bar (desc starts with
+    "Download"), and additionally set ``_touched`` on ANY ``update()`` call —
+    including ``n=0`` — so a fetched zero-byte file is still recognized as a
+    network fetch even though it records no bytes (codex round-4 BLOCKING #3).
+
+    Returns a real ``tqdm`` subclass (not a callable) because HF hands it to
+    code that expects class methods (e.g. ``get_lock``). Defined lazily to
+    avoid a module-scope ``tqdm`` import (the mirror path never needs it).
+    """
+    from tqdm import tqdm
+
+    class _HFBytesBar(tqdm):
+        _bar_instances: list["_HFBytesBar"] = []
+
+        def __init__(self, *args, **kwargs):
+            self._recorded: list[int] = []
+            self._touched = False
+            super().__init__(*args, **kwargs)
+            desc = str(getattr(self, "desc", "") or "")
+            if getattr(self, "unit", None) == "B" and desc.startswith("Download"):
+                self._bar_instances.append(self)
+
+        def update(self, n=1):
+            # Flag any update() call — even n=0 — as evidence a network fetch
+            # was orchestrated for this file (covers zero-byte files).
+            self._touched = True
+            if n:
+                self._recorded.append(int(n))
+            return super().update(n)
+
+    return _HFBytesBar
+
+
+def _hf_network_fetch(bar_cls) -> bool | None:
+    """Did the HF pull fetch bytes over the network? True/False/None.
+
+    Considers only the network-transfer bar (see :func:`_hf_bytes_bar_class`).
+    True if that bar observed any ``update()`` — i.e. a file was fetched,
+    whether it carried bytes or was zero-byte (codex round-4 #3); False if the
+    transfer bar was constructed but never updated (a clean no-op cache hit);
+    None if no transfer bar was constructed at all (offline/anomalous
+    downloader) — the caller treats None as unknown and reports a download
+    rather than over-claiming a cache hit.
+    """
+    bars = bar_cls._bar_instances
+    if not bars:
+        return None
+    return any(b._touched for b in bars)
+
+
+def _print_pull_summary(
+    repo_id: str,
+    snapshot_dir,
+    elapsed: float,
+    *,
+    was_cached: bool | None = None,
+) -> None:
+    """Emit the one-line ``Downloaded ... — <size> in <duration>`` summary.
+
+    ``was_cached`` is the downloader's authoritative "nothing was transferred
+    this pull" verdict (issue #2349):
+    * ``True``  — the mirror/HF transfer account proves zero bytes were
+      fetched -> "Already cached ... verified (nothing to download)".
+    * ``False`` — the downloader reports it fetched bytes -> "Downloaded".
+    * ``None``  — unknown (e.g. the HF-fallback's downloader could not prove
+      either way) -> "Downloaded", never a false cache claim.
+    This is derived from the downloader's own transfer result, never inferred
+    from pre/post filesystem state — a moved ``main`` that fetches new blobs
+    reports a real download.
+    """
     import os as _os
 
     from vllm_mlx.model_aliases import resolve_subfolder
@@ -6424,10 +6510,19 @@ def _print_pull_summary(repo_id: str, snapshot_dir, elapsed: float) -> None:
         if _os.path.isdir(_candidate):
             snapshot_dir = _candidate
     size = _snapshot_size_bytes(snapshot_dir)
-    print(
-        f"  Downloaded {repo_id} — {_format_bytes(size)} in "
-        f"{_format_pull_duration(elapsed)}"
-    )
+    # "Already cached" only on a proven no-transfer (``was_cached is True``);
+    # ``None`` (unknown) falls through to "Downloaded" rather than a false
+    # cache claim.
+    if was_cached is True:
+        print(
+            f"  Already cached {repo_id} — {_format_bytes(size)} verified "
+            f"(nothing to download)"
+        )
+    else:
+        print(
+            f"  Downloaded {repo_id} — {_format_bytes(size)} in "
+            f"{_format_pull_duration(elapsed)}"
+        )
 
     # Activation funnel (docs/telemetry-activation.md): a successful pull is
     # the ``model_pull`` milestone (an activation, NOT inference-engaged).
@@ -6558,6 +6653,12 @@ def pull_command(args):
         )
         sys.exit(1)
 
+    # The pull summary says "already cached / nothing to download" only from
+    # the DOWNLOADER's own transfer account (mirror/HF bytes fetched), never
+    # from a filesystem guess. ``_was_cached`` is threaded to the summary.
+    _was_cached: bool | None = None
+    _mirror_out: dict = {}
+
     # Reclaim scratch files stranded by earlier interrupted pulls of THIS repo
     # before adding more. huggingface_hub gives each attempt a uniquely-named
     # ``.incomplete`` blob and removes it while unwinding, which a killed
@@ -6590,7 +6691,7 @@ def pull_command(args):
             "  R2 mirror skipped: a --bits/--format variant was requested "
             "(the mirror cannot narrow to one variant yet)."
         )
-    if variant_allow is None and _try_mirror_prefetch(repo_id):
+    if variant_allow is None and _try_mirror_prefetch(repo_id, out=_mirror_out):
         from pathlib import Path
 
         try:
@@ -6608,7 +6709,15 @@ def pull_command(args):
         except OSError:
             snapshot_dir = repo_root
             print(f"  Cached at: {repo_root}")
-        _print_pull_summary(repo_id, snapshot_dir, time.monotonic() - t0)
+        # ``network_fetch`` is the mirror's authoritative "any bytes fetched
+        # this pull" verdict (covers a fetched zero-byte file, codex #4).
+        _was_cached = not _mirror_out.get("network_fetch", True)
+        _print_pull_summary(
+            repo_id,
+            snapshot_dir,
+            time.monotonic() - t0,
+            was_cached=_was_cached,
+        )
         return
     # Mirror returned False — fall through to plain snapshot_download.
     # Either the catalog was unreachable, the alias isn't catalog-listed,
@@ -6672,11 +6781,17 @@ def pull_command(args):
                     f"fetching only {_subfolder}/ (the folder rapid-mlx serves)."
                 )
             _allow = [f"{_subfolder}/*"] if _subfolder else None
+        # HF-fallback runs only after a mirror miss — but a cached HF no-op is
+        # still possible and must be labelled "Already cached", so instrument
+        # the byte bars (codex round-3/4 BLOCKING #2/#3). A fully-cached pull
+        # records zero bytes on the ``unit="B"`` bars -> verified.
+        _bar_cls = _hf_bytes_bar_class()
         path = (
-            snapshot_download(repo_id, allow_patterns=_allow)
+            snapshot_download(repo_id, allow_patterns=_allow, tqdm_class=_bar_cls)
             if _allow
-            else snapshot_download(repo_id)
+            else snapshot_download(repo_id, tqdm_class=_bar_cls)
         )
+        _was_cached = _hf_network_fetch(_bar_cls) is False
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
@@ -6703,7 +6818,12 @@ def pull_command(args):
             sys.exit(1)
         raise
     print(f"  Cached at: {path}")
-    _print_pull_summary(repo_id, path, time.monotonic() - t0)
+    _print_pull_summary(
+        repo_id,
+        path,
+        time.monotonic() - t0,
+        was_cached=_was_cached,
+    )
 
 
 def rm_command(args):
