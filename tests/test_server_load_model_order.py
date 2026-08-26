@@ -255,6 +255,7 @@ async def test_startup_and_runtime_use_identical_checkpoint_lane_contract(
     expected_force_text,
 ):
     """Startup and residency must hand the same resolved path/lane to engine."""
+    pytest.importorskip("mlx")  # checkpoint-lane contract drives real mlx engine
     from vllm_mlx import server
     from vllm_mlx.model_profile import ModelProfile
 
@@ -488,6 +489,7 @@ def test_load_model_infers_programmatic_max_tokens_explicit(monkeypatch):
 def test_load_model_mtp_kwarg_translates_to_scheduler_config(
     monkeypatch, scheduler_config_stub
 ):
+    pytest.importorskip("mlx")  # mtp spec-decode path imports mlx.core (no-MLX job)
     from vllm_mlx import server
 
     monkeypatch.setattr(server, "BatchedEngine", _StubEngine)
