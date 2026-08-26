@@ -152,53 +152,63 @@ def _prop_parser():
     return _make
 
 
-def test_slow_runner_scales_threshold_up(mb):
+def _bench_with_cal(mb, make, eps_mult, speedup, monkeypatch):
+    """Exercise ``bench_one`` through the REAL calibration path by mocking the
+    runner-speed measurement (we cannot make the shared test machine 5× slower).
+
+    The parser workload is CPU-bound and sized to cost ``BASE_US*ε*speedup`` μs
+    (each μs of work is one calibration-op's worth), so it reproduces what a
+    real parser experiences on a ``speedup``× slower runner, and the mocked
+    calibration returns exactly that ``speedup``. The verdict must then depend
+    only on ``ε`` vs ``REGRESSION_LIMIT`` — proving runner-speed independence
+    (#2344).
+    """
+    base_us = mb.BASE_US["hermes"]
+    limit = mb.REGRESSION_LIMIT
+    target = base_us * limit * eps_mult * speedup
+    monkeypatch.setattr(mb, "_measure_runner_speedup", lambda: float(speedup))
+    return mb.bench_one("hermes", make(target), "x", iters=_CAL_MIN_ITERS_FOR_TEST)
+
+
+# Shared by the two speed tests: enough iters to trigger multi-round
+# interleaving but still fast.
+_CAL_MIN_ITERS_FOR_TEST = 50
+
+
+def test_slow_runner_scales_threshold_up(mb, monkeypatch):
     """A slower runner produces a proportionally higher effective threshold,
     and a speed-proportional parser keeps the SAME verdict on both (the
     relative gate does not flake on shared-runner speed, #2344)."""
     make = _prop_parser()
-    # A healthy parser at 5× hermes base (well under REGRESSION_LIMIT).
-    base_us = mb.BASE_US["hermes"]
-    on_m3 = mb.bench_one(
-        "hermes",
-        make(base_us * 5.0 * 1.0),
-        "x",
-        iters=5,
-        runner_speedup=1.0,
-    )
-    on_slow = mb.bench_one(
-        "hermes",
-        make(base_us * 5.0 * 5.0),
-        "x",
-        iters=5,
-        runner_speedup=5.0,
-    )
-    # Threshold scales with the runner; the same relative parser passes both.
+    # A healthy parser, well under REGRESSION_LIMIT (eps=0.3×LIMIT), so
+    # timing noise can't tip it over the boundary.
+    on_m3 = _bench_with_cal(mb, make, 0.3, 1.0, monkeypatch)
+    on_slow = _bench_with_cal(mb, make, 0.3, 5.0, monkeypatch)
     assert on_slow.threshold_us > on_m3.threshold_us
     assert on_m3.passed and on_slow.passed
 
 
-def test_relative_budget_catches_regression_across_runner_speeds(mb):
+def test_relative_budget_catches_regression_across_runner_speeds(mb, monkeypatch):
     """The gate is a ratio: a parser at REGRESSION_LIMIT × its base fails at
     EVERY runner speed (fast M3 and 5×-slower shared runner alike), and one
     just under the limit passes at every speed (#2344)."""
     make = _prop_parser()
+    # Under the limit (ε=0.8×LIMIT): passes on 1x and 5x runners.
+    assert _bench_with_cal(mb, make, 0.8, 1.0, monkeypatch).passed
+    assert _bench_with_cal(mb, make, 0.8, 5.0, monkeypatch).passed
+    # Over the limit (ε=1.2×LIMIT): fails on 1x and 5x runners alike.
+    assert not _bench_with_cal(mb, make, 1.2, 1.0, monkeypatch).passed
+    assert not _bench_with_cal(mb, make, 1.2, 5.0, monkeypatch).passed
+
+
+def test_speedup_override_passthrough(mb, monkeypatch):
+    """The explicit ``runner_speedup`` override path still works for tests that
+    hand a scalar (backward-compat with pre-interleave unit semantics)."""
+    make = _prop_parser()
     base_us = mb.BASE_US["hermes"]
-    limit = mb.REGRESSION_LIMIT
-
-    def bench(speedup: float, eps_mult: float):
-        # Cost scales with speedup, threshold scales with speedup too.
-        target = base_us * limit * eps_mult * speedup
-        return mb.bench_one(
-            "hermes", make(target), "x", iters=5, runner_speedup=speedup
-        )
-
-    # Under the limit: passes on 1x and 5x runners.
-    assert bench(1.0, 0.8).passed
-    assert bench(5.0, 0.8).passed
-    # Over the limit: fails on 1x and 5x runners alike.
-    assert not bench(1.0, 1.2).passed
-    assert not bench(5.0, 1.2).passed
+    r = mb.bench_one("hermes", make(base_us * 5.0), "x", iters=20, runner_speedup=1.0)
+    assert r.passed
+    assert r.threshold_us == pytest.approx(mb.BASE_US["hermes"] * mb.REGRESSION_LIMIT)
 
 
 def test_calibration_returns_positive_finite(mb):

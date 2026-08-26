@@ -211,34 +211,58 @@ def bench_one(
     sample: str,
     iters: int,
     *,
-    runner_speedup: float = 1.0,
+    runner_speedup: float | None = None,
 ) -> BenchResult:
     """Run ``fn(sample)`` ``iters`` times, return timing + verdict.
 
-    The effective threshold is the parser's M3 base scaled by the same-run
-    runner speedup and the relative regression limit (see module constants):
-    ``BASE_US[name] × REGRESSION_LIMIT × runner_speedup``. With
-    ``runner_speedup`` measured in the same process, the verdict is a
-    relative-budget regression check that does not flake on shared-runner
-    speed variance (#2344).
+    Relative-budget gate (issue #2344): the parser's M3 base scaled by the
+    same-run runner speedup and the regression limit,
+    ``threshold = BASE_US[name] × REGRESSION_LIMIT × speedup``. Because both
+    the parser measurement and the calibration baseline scale with the same
+    runner speed, the verdict reduces to ``ε ≤ REGRESSION_LIMIT`` — a
+    runner-speed-INDEPENDENT order-of-magnitude regression check that does
+    not flake on shared-hosted-runner variance.
 
-    Uses ``perf_counter`` rather than ``time.time()`` for the
-    monotonic+high-resolution guarantees the bench needs.
+    To be robust to load changing mid-run, calibration and the parser bench
+    are INTERLEAVED: each round times the calibration then the parser
+    immediately after, and the verdict uses the worst (max) ε over all
+    rounds. A regressed parser is slow in every round, so it fails; a
+    transiently-idle parser adjacent to a busy calibration reads as FAST
+    relative to that busy baseline (low ε), so it does not false-fail.
+
+    ``runner_speedup`` overrides the calibration when provided (unit tests);
+    when ``None`` (production), each round's speedup is measured live.
     """
     base_us = BASE_US.get(name, 5.0)
-    threshold_us = base_us * REGRESSION_LIMIT * runner_speedup
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        fn(sample)
-    dt = time.perf_counter() - t0
-    us_per_call = (dt / iters) * 1_000_000
+    # Interleave calibration and parser timing across rounds; with a tiny
+    # ``iters`` (unit tests) a single round suffices.
+    rounds = _CAL_REPS if iters >= _CAL_REPS else 1
+    per_round = max(1, iters // rounds)
+    pairs: list[tuple[float, float]] = []
+    t_total0 = time.perf_counter()
+    for _ in range(rounds):
+        speedup = (
+            _measure_runner_speedup() if runner_speedup is None else runner_speedup
+        )
+        t0 = time.perf_counter()
+        for _ in range(per_round):
+            fn(sample)
+        dt = time.perf_counter() - t0
+        us = (dt / per_round) * 1_000_000
+        pairs.append((us, speedup))
+    total_ms = (time.perf_counter() - t_total0) * 1000
+    # Worst-case ε across all paired rounds (max(parser_us / (base × speedup))).
+    eps = max(us / (base_us * speedup) for us, speedup in pairs)
+    last_speedup = pairs[-1][1]
+    threshold_us = base_us * REGRESSION_LIMIT * last_speedup
+    us_per_call = pairs[0][0]
     return BenchResult(
         name=name,
-        total_ms=dt * 1000,
+        total_ms=total_ms,
         us_per_call=us_per_call,
         iters=iters,
         threshold_us=threshold_us,
-        passed=us_per_call <= threshold_us,
+        passed=eps <= REGRESSION_LIMIT,
     )
 
 
@@ -281,8 +305,9 @@ def main(argv: list[str] | None = None) -> int:
         if not sample:
             print(f"  [skip] {name}: no sample wired", file=sys.stderr)
             continue
-        speedup = _measure_runner_speedup()
-        r = bench_one(name, fn, sample, args.iters, runner_speedup=speedup)
+        # bench_one interleaves calibration with the parser bench itself
+        # (issue #2344 #2); no explicit upfront speedup here.
+        r = bench_one(name, fn, sample, args.iters)
         results.append(r)
         verdict = "OK" if r.passed else "FAIL"
         print(f"{r.name:<12}{r.us_per_call:>12.2f}{r.threshold_us:>14.2f}{verdict:>10}")
