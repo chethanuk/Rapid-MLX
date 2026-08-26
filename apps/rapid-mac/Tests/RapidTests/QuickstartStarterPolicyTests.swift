@@ -120,16 +120,21 @@ struct QuickstartStarterPolicyTests {
     @Test("The chooser presents one hardware-fit starter, not two competing recommendations")
     func shortlistHasOneStarter() {
         let catalog = [
+            entry("lfm2.5-1b-4bit"),
             entry("lfm2.5-2.6b-4bit"),
             entry("qwen3.5-4b-4bit"),
         ]
 
         let compact = QuickstartView.shortlist(
             catalog: catalog,
-            selection: "lfm2.5-2.6b-4bit",
+            selection: "lfm2.5-1b-4bit",
             physicalRAMGB: 8
         )
-        #expect(compact.starters.map(\.alias) == ["lfm2.5-2.6b-4bit"])
+        #expect(compact.starters.map(\.alias) == ["lfm2.5-1b-4bit"])
+        #expect(compact.lowMemory.isEmpty)
+        #expect(compact.recommended.map(\.alias) == ["lfm2.5-2.6b-4bit"])
+        #expect(QuickstartView.recommendedGroupLabel(physicalRAMGB: 8)
+            == "OPTIONAL — MORE CAPABLE, USES MORE MEMORY")
 
         let standard = QuickstartView.shortlist(
             catalog: catalog,

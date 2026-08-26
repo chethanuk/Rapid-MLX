@@ -359,9 +359,11 @@ final class QuickstartCoordinator {
     /// RAM-only baseline shared by onboarding and the persistent picker row.
     /// Cached preference is deliberately layered only by ``defaultChoice``.
     static func baselineChoice(hardware: MacHardware) -> QuickstartModelChoice {
-        hardware.physicalRAMGB < 16
-            ? lowMemoryChoice
-            : defaultChoice
+        baselineChoice(physicalRAMGB: hardware.physicalRAMGB)
+    }
+
+    static func baselineChoice(physicalRAMGB: Double) -> QuickstartModelChoice {
+        physicalRAMGB < 16 ? lowMemoryChoice : defaultChoice
     }
 
     /// UserDefaults key for the persistent "Quickstart already
@@ -2404,7 +2406,9 @@ struct QuickstartView: View {
 
                     if !list.recommended.isEmpty {
                         OnboardingGroupLabel(
-                            text: "RECOMMENDED FOR YOUR \(Self.wholeGB(hardware.physicalRAMGB)) MAC"
+                            text: Self.recommendedGroupLabel(
+                                physicalRAMGB: hardware.physicalRAMGB
+                            )
                         )
                         .padding(.top, 14)
                         ForEach(list.recommended) { choice in
@@ -2996,7 +3000,9 @@ struct QuickstartView: View {
                 }
                 if !list.recommended.isEmpty {
                     OnboardingGroupLabel(
-                        text: "RECOMMENDED FOR YOUR \(Self.wholeGB(hardware.physicalRAMGB)) MAC"
+                        text: Self.recommendedGroupLabel(
+                            physicalRAMGB: hardware.physicalRAMGB
+                        )
                     )
                     .padding(.top, 14)
                     ForEach(list.recommended) { choice in
@@ -3285,9 +3291,7 @@ struct QuickstartView: View {
     ) -> Shortlist {
         let choices = QuickstartCoordinator.onboardingChoices
         let starterAlias = physicalRAMGB.map {
-            $0 < 16
-                ? QuickstartCoordinator.compactDefaultChoice.alias
-                : QuickstartCoordinator.defaultChoice.alias
+            QuickstartCoordinator.baselineChoice(physicalRAMGB: $0).alias
         } ?? QuickstartCoordinator.defaultChoice.alias
         var cachedPresentation = quickstartCachedPresentation(catalog, limit: 6)
         // A catalog-preferred authored choice can sit just beyond the bounded
@@ -3312,9 +3316,10 @@ struct QuickstartView: View {
         var recommended: [QuickstartModelChoice] = []
         if let ram = physicalRAMGB {
             var excluded = existingAliases
-            excluded.formUnion(
-                choices.filter { $0.isStarter || $0.isLowMemory }.map(\.alias)
-            )
+            excluded.insert(starterAlias)
+            if starterAlias != QuickstartCoordinator.lowMemoryChoice.alias {
+                excluded.insert(QuickstartCoordinator.lowMemoryChoice.alias)
+            }
             recommended = Self.recommendedChoices(
                 from: RAMBucketedDefault.picks(forPhysicalRAMGB: ram),
                 authored: choices,
@@ -3338,17 +3343,29 @@ struct QuickstartView: View {
             cached: existing,
             cachedAlternates: cachedPresentation.alternates,
             starters: choices.filter {
-                $0.isStarter
-                    && $0.alias == starterAlias
-                    && !existingAliases.contains($0.alias)
+                $0.alias == starterAlias && !existingAliases.contains($0.alias)
             },
             recommended: recommended,
-            lowMemory: choices.filter { $0.isLowMemory && !existingAliases.contains($0.alias) },
+            lowMemory: choices.filter {
+                $0.isLowMemory
+                    && $0.alias != starterAlias
+                    && !existingAliases.contains($0.alias)
+            },
             tradeUps: tradeUps,
             yourPick: native.contains(selection)
                 ? nil
                 : onboardingCatalogModels(catalog).first { $0.alias == selection }
         )
+    }
+
+    /// The smallest tier's smart pick remains an explicit capability upgrade,
+    /// not the automatic recommendation: clean 8 GB validation showed that it
+    /// crosses the usable-memory guard. The row itself still owns the exact
+    /// measured warning and Load Anyway decision.
+    static func recommendedGroupLabel(physicalRAMGB: Double) -> String {
+        physicalRAMGB < 16
+            ? "OPTIONAL — MORE CAPABLE, USES MORE MEMORY"
+            : "RECOMMENDED FOR YOUR \(wholeGB(physicalRAMGB)) MAC"
     }
 
     /// Map the SSOT's RAM-tier picks into renderable wizard choices.

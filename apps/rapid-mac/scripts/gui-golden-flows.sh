@@ -27,8 +27,8 @@ FAKE_IMAGE_ALIAS="fake-image-alias"
 # the operator's release Mac), so every persona that renders the chooser
 # pins the same tier to keep its AX baseline deterministic.
 # 8 = the 8 GB tier, which is exactly what the committed compact-chooser
-# baseline captures (smart lfm2.5-2.6B; its fast pick lfm2.5-1B equals the
-# starter, so the row renders just the one card). Pinning 8 also happens to
+# baseline captures (safe fast pick lfm2.5-1B as the starter; smart
+# lfm2.5-2.6B as the optional memory-guarded capability upgrade). Pinning 8 also happens to
 # be the safe tier for cached-curated-tradeup: its assertion needs
 # qwen3.5-4b to stay a native curated trade-up, which 8 GB guarantees
 # (16/24/32 GB hosts fold qwen3.5-4b into the recommended row instead).
