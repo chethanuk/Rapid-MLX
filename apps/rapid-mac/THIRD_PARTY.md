@@ -131,7 +131,7 @@ full. The ranges below are the **root manifest's**; the sidecar build pins
 
 | Component | Declared range | License | Project |
 | --- | --- | --- | --- |
-| mlx | `>=0.32.1,<0.33` | MIT | https://github.com/ml-explore/mlx |
+| mlx | `>=0.32.1,<0.32.2` | MIT | https://github.com/ml-explore/mlx |
 | mlx-lm | `>=0.31.3,<0.32` | MIT | https://github.com/ml-explore/mlx-lm |
 | transformers | `>=5.0.0,<5.13` | Apache-2.0 | https://github.com/huggingface/transformers |
 | tokenizers | `>=0.19.0` | Apache-2.0 | https://github.com/huggingface/tokenizers |

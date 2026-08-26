@@ -48,10 +48,14 @@ dependencies = [
     # ``mlx_lm.models.qwen3_5.sanitize`` under an existing model — an upstream
     # minor we never validated. MLX 0.32.1 improves long-prompt prefill by about
     # 21-22% on Qwen hybrid/GDN models and passed the #1247 coherence campaign
-    # recorded in the accompanying performance report; retain the next-minor
-    # cap so another runtime change cannot arrive unswept. Raising either bound
-    # is a gated coherence event — see scripts/check_mlx_bound_move.py.
-    "mlx>=0.32.1,<0.33",
+    # recorded in the accompanying performance report. MLX 0.32.2 then changed
+    # ``mx.repeat`` to reject an array-valued repeats argument still emitted by
+    # mlx-vlm 0.6.3's Qwen3.5 vision tower. The Desktop sidecar consequently
+    # returned HTTP 500 for every pasted image. Keep the patch-level cap until
+    # mlx-vlm adapts and a new coherence sweep validates the pair. Raising
+    # either bound is a gated coherence event — see
+    # scripts/check_mlx_bound_move.py.
+    "mlx>=0.32.1,<0.32.2",
     "mlx-lm>=0.31.3,<0.32",  # 0.31.1+ required for presence_penalty/frequency_penalty kwargs on make_logits_processors (#512); 0.31.3 added thread-local generation_stream but cross-thread eval is still broken (see shim sites). Upper cap <0.32 (#1248).
     # mlx-vlm is opt-in via [vision] extras (saves ~322 MB for text-only users)
     #

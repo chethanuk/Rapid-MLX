@@ -162,6 +162,7 @@ def test_image_extra_tracks_mlx_032_compatible_mflux_line():
     assert len(image_specs) == 1
     assert Version("0.32.1") in core_specs[0].specifier
     assert Version("0.32.0") not in core_specs[0].specifier
+    assert Version("0.32.2") not in core_specs[0].specifier
     assert Version("0.33.0") not in core_specs[0].specifier
     assert Version("0.19.0") in image_specs[0].specifier
     assert Version("0.18.1") not in image_specs[0].specifier
@@ -330,10 +331,11 @@ class TestDesktopManifestSynced:
                 f"{pkg} manifest {declared!r} != core {ranges!r}"
             )
 
-    def test_manifest_mlx_advertises_the_0321_floor(self):
-        """Regression anchor: the shipped bundle claims MLX >=0.32.1,<0.33."""
+    def test_manifest_mlx_excludes_broken_0322(self):
+        """The shipped bundle must avoid MLX 0.32.2's Qwen3.5 vision break."""
         table = self._third_party_mlx_table()
         spec = SpecifierSet(table["mlx"])
         assert Version("0.31.2") not in spec
         assert Version("0.32.1") in spec
+        assert Version("0.32.2") not in spec
         assert Version("0.33.0") not in spec
