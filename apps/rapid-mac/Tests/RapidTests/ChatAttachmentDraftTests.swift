@@ -10,9 +10,18 @@ struct ChatAttachmentDraftTests {
         let fixture = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("__Snapshots__/cheetah-logo-96.heic")
-        var draft = ChatAttachmentDraft()
+        let conversationID = UUID()
+        var store = ChatAttachmentDraftStore()
+        let startedRequest = store.beginImageImport(conversationID: conversationID)
+        let request = try #require(startedRequest)
 
-        let accepted = draft.importImageURLs([fixture])
+        let outcome = ChatView.loadImageAttachments([fixture])
+        let accepted = store.finishImageImport(
+            request: request,
+            outcome.accepted,
+            notice: outcome.rejection
+        )
+        let draft = store[conversationID]
 
         #expect(accepted)
         #expect(draft.notice == nil)

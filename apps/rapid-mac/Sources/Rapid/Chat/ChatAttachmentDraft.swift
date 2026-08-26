@@ -19,10 +19,11 @@ struct ChatAttachmentDraft: Equatable {
     private(set) var files: [ChatFileAttachment] = []
     private(set) var sourcePaths: [UUID: String] = [:]
     private(set) var fileImportID: UUID?
+    private(set) var imageImportID: UUID?
     var notice: String?
 
     var hasAttachments: Bool { !images.isEmpty || !files.isEmpty }
-    var isImportingFiles: Bool { fileImportID != nil }
+    var isImportingFiles: Bool { fileImportID != nil || imageImportID != nil }
 
     mutating func appendImage(_ image: ChatImageAttachment, sourceURL: URL? = nil) {
         images.append(image)
@@ -35,23 +36,24 @@ struct ChatAttachmentDraft: Equatable {
         for item in imported { appendImage(item.attachment, sourceURL: item.sourceURL) }
     }
 
-    /// Shared picker/drop/file-paste import boundary. Keeping URL decoding in
-    /// the draft state makes every UI entry point produce the same normalized
-    /// attachment and leaves the native view responsible only for presentation.
+    mutating func beginImageImport() -> UUID? {
+        guard imageImportID == nil else { return nil }
+        let id = UUID()
+        imageImportID = id
+        return id
+    }
+
     @discardableResult
-    mutating func importImageURLs(_ urls: [URL]) -> Bool {
-        var imported: [(attachment: ChatImageAttachment, sourceURL: URL)] = []
-        var rejection: String?
-        for url in urls {
-            do {
-                imported.append((try ChatImageAttachment(contentsOf: url), url))
-            } catch {
-                rejection = error.localizedDescription
-            }
-        }
+    mutating func finishImageImport(
+        id: UUID,
+        _ imported: [(attachment: ChatImageAttachment, sourceURL: URL)],
+        notice: String?
+    ) -> Bool {
+        guard imageImportID == id else { return false }
         appendImages(imported)
-        notice = rejection
-        return !imported.isEmpty
+        self.notice = notice
+        imageImportID = nil
+        return true
     }
 
     /// Starts one asynchronous import generation. A second source cannot race
@@ -115,6 +117,7 @@ struct ChatAttachmentDraft: Equatable {
         sourcePaths = [:]
         notice = nil
         fileImportID = nil
+        imageImportID = nil
         return submission
     }
 
@@ -163,6 +166,29 @@ struct ChatAttachmentDraftStore: Equatable {
         guard let generationID = draft.beginFileImport() else { return nil }
         drafts[conversationID] = draft
         return ImportRequest(conversationID: conversationID, generationID: generationID)
+    }
+
+    mutating func beginImageImport(conversationID: UUID) -> ImportRequest? {
+        var draft = self[conversationID]
+        guard let generationID = draft.beginImageImport() else { return nil }
+        drafts[conversationID] = draft
+        return ImportRequest(conversationID: conversationID, generationID: generationID)
+    }
+
+    @discardableResult
+    mutating func finishImageImport(
+        request: ImportRequest,
+        _ imported: [(attachment: ChatImageAttachment, sourceURL: URL)],
+        notice: String?
+    ) -> Bool {
+        guard var draft = drafts[request.conversationID] else { return false }
+        guard draft.finishImageImport(
+            id: request.generationID,
+            imported,
+            notice: notice
+        ) else { return false }
+        drafts[request.conversationID] = draft
+        return true
     }
 
     /// Completes only an import whose owning conversation still exists in the

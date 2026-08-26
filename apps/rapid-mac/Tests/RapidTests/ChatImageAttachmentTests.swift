@@ -6,6 +6,15 @@ import UniformTypeIdentifiers
 
 @Suite("Chat image attachments")
 struct ChatImageAttachmentTests {
+    @Test("decoded image dimensions are bounded before bitmap creation")
+    func decodedDimensionBudget() {
+        #expect(ChatImageAttachment.dimensionsFit(width: 5_000, height: 4_000))
+        #expect(ChatImageAttachment.dimensionsFit(width: 8_000, height: 8_000))
+        #expect(!ChatImageAttachment.dimensionsFit(width: 8_001, height: 8_000))
+        #expect(!ChatImageAttachment.dimensionsFit(width: 20_000, height: 1))
+        #expect(!ChatImageAttachment.dimensionsFit(width: 0, height: 4_000))
+    }
+
     @Test("real HEIC fixture normalizes to truthful JPEG attachment bytes")
     func heicNormalizesAtAttachmentBoundary() throws {
         let fixture = URL(fileURLWithPath: #filePath)

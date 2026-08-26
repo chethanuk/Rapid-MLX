@@ -4,6 +4,18 @@ import UniformTypeIdentifiers
 
 struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable {
     static let maxBytes = 20 * 1024 * 1024
+    /// Bounds decoded memory before ImageIO creates a full bitmap. This still
+    /// admits 48 MP iPhone captures while rejecting compressed image bombs.
+    static let maxPixelCount = 64_000_000
+    static let maxPixelDimension = 16_384
+
+    static func dimensionsFit(width: Int, height: Int) -> Bool {
+        width > 0
+            && height > 0
+            && width <= maxPixelDimension
+            && height <= maxPixelDimension
+            && width <= maxPixelCount / height
+    }
 
     let id: UUID
     let filename: String
@@ -71,9 +83,17 @@ struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable
         at url: URL
     ) throws -> (filename: String, mimeType: String, data: Data) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              CGImageSourceGetCount(source) == 1,
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              CGImageSourceGetCount(source) == 1
         else { throw ValidationError.unsupportedType }
+        let sourceProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+            as? [CFString: Any] ?? [:]
+        guard let width = (sourceProperties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (sourceProperties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              dimensionsFit(width: width, height: height)
+        else { throw ValidationError.tooManyPixels }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw ValidationError.unsupportedType
+        }
 
         let preservesAlpha: Bool = switch image.alphaInfo {
         case .none, .noneSkipFirst, .noneSkipLast: false
@@ -90,8 +110,7 @@ struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable
             nil
         ) else { throw ValidationError.unsupportedType }
 
-        var properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-            as? [CFString: Any] ?? [:]
+        var properties = sourceProperties
         if !preservesAlpha {
             properties[kCGImageDestinationLossyCompressionQuality] = 0.9
         }
@@ -108,11 +127,12 @@ struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable
     var dataURL: String { "data:\(mimeType);base64,\(data.base64EncodedString())" }
 
     enum ValidationError: LocalizedError {
-        case tooLarge, unsupportedType, animatedGIF
+        case tooLarge, tooManyPixels, unsupportedType, animatedGIF
         var errorDescription: String? {
             switch self {
             case .tooLarge: return "Images must be 20 MB or smaller."
-            case .unsupportedType: return "Choose a PNG, JPEG, or non-animated GIF."
+            case .tooManyPixels: return "Images must be 64 megapixels or smaller."
+            case .unsupportedType: return "Choose a supported still image."
             case .animatedGIF: return "Animated GIFs aren't supported."
             }
         }
