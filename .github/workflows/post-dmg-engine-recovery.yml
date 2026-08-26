@@ -221,10 +221,15 @@ jobs:
 
       - name: Re-verify blockers and immutable Desktop publication
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The same protected step performs the final publication. Use the
+          # PAT throughout so no step boundary can swap credentials between
+          # the blocker cutoff and the atomic tag claim.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           VERSION: ${{ needs.verify-published-desktop.outputs.version }}
           RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
           EXPECTED_OPEN_IDS: ${{ needs.verify-published-desktop.outputs.open_ids }}
+          NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md
+          REASON: ${{ inputs.reason }}
           # Re-evaluate the secret after protected approval. A pre-approval
           # boolean can become stale while the job waits; publishing with the
           # GITHUB_TOKEN fallback would suppress downstream release events.
@@ -245,12 +250,6 @@ jobs:
           git fetch --force origin refs/heads/main:refs/remotes/origin/main
           LIVE_WAIVER_SOURCE="$RUNNER_TEMP/recovery-live-main"
           git worktree add --detach "$LIVE_WAIVER_SOURCE" origin/main
-          python3 scripts/check_release_blockers.py \
-            --version "$VERSION" \
-            --source-sha "$RELEASE_SHA" \
-            --repo "$REPO" \
-            --waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers" \
-            --expected-open-ids "$EXPECTED_OPEN_IDS"
           python3 scripts/check_desktop_publish.py \
             --app-tag "rapid-mac-v${VERSION}" \
             --accepted-sha "$RELEASE_SHA" \
@@ -282,13 +281,13 @@ jobs:
             exit 1
           fi
 
-      - name: Recover the engine tag and Release at the Desktop candidate SHA
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.verify-published-desktop.outputs.version }}
-          RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}
-          NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md
-          REASON: ${{ inputs.reason }}
-        run: |
-          set -euo pipefail
+          # The live policy cutoff and the atomic tag/Release transaction stay
+          # in one shell step. Everything slow ran above; no unrelated command
+          # may be inserted between this query and publication.
+          python3 scripts/check_release_blockers.py \
+            --version "$VERSION" \
+            --source-sha "$RELEASE_SHA" \
+            --repo "$REPO" \
+            --waivers-dir "$LIVE_WAIVER_SOURCE/docs/development/release-blockers" \
+            --expected-open-ids "$EXPECTED_OPEN_IDS"
           bash scripts/recover_engine_release.sh

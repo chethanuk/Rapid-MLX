@@ -33,8 +33,8 @@ contains "$VERIFY" 'path: recovery-evidence/' "evidence upload has one stable ar
 
 ENV_LINE=$(grep -n 'environment: rapid-mac-tag' "$WORKFLOW" | cut -d: -f1)
 RECHECK_LINE=$(grep -n 'Re-verify blockers and immutable Desktop publication' "$WORKFLOW" | cut -d: -f1)
-CREATE_LINE=$(grep -n 'Recover the engine tag and Release at the Desktop candidate SHA' "$WORKFLOW" | cut -d: -f1)
-if [ "$ENV_LINE" -lt "$RECHECK_LINE" ] && [ "$RECHECK_LINE" -lt "$CREATE_LINE" ]; then
+PUBLISH_LINE=$(grep -n 'bash scripts/recover_engine_release.sh' "$WORKFLOW" | cut -d: -f1)
+if [ "$ENV_LINE" -lt "$RECHECK_LINE" ] && [ "$RECHECK_LINE" -lt "$PUBLISH_LINE" ]; then
   ok "protected approval precedes live rechecks and engine publication"
 else
   bad "protected approval/recheck/publication ordering"
@@ -54,6 +54,7 @@ contains "$RECOVER" 'VERSION: ${{ needs.verify-published-desktop.outputs.version
 contains "$RECOVER" 'RELEASE_SHA: ${{ needs.verify-published-desktop.outputs.release_sha }}' "publication receives the verified SHA"
 contains "$RECOVER" 'NOTES_FILE: ${{ github.workspace }}/evidence/release-notes.md' "publication receives immutable notes"
 contains "$RECOVER" 'REASON: ${{ inputs.reason }}' "publication receives the operator reason"
+contains "$RECOVER" 'GH_TOKEN: ${{ secrets.RELEASE_PAT }}' "publication step uses the required PAT directly"
 lacks "$ALL" 'tag_desktop_app.sh' "recovery never creates or moves the Desktop tag"
 lacks "$ALL" 'rapid-mac-release.yml --ref' "recovery never dispatches another DMG build"
 
@@ -63,8 +64,8 @@ lacks "$ALL" 'rapid-mac-release.yml --ref' "recovery never dispatches another DM
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/evidence"
-sed -n '/- name: Re-verify blockers and immutable Desktop publication/,/- name: Recover the engine tag and Release at the Desktop candidate SHA/p' "$WORKFLOW" \
-  | sed '1,/run: |/d; $d; s/^          //' > "$TMP/reverify.sh"
+sed -n '/- name: Re-verify blockers and immutable Desktop publication/,$p' "$WORKFLOW" \
+  | sed '1,/run: |/d; s/^          //' > "$TMP/reverify.sh"
 chmod +x "$TMP/reverify.sh"
 printf '%s\n' \
   'VERSION=0.13.0' \
@@ -100,6 +101,13 @@ esac
 exit 0
 SH
 chmod +x "$TMP/bin/python3" "$TMP/bin/git"
+mkdir -p "$TMP/scripts"
+cat > "$TMP/scripts/recover_engine_release.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+touch "$PUBLICATION_MARKER"
+SH
+chmod +x "$TMP/scripts/recover_engine_release.sh"
 
 run_transaction() {
   : > "$TMP/calls"
@@ -119,8 +127,8 @@ run_transaction() {
       DESKTOP_RC="${DESKTOP_RC:-0}" \
       TAG_QUERY_RC="${TAG_QUERY_RC:-2}" \
       ENGINE_SHA="${ENGINE_SHA:-0000000000000000000000000000000000000001}" \
+      PUBLICATION_MARKER="$TMP/published" \
       bash "$TMP/reverify.sh"); then
-    touch "$TMP/published"
     return 0
   fi
   return 1
@@ -142,6 +150,14 @@ BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=0 ENGINE_SHA=000000000000000000000000000
 [ -e "$TMP/published" ] && ok "same-SHA engine tag permits idempotent recovery" || bad "same-SHA tag blocked recovery"
 BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction
 [ -e "$TMP/published" ] && ok "absent engine tag permits recovery publication" || bad "valid recovery did not reach publication"
+
+BLOCKER_LINE=$(grep -n 'python3 scripts/check_release_blockers.py' "$TMP/reverify.sh" | tail -1 | cut -d: -f1)
+PUBLICATION_LINE=$(grep -n 'bash scripts/recover_engine_release.sh' "$TMP/reverify.sh" | cut -d: -f1)
+if [ "$((BLOCKER_LINE + 6))" -eq "$PUBLICATION_LINE" ]; then
+  ok "live blocker cutoff immediately precedes the publication unit"
+else
+  bad "commands intervene between live blocker cutoff and publication"
+fi
 
 # Execute the real publication unit with a create_release.sh double. This
 # proves the final workflow step constructs TAG from the verified version and
