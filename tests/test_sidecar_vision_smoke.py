@@ -33,6 +33,7 @@ def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github/workflows/auto-release.yml"
     ).read_text()
+    assert "timeout-minutes: 155" in workflow
     assert "SIDECAR_VISION_SMOKE_MODEL: mlx-community/Qwen3.5-9B-4bit" in workflow
     assert (
         "SIDECAR_VISION_SMOKE_REVISION: 8b2b98c00a6b4d291155e4890773ca8f769aee53"
