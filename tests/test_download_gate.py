@@ -623,6 +623,72 @@ def test_audio_family_rejects_weights_symlinked_outside(
     assert gate._snapshot_is_complete_audio_model(repo, family) is False
 
 
+def test_audio_family_incomplete_without_refs_main(tmp_path, monkeypatch):
+    """No pinned ``refs/main`` sha → not runnable (the sha resolution fails
+    before any weight check)."""
+    repo = "mlx-community/example-audio"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-audio"
+    sha = "norefs"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / "weights.safetensors").write_bytes(b"x" * 4096)
+    # Deliberately no refs/main.
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, "whisper") is False
+
+
+def test_audio_family_incomplete_without_config(tmp_path, monkeypatch):
+    """A weight file without ``config.json`` is not a runnable snapshot."""
+    repo = "mlx-community/example-audio"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-audio"
+    sha = "noconfig"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "weights.safetensors").write_bytes(b"x" * 4096)
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, "whisper") is False
+
+
+@pytest.mark.parametrize(
+    "weight",
+    ["voice.safetensors", "weights.npz"],  # other-family safetensors / NPZ
+)
+def test_audio_family_generic_runnable(tmp_path, monkeypatch, weight):
+    """Any other audio family (e.g. parakeet STT) with a real weight file is
+    runnable — a safetensors shard or the NPZ layout."""
+    repo = "mlx-community/example-other"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-other"
+    sha = "other123"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / weight).write_bytes(b"x" * 4096)
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, "parakeet") is True
+
+
+def test_audio_family_exception_is_not_runnable(monkeypatch):
+    """A failure inside the completeness check degrades to not-runnable."""
+
+    def _boom(*a, **k):
+        raise OSError("boom")
+
+    monkeypatch.setattr(gate, "_resolved_snapshot_sha", _boom)
+    assert gate._snapshot_is_complete_audio_model("a/b", "whisper") is False
+
+
 def test_is_repo_cached_false_when_no_snapshot(tmp_path, monkeypatch):
     """Empty HF cache directory → False."""
     empty_cache = tmp_path / "hf-cache"
