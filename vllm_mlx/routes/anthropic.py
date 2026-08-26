@@ -3165,7 +3165,10 @@ async def _stream_anthropic_messages(
         tool_call_used=bool(tool_calls),
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        ttft_ms=0.0
+        # TTFT == true first-token latency when a text token was produced;
+        # on a stream with no text delta (tool-only / empty completion) fall
+        # back to total stream time rather than reporting a false 0.0ms.
+        ttft_ms=elapsed * 1000.0
         if _first_token_ts is None
         else (_first_token_ts - start_time) * 1000.0,
         tps=tokens_per_sec,
