@@ -928,15 +928,25 @@ class ResidentModelManager:
             handoff = self._on_primary_handoff(old_primary.entry)
         destructive_started = False
         try:
+            # Retire sibling assistants while the healthy primary remains
+            # published. A sibling stop failure can therefore roll back the
+            # handoff without stranding the server's default route.
+            for record in candidates:
+                if record is old_primary:
+                    continue
+                record.pinned = False
+                await self._evict_locked(record, reason=f"replace_{group}_evict_first")
             if old_primary is not None:
                 if self._on_primary_changed is not None:
                     self._on_primary_changed(None)
                 self.registry.clear_default()
                 destructive_started = True
-            for record in candidates:
-                record.primary = False
-                record.pinned = False
-                await self._evict_locked(record, reason=f"replace_{group}_evict_first")
+                old_primary.primary = False
+                old_primary.pinned = False
+                await self._evict_locked(
+                    old_primary,
+                    reason=f"replace_{group}_evict_first",
+                )
         except BaseException:
             if handoff is not None:
                 if destructive_started:

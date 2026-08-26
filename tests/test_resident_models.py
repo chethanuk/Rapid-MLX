@@ -1158,6 +1158,55 @@ async def test_evict_first_stop_failure_finishes_handoff_as_primary_absent():
 
 
 @pytest.mark.asyncio
+async def test_evict_first_sibling_stop_failure_preserves_primary_publication():
+    registry = ModelRegistry()
+    sibling_engine = FailingStopLifecycleEngine()
+    sibling = entry("chat-sibling", sibling_engine)
+    primary_engine = FakeLifecycleEngine()
+    primary = entry("chat-primary", primary_engine)
+    registry.add(sibling)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+    handoff = Mock()
+    primary_changes: list[ModelEntry | None] = []
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=primary_changes.append,
+    )
+    manager._index_record(
+        ResidencyRecord(
+            entry=sibling,
+            estimated_bytes=1 * GIB,
+            loaded_at=0,
+            last_used_at=0,
+        )
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+            resolved_group="assistant",
+        )
+
+    loader.assert_not_awaited()
+    handoff.rollback.assert_called_once_with()
+    handoff.commit.assert_not_called()
+    assert primary_changes == []
+    assert primary_engine.stopped is False
+    assert primary_engine.paused is False
+    assert registry.default_name == "chat-primary"
+    assert [item["id"] for item in manager.snapshot()["models"]] == ["chat-primary"]
+
+
+@pytest.mark.asyncio
 async def test_evict_first_primary_callback_failure_reopens_old_admission():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()
