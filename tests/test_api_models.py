@@ -988,6 +988,44 @@ class TestStreamingModels:
         assert first["id"].startswith("chatcmpl-")
 
     @pytest.mark.asyncio
+    async def test_guided_buffer_exposes_no_id_while_generation_is_live(self):
+        """Buffered guided work has no public cancellation window."""
+        import asyncio
+
+        from vllm_mlx.config import reset_config
+        from vllm_mlx.routes.chat import stream_chat_completion_guided
+
+        started = asyncio.Event()
+
+        class _BlockedGuidedEngine:
+            async def generate_with_schema(self, **_kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+        cfg = reset_config()
+        cfg.model_name = "test-model"
+        request = ChatCompletionRequest(
+            model="test-model",
+            stream=True,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        stream = stream_chat_completion_guided(
+            _BlockedGuidedEngine(),
+            request.messages,
+            request,
+            {"type": "object"},
+            response_id="chatcmpl-" + "e" * 32,
+        )
+        first_wire_event = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        assert first_wire_event.done() is False
+        first_wire_event.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_wire_event
+        await stream.aclose()
+
+    @pytest.mark.asyncio
     async def test_strict_stream_helper_generates_default_response_id(self):
         """Strict helper direct callers also retain generated IDs."""
         from vllm_mlx.config import reset_config
