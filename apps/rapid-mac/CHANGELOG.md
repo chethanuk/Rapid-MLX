@@ -52,6 +52,10 @@ can actually understand.
 - **Guided setup accurately describes data preservation.** Its confirmation no
   longer implies that onboarding reset deletes user data. ([#2239](https://github.com/raullenchai/Rapid-MLX/issues/2239),
   [#2322](https://github.com/raullenchai/Rapid-MLX/pull/2322))
+- **Telemetry consent appears after Rapid demonstrates value.** The one-time
+  question follows a successful chat reply, delivered dictation transcript, or
+  generated image instead of interrupting first launch. Nothing is sent before
+  explicit consent. ([#2424](https://github.com/raullenchai/Rapid-MLX/pull/2424))
 - **Share CLI contracts use supported invocation forms and run in CI.**
   ([#2377](https://github.com/raullenchai/Rapid-MLX/issues/2377),
   [#2382](https://github.com/raullenchai/Rapid-MLX/pull/2382))
