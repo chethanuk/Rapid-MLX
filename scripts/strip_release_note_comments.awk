@@ -18,12 +18,16 @@ function rest_is_clean(s,    o, c) {
 function indented_code(line) {
   return (line ~ /^    / || line ~ /^\t/)
 }
-function container_payload(line,    s) {
+function container_payload(line,    s, before) {
   s = line
   sub(/^   /, "", s); sub(/^  /, "", s); sub(/^ /, "", s)
-  while (s ~ /^>[[:space:]]*/) sub(/^>[[:space:]]*/, "", s)
-  sub(/^[-+*][[:space:]]+/, "", s)
-  sub(/^[0-9]+[.)][[:space:]]+/, "", s)
+  while (1) {
+    before = s
+    while (s ~ /^>[[:space:]]*/) sub(/^>[[:space:]]*/, "", s)
+    if (s ~ /^[-+*][[:space:]]+/) sub(/^[-+*][[:space:]]+/, "", s)
+    else if (s ~ /^[0-9]+[.)][[:space:]]+/) sub(/^[0-9]+[.)][[:space:]]+/, "", s)
+    if (s == before) break
+  }
   return s
 }
 function fence_marker(line,    s, ch, n) {

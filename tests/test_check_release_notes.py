@@ -82,6 +82,8 @@ def test_rejects_notes_with_unterminated_drafting_comment(tmp_path: Path) -> Non
         "- <!-- list draft -->\n",
         "1. <!-- ordered-list draft -->\n",
         "> - <!-- nested container draft -->\n",
+        "- - <!-- nested list draft -->\n",
+        "1. > 2) <!-- mixed nested draft -->\n",
     ],
 )
 def test_rejects_container_wrapped_comment_only_notes(
