@@ -43,6 +43,7 @@ def install_rotating_undo() -> None:
         original_update = cls.update_and_fetch
         original_is_trimmable = cls.is_trimmable
         original_trim = cls.trim
+        original_can_trim = getattr(cls, "can_trim", None)
 
         def update_and_fetch(self, keys, values):
             steps = int(keys.shape[2])
@@ -72,6 +73,17 @@ def install_rotating_undo() -> None:
         def is_trimmable(self):
             return original_is_trimmable(self) or self._rapid_undo is not None
 
+        def can_trim(self, n):
+            if n < 0:
+                return False
+            if original_can_trim is not None and original_can_trim(self, n):
+                return True
+            if original_is_trimmable(self):
+                offset = getattr(self, "_offset", getattr(self, "offset", 0))
+                return int(offset) >= n
+            undo = self._rapid_undo
+            return undo is not None and int(undo[1].shape[2]) >= n
+
         def trim(self, n):
             if original_is_trimmable(self):
                 self._rapid_undo = None
@@ -92,6 +104,7 @@ def install_rotating_undo() -> None:
 
         cls.update_and_fetch = update_and_fetch
         cls.is_trimmable = is_trimmable
+        cls.can_trim = can_trim
         cls.trim = trim
         cls._rapid_undo = None
         cls._rapid_dspark_undo = True

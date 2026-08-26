@@ -32,6 +32,28 @@ def test_pooling_cache_rolls_back_across_compression_boundary() -> None:
     assert cache.remainder == 0
 
 
+def test_pooling_cache_multitoken_preflight_is_atomic_without_undo() -> None:
+    from mlx_lm.models.cache import CacheList, KVCache
+
+    from vllm_mlx.cache_rollback import can_trim, trim_all
+    from vllm_mlx.models.deepseek_v4_cache import PoolingCache
+
+    kv = KVCache()
+    values = mx.ones((1, 1, 5, 2))
+    kv.update_and_fetch(values, values)
+    pooling = PoolingCache(4)
+    pooling.accumulate_windows(mx.ones((1, 1, 2)), mx.ones((1, 1, 2)), 0)
+    cache = CacheList(kv, pooling)
+
+    assert pooling.remainder == 1
+    assert pooling._undo is None
+    assert cache.is_trimmable()
+    assert not can_trim(cache, 2)
+    assert not trim_all([cache], 2)
+    assert kv.offset == 5
+    assert pooling.remainder == 1
+
+
 def test_rotating_cache_rolls_back_after_rotation() -> None:
     from mlx_lm.models.cache import RotatingKVCache
 

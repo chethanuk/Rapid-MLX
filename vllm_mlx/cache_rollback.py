@@ -21,7 +21,14 @@ def can_trim(cache: Any, n: int) -> bool:
     if callable(can_undo) and can_undo(n):
         return True
     check = getattr(cache, "is_trimmable", None)
-    return bool(callable(check) and check())
+    size = getattr(cache, "size", None)
+    if not (callable(check) and check() and callable(size)):
+        return False
+    logical_size = size()
+    try:
+        return int(logical_size) >= n
+    except (TypeError, ValueError):
+        return False
 
 
 def trim_all(caches: Iterable[Any], n: int) -> bool:

@@ -63,8 +63,12 @@ class PoolingCache(_BaseCache):
                 )
             else:
                 self._undo = (
-                    None if self.remainder == 0 else self.buf_kv[:, : self.remainder] + 0,
-                    None if self.remainder == 0 else self.buf_gate[:, : self.remainder] + 0,
+                    None
+                    if self.remainder == 0
+                    else self.buf_kv[:, : self.remainder] + 0,
+                    None
+                    if self.remainder == 0
+                    else self.buf_gate[:, : self.remainder] + 0,
                     self.remainder,
                     0 if self.pooled is None else self.pooled.shape[1],
                     kv,
@@ -206,6 +210,9 @@ class PoolingCache(_BaseCache):
     def is_trimmable(self):
         return self.pooled is None or self.remainder > 0 or self._can_undo(1)
 
+    def can_trim(self, n):
+        return n >= 0 and (n <= self.remainder or self._can_undo(n))
+
     def _can_undo(self, n):
         undo = getattr(self, "_undo", None)
         return undo is not None and undo[4].shape[1] >= n
@@ -246,8 +253,12 @@ class PoolingCache(_BaseCache):
             self.buf_gate[:, : self.remainder] = remainder_gate
         if hasattr(self, "overlap_kv"):
             if completed:
-                last_kv = mx.unflatten(prefix_kv[:, used - self.ratio : used], 1, (-1, self.ratio))[:, -1]
-                last_gate = mx.unflatten(prefix_gate[:, used - self.ratio : used], 1, (-1, self.ratio))[:, -1]
+                last_kv = mx.unflatten(
+                    prefix_kv[:, used - self.ratio : used], 1, (-1, self.ratio)
+                )[:, -1]
+                last_gate = mx.unflatten(
+                    prefix_gate[:, used - self.ratio : used], 1, (-1, self.ratio)
+                )[:, -1]
                 half = last_kv.shape[-1] // 2
                 self.overlap_kv = last_kv[..., :half]
                 self.overlap_gate = last_gate[..., :half]
@@ -527,13 +538,12 @@ class BatchPoolingCache(_BaseCache):
     def is_trimmable(self):
         return self.pooled is None or min(self.remainder) > 0 or self._can_undo(1)
 
+    def can_trim(self, n):
+        return n >= 0 and (n <= min(self.remainder) or self._can_undo(n))
+
     def _can_undo(self, n):
         undo = getattr(self, "_undo", None)
-        return (
-            undo is not None
-            and len(self.remainder) == 1
-            and undo[5].shape[1] >= n
-        )
+        return undo is not None and len(self.remainder) == 1 and undo[5].shape[1] >= n
 
     def trim(self, n):
         if n <= min(self.remainder):
@@ -557,7 +567,9 @@ class BatchPoolingCache(_BaseCache):
         ) = self._undo
         self._undo = None
         keep = kv.shape[1] - n
-        prefix_kv = mx.concatenate([buf_kv[:, : old_remainder[0]], kv[:, :keep]], axis=1)
+        prefix_kv = mx.concatenate(
+            [buf_kv[:, : old_remainder[0]], kv[:, :keep]], axis=1
+        )
         prefix_gate = mx.concatenate(
             [buf_gate[:, : old_remainder[0]], gate[:, :keep]], axis=1
         )
@@ -577,8 +589,12 @@ class BatchPoolingCache(_BaseCache):
             self.buf_gate[:, : self.remainder[0]] = remainder_gate
         if hasattr(self, "overlap_kv"):
             if completed:
-                last_kv = mx.unflatten(prefix_kv[:, used - self.ratio : used], 1, (-1, self.ratio))[:, -1]
-                last_gate = mx.unflatten(prefix_gate[:, used - self.ratio : used], 1, (-1, self.ratio))[:, -1]
+                last_kv = mx.unflatten(
+                    prefix_kv[:, used - self.ratio : used], 1, (-1, self.ratio)
+                )[:, -1]
+                last_gate = mx.unflatten(
+                    prefix_gate[:, used - self.ratio : used], 1, (-1, self.ratio)
+                )[:, -1]
                 half = last_kv.shape[-1] // 2
                 self.overlap_kv = last_kv[..., :half]
                 self.overlap_gate = last_gate[..., :half]
