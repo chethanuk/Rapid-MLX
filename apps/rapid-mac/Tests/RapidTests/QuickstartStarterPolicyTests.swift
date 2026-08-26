@@ -218,4 +218,21 @@ struct QuickstartStarterPolicyTests {
         reviewing.applyDefaultChoice(hardware: hardware(16), catalog: newCache)
         #expect(reviewing.selection.alias == reviewingAlias)
     }
+
+    @Test("The first authoritative catalog settles the shortlist selection")
+    func authoritativeCatalogSettlesSelection() {
+        let coordinator = QuickstartCoordinator()
+        coordinator.applyDefaultChoice(hardware: hardware(16), catalog: [])
+        coordinator.settleDefaultChoice(
+            hardware: hardware(16),
+            catalog: [entry("qwen3.5-4b-4bit")]
+        )
+        let settled = coordinator.selection.alias
+
+        coordinator.applyDefaultChoice(
+            hardware: hardware(16),
+            catalog: [entry("qwen3.5-9b-4bit", cached: true)]
+        )
+        #expect(coordinator.selection.alias == settled)
+    }
 }

@@ -731,6 +731,14 @@ Open the picker any time to switch models.
         selection = Self.defaultChoice(hardware: hardware, catalog: catalog)
     }
 
+    /// Apply the first authoritative catalog decision exactly once. Later
+    /// cache refreshes must not retarget a starter the chooser already shows.
+    func settleDefaultChoice(hardware: MacHardware, catalog: [ModelEntry]) {
+        guard case .idle = phase, selectionUsesAutomaticPolicy else { return }
+        selection = Self.defaultChoice(hardware: hardware, catalog: catalog)
+        selectionUsesAutomaticPolicy = false
+    }
+
     /// True once ``markDone`` has been called. Read on every eligibility
     /// check so the surface never returns. Mirrors UserDefaults.
     private(set) var done: Bool
@@ -1538,7 +1546,7 @@ struct QuickstartView: View {
                     .sorted()
             )) {
                 guard catalogLoaded else { return }
-                coordinator.applyDefaultChoice(hardware: hardware, catalog: cachedModels)
+                coordinator.settleDefaultChoice(hardware: hardware, catalog: cachedModels)
             }
             // The warning asks the user to free memory, so keep observing the
             // result of that action while this exact decision is visible.
