@@ -3075,10 +3075,12 @@ def serve_command(args):
         # short audio alias (``serve whisper``) never reaches it — and
         # ``_serve_audio_mode`` loads weights lazily on first request, so
         # without this the server would boot and only fail mid-request.
-        # Judge runnability with the SAME ``_cache_entry_is_runnable``
-        # predicate (which family-scopes the Whisper ``weights.npz`` probe).
-        if _offline_hub_mode_active() and not _cache_entry_is_runnable(
-            audio_entry.hf_id
+        # Judge runnability with the SAME probe core (which family-scopes the
+        # Whisper ``weights.npz`` probe). The offline-refusal decision uses the
+        # tri-state ``is False`` so a probe fault (``None``) does not refuse.
+        if (
+            _offline_hub_mode_active()
+            and _cache_runnability(audio_entry.hf_id) is False
         ):
             _refuse_offline_uncached(audio_entry.hf_id)
         _serve_audio_mode(args, audio_entry)
@@ -5706,21 +5708,24 @@ def _scan_external_model_dirs(
     return out
 
 
-def _cache_entry_is_runnable(repo: str) -> bool:
-    """Whether a cache directory contains a complete runnable snapshot.
+def _cache_runnability(repo: str) -> bool | None:
+    """Tri-state cache runnability: ``True`` runnable, ``False`` definitively
+    not, ``None`` = inconclusive (a probe fault masked a real verdict).
 
-    A Hugging Face repo directory appears as soon as metadata starts
-    downloading.  Treating directory presence as "cached" made interrupted
-    downloads (config/tokenizer only, no weights) look ready in ``ls`` and in
-    the desktop model picker. Reuse the serve download gate's authoritative
-    completeness checks for both text and component-split video layouts.
+    This is the probe-level core. A probe fault — cache-dir permission,
+    malformed index/header — does NOT tell us whether the checkpoint is
+    cached (it may well be). Callers must decide what ``None`` means:
 
-    ``resolve_unreferenced_cached_snapshot`` closes the #2351 gap: a complete,
-    unambiguous SINGLE snapshot with no ``refs/main`` (a commit-pinned
-    ``snapshot_download`` / manual pull) is loadable by the routing & loader
-    contract — the inventory must report it available, not ``(incomplete)``,
-    so ``models --cached`` and the serve gate agree with the loader. Multiple
-    snapshots are ambiguous and stay unresolved there.
+      * Skip-download / inventory callers (``_ensure_model_downloaded``,
+        ``models --cached``) treat ``None`` as **not runnable** (via
+        :func:`_cache_entry_is_runnable`, which collapses ``None`` to
+        ``False``) — they must never skip a download or show a checkmark on
+        a checkpoint whose cachedness could not be verified.
+      * Offline-refusal callers treat ``None`` as **do not refuse** (they
+        compare ``is False`` directly) — offline refuses only when
+        uncachedness is actually established, never on a probe fault.
+
+    Unexpected exceptions are genuine bugs and still propagate.
     """
     try:
         from vllm_mlx._download_gate import (
@@ -5742,18 +5747,37 @@ def _cache_entry_is_runnable(repo: str) -> bool:
             or resolve_unreferenced_cached_snapshot(repo) is not None
         )
     except (OSError, KeyError, ValueError) as exc:
-        # A probe fault (cache-dir permission, malformed index/header) is not
-        # evidence the model is absent: we could not establish cachedness at
-        # all. Refuse offline only when uncachedness is established, so treat
-        # probe faults as runnable (fail open) here and let the caller's
-        # offline gate NOT refuse. Unexpected exceptions are genuine bugs and
-        # still propagate.
         import logging
 
         logging.getLogger(__name__).warning(
             "Could not probe cachedness of %r: %s", repo, exc
         )
-        return True
+        return None
+
+
+def _cache_entry_is_runnable(repo: str) -> bool:
+    """Whether a cache directory contains a complete runnable snapshot.
+
+    A Hugging Face repo directory appears as soon as metadata starts
+    downloading.  Treating directory presence as "cached" made interrupted
+    downloads (config/tokenizer only, no weights) look ready in ``ls`` and in
+    the desktop model picker. Reuse the serve download gate's authoritative
+    completeness checks for both text and component-split video layouts.
+
+    ``resolve_unreferenced_cached_snapshot`` closes the #2351 gap: a complete,
+    unambiguous SINGLE snapshot with no ``refs/main`` (a commit-pinned
+    ``snapshot_download`` / manual pull) is loadable by the routing & loader
+    contract — the inventory must report it available, not ``(incomplete)``,
+    so ``models --cached`` and the serve gate agree with the loader. Multiple
+    snapshots are ambiguous and stay unresolved there.
+
+    A probe fault (see :func:`_cache_runnability`) collapses to ``False``
+    here: skip-download and inventory callers must not treat a checkpoint
+    whose cachedness could not be established as runnable. The offline-refusal
+    callers use the tri-state core directly (``is False``) so that a probe
+    fault does not make them refuse.
+    """
+    return _cache_runnability(repo) is True
 
 
 def _print_cached_models() -> None:
@@ -8286,8 +8310,9 @@ def chat_command(args):
                     # override exemption is likewise scoped to video-gen.
                     # Only print + return (stay in the REPL), not sys.exit —
                     # a failed /model must never kill the chat session.
-                    if _offline_hub_mode_active() and not _cache_entry_is_runnable(
-                        resolved
+                    if (
+                        _offline_hub_mode_active()
+                        and _cache_runnability(resolved) is False
                     ):
                         print(_offline_uncached_error(resolved), file=sys.stderr)
                         return
@@ -11856,7 +11881,7 @@ def main():
                     )
                 if (
                     _offline_hub_mode_active()
-                    and not _cache_entry_is_runnable(args.model)
+                    and _cache_runnability(args.model) is False
                     and not _is_wane_exempt
                 ):
                     _refuse_offline_uncached(args.model)

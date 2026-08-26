@@ -411,19 +411,41 @@ def test_offline_hub_mode_flags_parsed_independently(monkeypatch):
 
 
 def test_cache_probe_fault_fails_open_for_offline(monkeypatch):
-    """A typed cachedness-probe fault (permission / malformed) must NOT
-    conclude 'uncached': _cache_entry_is_runnable returns True (fail open) so
-    the offline gate refuses only when uncachedness is established."""
+    """A typed cachedness-probe fault (permission / malformed) is INCONCLUSIVE.
+
+    It must NOT conclude "runnable" (would skip a needed download / show a
+    broken checkmark), and it must NOT conclude "uncached" (would make the
+    offline refusal fire on a model that may well be cached). The tri-state
+    core returns ``None``; the boolean wrapper collapses ``None`` -> ``False``
+    for skip-download/inventory callers; the offline-refusal caller (which
+    compares ``is False``) must NOT refuse on ``None``.
+    """
     # Induce an expected probe fault in resolve_audio_alias.
     monkeypatch.setattr(
         "vllm_mlx.audio.registry.resolve_audio_alias",
         lambda repo: (_ for _ in ()).throw(OSError("denied")),
     )
-    assert cli._cache_entry_is_runnable("any/repo") is True
+    # Tri-state core: inconclusive, not a baked True (regression) nor False.
+    assert cli._cache_runnability("any/repo") is None
+    # Boolean wrapper collapses None -> False so downloaders/inventory treat a
+    # probe fault as NOT runnable (never skip a needed download / never list a
+    # broken entry as runnable).
+    assert cli._cache_entry_is_runnable("any/repo") is False
 
     # Same for a malformed-cache KeyError / structural ValueError.
     monkeypatch.setattr(
         "vllm_mlx.audio.registry.resolve_audio_alias",
         lambda repo: (_ for _ in ()).throw(KeyError("hdr")),
     )
-    assert cli._cache_entry_is_runnable("any/repo") is True
+    assert cli._cache_runnability("any/repo") is None
+    assert cli._cache_entry_is_runnable("any/repo") is False
+
+    # The offline-refusal caller equates a verdict with established-uncached
+    # ONLY via ``is False``; on ``None`` it must NOT refuse. Simulate the B2
+    # serve gate's condition for an offline + probe-faulting model.
+    monkeypatch.setattr(
+        "vllm_mlx.audio.registry.resolve_audio_alias",
+        lambda repo: (_ for _ in ()).throw(ValueError("bad index")),
+    )
+    assert cli._cache_runnability("any/repo") is None
+    assert cli._cache_runnability("any/repo") is not False
