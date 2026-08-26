@@ -488,14 +488,11 @@ def test_models_lane_fields_use_matching_live_engine(monkeypatch):
         lambda model_id: engine if model_id == "served-alias" else None,
     )
 
-    assert models_route._served_lane_fields("served-alias") == {
-        "serving_lane": "text",
-        "serving_lane_reason": "vision_hybrid_runtime_unsupported",
-    }
-    assert models_route._served_lane_fields("unknown") == {
-        "serving_lane": None,
-        "serving_lane_reason": None,
-    }
+    assert models_route._served_lane_fields("served-alias") == (
+        "text",
+        "vision_hybrid_runtime_unsupported",
+    )
+    assert models_route._served_lane_fields("unknown") == (None, None)
 
 
 @pytest.fixture
