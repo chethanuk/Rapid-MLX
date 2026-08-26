@@ -83,11 +83,10 @@ enum ModelReadiness: Equatable {
 
     /// The one concrete thing the user can do from a given state.
     ///
-    /// ``chooseModel`` deliberately carries no button at the call site:
-    /// the model picker sits ~40pt away in the composer and is already
-    /// labelled "Choose a model", so rendering a second control with the
-    /// same words would be a duplicate action. The case exists so the
-    /// copy and the VoiceOver announcement can still name the step.
+    /// ``chooseModel`` is the empty-state recovery route into the existing
+    /// RAM-aware chooser. The nearby composer picker remains available for
+    /// experienced users; the explicit action keeps first-time discovery from
+    /// depending on recognizing an unresolved pop-up control.
     enum Action: Equatable {
         case chooseModel
         // Download-only. Fetches the weights without loading them, so the

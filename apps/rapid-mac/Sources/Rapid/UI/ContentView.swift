@@ -68,6 +68,11 @@ struct ContentView: View {
     @SceneStorage("Rapid.showLogs") private var showLogs: Bool = false
     /// Per-session "browse all models" dismissal of the Quickstart card.
     @State private var quickstartDismissedThisSession: Bool = false
+    /// Explicit recovery route from the no-model empty state into the
+    /// existing RAM-aware chooser. This is presentation intent only; the
+    /// Quickstart coordinator remains the sole owner of selection/download
+    /// lifecycle state.
+    @State private var modelChoiceRecoveryRequested: Bool = false
     /// Monotonic composer-focus request forwarded to ``ChatView``. Bumped
     /// by the onboarding completion transaction so the user lands in their
     /// first chat with the caret already in the message field.
@@ -693,13 +698,12 @@ struct ContentView: View {
     private func performReadinessAction(_ action: ModelReadiness.Action) {
         switch action {
         case .chooseModel:
-            // Use the existing model-management destination: it owns the
-            // RAM-aware recommendations and cached-model choices. This keeps
-            // the empty-state action useful without reopening onboarding or
-            // introducing a second picker state machine.
-            settingsRouter.route(.openModelManagement) {
-                openWindow(id: "settings")
-            }
+            // Re-enter the existing RAM-aware chooser. Model Management is a
+            // cache inspector and cannot actually select or start a chat
+            // model, so routing there would leave the no-model state intact.
+            quickstart.returnToChooser()
+            quickstartDismissedThisSession = false
+            modelChoiceRecoveryRequested = true
         case .download(let target):
             downloadModel(target)
         case .start(let target):
@@ -866,6 +870,7 @@ struct ContentView: View {
             cachedModels: catalogEntries,
             catalogLoaded: catalogLoaded,
             onSkip: {
+                modelChoiceRecoveryRequested = false
                 quickstartDismissedThisSession = true
                 // Skip keeps its existing meaning — no completion flag — but
                 // it does retire a pending Ready confirmation, so walking
@@ -877,7 +882,10 @@ struct ContentView: View {
             // a micro-stage inside Step 2, so there is nothing to lower and
             // nothing for the parent to know about (Paper 05.2.J · S1).
             onSeedWelcome: seedQuickstartWelcome,
-            onCompleted: finishOnboardingHandoff
+            onCompleted: {
+                modelChoiceRecoveryRequested = false
+                finishOnboardingHandoff()
+            }
         )
     }
 
@@ -929,6 +937,7 @@ struct ContentView: View {
         // global onboarding sheet.
         guard ContentView.quickstartCanPresent(in: section) else { return false }
         guard !quickstartDismissedThisSession else { return false }
+        if modelChoiceRecoveryRequested { return true }
         if ContentView.serverEngagedWithDifferentAlias(
             state: server.state,
             quickstartAlias: quickstart.selection.alias
