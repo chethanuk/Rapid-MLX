@@ -172,7 +172,7 @@ jobs:
       # without installing the package — pytest auto-adds rootdir but
       # bare `python` doesn't, and we don't want a full `pip install -e .`
       # here just for the parser module.
-      - name: Parser microbench (advisory)
+      - name: Parser microbench
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
