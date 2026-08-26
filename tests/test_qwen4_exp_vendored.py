@@ -208,6 +208,36 @@ def test_ple_state_shapes_survive_cached_decode():
     np.testing.assert_array_equal(np.array(cache[3]), np.array([[3, 4]]))
 
 
+def test_ple_right_padded_batch_caches_only_each_rows_valid_history():
+    args = _ple_args()
+    ple = PLELayer(args, ple_layer_index=0)
+    batch_cache = ArraysCache(size=4)
+    batch_cache.prepare(lengths=[3, 1])
+    batch_ids = mx.array([[1, 2, 3], [7, 0, 0]])
+    mask = mx.array([[True, True, True], [True, False, False]])
+    batch_output = ple(
+        mx.zeros((2, 3, args.hc_count * args.hidden_size)),
+        batch_ids,
+        batch_cache,
+        mask,
+    )
+
+    single_cache = ArraysCache(size=4)
+    single_output = ple(
+        mx.zeros((1, 1, args.hc_count * args.hidden_size)),
+        mx.array([[7]]),
+        single_cache,
+    )
+    mx.eval(batch_output, single_output, batch_cache.state, single_cache.state)
+    np.testing.assert_array_equal(np.array(batch_cache[3][1]), np.array([31, 7]))
+    np.testing.assert_allclose(
+        np.array(batch_cache[2][1]),
+        np.array(single_cache[2][0]),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
 def test_qsa_cache_keeps_only_raw_ring_and_persistent_compressed_keys():
     cache = QSAIndexCache(compress_ratio=2)
 

@@ -806,7 +806,14 @@ class NGramEmbedding(nn.Module):
             )
         history = mx.concatenate([previous, input_ids], axis=1)
         if cache is not None:
-            cache[3] = mx.contiguous(history[:, -self.context_len :])
+            if cache.lengths is not None:
+                valid = mx.clip(cache.lengths, 0, input_ids.shape[1])
+                positions = (valid[:, None] + mx.arange(self.context_len))[..., None]
+                cache[3] = mx.take_along_axis(
+                    history[..., None], positions, axis=1
+                ).squeeze(-1)
+            else:
+                cache[3] = mx.contiguous(history[:, -self.context_len :])
         shifted = [
             self._shift_right_ignore_eos(history, shift)
             for shift in range(self.ngram_size)
@@ -879,7 +886,16 @@ class PLELayer(nn.Module):
             )
         conv_input = mx.concatenate([state, x], axis=1)
         if cache is not None:
-            cache[2] = mx.contiguous(conv_input[:, -self.conv_state_len :, :])
+            if cache.lengths is not None:
+                valid = mx.clip(cache.lengths, 0, x.shape[1])
+                positions = (
+                    valid[:, None] + mx.arange(self.conv_state_len)
+                )[..., None]
+                cache[2] = mx.take_along_axis(conv_input, positions, axis=1)
+            else:
+                cache[2] = mx.contiguous(
+                    conv_input[:, -self.conv_state_len :, :]
+                )
         return nn.silu(self.conv1d(conv_input))
 
     def __call__(
@@ -889,6 +905,8 @@ class PLELayer(nn.Module):
         cache: Any | None,
         mask: mx.array | None = None,
     ) -> mx.array:
+        if mask is not None:
+            input_ids = mx.where(mask, input_ids, self.ple_embedding.eos_token_id)
         embeddings = self.ple_embedding(input_ids, cache)
         keys = self.norm_key(self.key_proj(embeddings)).reshape(
             *hidden_states.shape[:-1], self.hc_count, self.hidden_size
