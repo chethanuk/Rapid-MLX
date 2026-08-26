@@ -420,3 +420,37 @@ def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkey
         f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
         f"latency {total_ms:.1f}ms — it must reflect first-token timing, not total"
     )
+
+
+def test_completions_stream_echo_latches_ttft_at_echo_yield(telemetry_on, monkeypatch):
+    """In `echo=True` streaming, the echoed prompt is the client-visible first
+    content, so TTFT is latched at the echo yield (completions.py:754) rather
+    than at the first generated token later in the loop. Captured ttft_ms must
+    be positive and small — a total-latency fallback (latch never set) would
+    fail to reflect the echo-first-token semantics. This pins diff-cover on the
+    echo latch line and the codex r4-B#2 fix."""
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+
+    client = _completions_client(monkeypatch)
+    resp = client.post(
+        "/v1/completions",
+        headers={"user-agent": "OpenAI/Python 1.30.1"},
+        json={
+            "model": "test-model",
+            "prompt": "echo this",
+            "max_tokens": 8,
+            "stream": True,
+            "echo": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 1, f"expected one request emit, got {calls!r}"
+    kw = calls[0]
+    assert kw["endpoint"] == "/v1/completions"
+    assert kw["stream"] is True
+    assert kw["caller_agent"] == "OpenAI/Python 1.30.1"
+    # With echo, the latch at the echo yield must set _first_token_ts, so
+    # emit reports a real first-token TTFT (positive, not the None fallback).
+    assert kw["ttft_ms"] > 0.0
+    assert kw["status"] == 200
