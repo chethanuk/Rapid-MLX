@@ -6352,6 +6352,18 @@ async def stream_chat_completion(
             )
             return f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
+        # Prime the engine through scheduler admission before exposing the
+        # public request id. Cancellation can arrive as soon as the role frame
+        # reaches the client, so admission and the request-id holder must
+        # already address that same live request.
+        engine_stream = engine.stream_chat(
+            messages=messages, is_streaming=True, **kwargs
+        )
+        try:
+            first_engine_output = await anext(engine_stream)
+        except StopAsyncIteration:
+            first_engine_output = None
+
         # First chunk with role
         _first_sse = f'{_sse_prefix}"role":"assistant"{_sse_suffix}'
         if logger.isEnabledFor(logging.INFO):
@@ -6529,9 +6541,13 @@ async def stream_chat_completion(
         # ``**kwargs`` tail on ``BaseEngine.stream_chat`` — no behavior
         # change for BatchedEngine which uses its own special-token
         # handling.
-        async for output in engine.stream_chat(
-            messages=messages, is_streaming=True, **kwargs
-        ):
+        async def _primed_engine_outputs():
+            if first_engine_output is not None:
+                yield first_engine_output
+            async for output in engine_stream:
+                yield output
+
+        async for output in _primed_engine_outputs():
             if hasattr(output, "prompt_tokens") and output.prompt_tokens:
                 prompt_tokens = output.prompt_tokens
             if hasattr(output, "completion_tokens") and output.completion_tokens:
