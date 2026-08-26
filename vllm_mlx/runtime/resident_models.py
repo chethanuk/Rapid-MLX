@@ -546,19 +546,7 @@ class ResidentModelManager:
         if self.memory_limit_bytes <= 0:
             return
         while self._accounted_usage() + incoming_bytes > self.memory_limit_bytes:
-            candidates = sorted(
-                (
-                    record
-                    for record in self._records.values()
-                    if record.model_id not in exclude
-                    and not record.pinned
-                    and not record.primary
-                    and record.active_requests == 0
-                    and record.state == "resident"
-                    and _engine_is_idle(record.entry.engine)
-                ),
-                key=lambda record: record.last_used_at,
-            )
+            candidates = self._eviction_candidates_locked(exclude)
             if not candidates:
                 usage = self._accounted_usage()
                 raise ResidentModelCapacityError(
@@ -569,6 +557,23 @@ class ResidentModelManager:
                     "no idle unpinned model is eligible for eviction"
                 )
             await self._evict_locked(candidates[0], reason="memory_pressure")
+
+    def _eviction_candidates_locked(self, exclude: set[str]) -> list[ResidencyRecord]:
+        """Return the exact idle-LRU order used by admission and eviction."""
+
+        return sorted(
+            (
+                record
+                for record in self._records.values()
+                if record.model_id not in exclude
+                and not record.pinned
+                and not record.primary
+                and record.active_requests == 0
+                and record.state == "resident"
+                and _engine_is_idle(record.entry.engine)
+            ),
+            key=lambda record: record.last_used_at,
+        )
 
     async def load(
         self,
@@ -672,8 +677,8 @@ class ResidentModelManager:
                             "assistant replacement",
                             replacement_projection=projection,
                         )
-                    destructive_replacement = projection.strategy == "evict_first"
-                    if destructive_replacement:
+                    evict_first = projection.strategy == "evict_first"
+                    if evict_first:
                         if replace_mode != "reject":
                             (
                                 candidates,
@@ -688,6 +693,7 @@ class ResidentModelManager:
                             candidates,
                             replace_group,
                         )
+                        destructive_replacement = True
                         paused_engines = []
                 await self._evict_for_locked(
                     estimate,
@@ -793,40 +799,77 @@ class ResidentModelManager:
         current = self._accounted_usage()
         limit = self.memory_limit_bytes
         keep_projected = current + incoming_bytes
-        releasable = tuple(
+        replacement_releasable = tuple(
             (record.model_id, max(record.estimated_bytes, record.measured_bytes))
             for record in candidates
         )
-        evict_projected = (
-            max(0, current - sum(size for _, size in releasable)) + incoming_bytes
+        replacement_ids = {record.model_id for record in candidates}
+        idle_releasable = tuple(
+            (record.model_id, max(record.estimated_bytes, record.measured_bytes))
+            for record in self._eviction_candidates_locked(replacement_ids)
         )
+        replacement_bytes = sum(size for _, size in replacement_releasable)
+        evict_projected = max(0, current - replacement_bytes) + incoming_bytes
         if limit <= 0 or keep_projected <= limit:
             return ReplacementProjection(
                 strategy="keep_then_commit",
                 reason="keep_both_fits",
-                models_to_free=releasable,
+                models_to_free=replacement_releasable,
                 current_bytes=current,
                 requested_bytes=incoming_bytes,
                 projected_bytes=evict_projected,
                 limit_bytes=limit,
             )
-        if memory_policy == "evict_first_if_needed" and evict_projected <= limit:
-            return ReplacementProjection(
-                strategy="evict_first",
-                reason="role_capacity_evict_first_required",
-                models_to_free=releasable,
-                current_bytes=current,
-                requested_bytes=incoming_bytes,
-                projected_bytes=evict_projected,
-                limit_bytes=limit,
+        if memory_policy == "evict_first_if_needed":
+            selected = list(replacement_releasable)
+            for item in idle_releasable:
+                if evict_projected <= limit:
+                    break
+                selected.append(item)
+                evict_projected = max(0, evict_projected - item[1])
+            if evict_projected <= limit:
+                return ReplacementProjection(
+                    strategy="evict_first",
+                    reason="role_capacity_evict_first_required",
+                    models_to_free=tuple(selected),
+                    current_bytes=current,
+                    requested_bytes=incoming_bytes,
+                    projected_bytes=evict_projected,
+                    limit_bytes=limit,
+                )
+        else:
+            selected_idle: list[tuple[str, int]] = []
+            keep_after_lru = keep_projected
+            for item in idle_releasable:
+                if keep_after_lru <= limit:
+                    break
+                selected_idle.append(item)
+                keep_after_lru = max(0, keep_after_lru - item[1])
+            if keep_after_lru <= limit:
+                return ReplacementProjection(
+                    strategy="keep_then_commit",
+                    reason="keep_both_fits",
+                    models_to_free=tuple(selected_idle) + replacement_releasable,
+                    current_bytes=current,
+                    requested_bytes=incoming_bytes,
+                    projected_bytes=max(0, keep_after_lru - replacement_bytes),
+                    limit_bytes=limit,
+                )
+        all_releasable = replacement_releasable + idle_releasable
+        projected_after_all = (
+            max(
+                0,
+                current - sum(size for _, size in all_releasable),
             )
+            + incoming_bytes
+        )
         return ReplacementProjection(
             strategy="reject",
             reason="role_capacity_insufficient_after_eviction",
-            models_to_free=releasable,
+            models_to_free=all_releasable,
             current_bytes=current,
             requested_bytes=incoming_bytes,
-            projected_bytes=evict_projected,
+            projected_bytes=projected_after_all,
             limit_bytes=limit,
         )
 
@@ -841,18 +884,23 @@ class ResidentModelManager:
         handoff = None
         if old_primary is not None and self._on_primary_handoff is not None:
             handoff = self._on_primary_handoff(old_primary.entry)
+        destructive_started = False
         try:
             if old_primary is not None:
                 if self._on_primary_changed is not None:
                     self._on_primary_changed(None)
                 self.registry.clear_default()
+                destructive_started = True
             for record in candidates:
                 record.primary = False
                 record.pinned = False
                 await self._evict_locked(record, reason=f"replace_{group}_evict_first")
         except BaseException:
             if handoff is not None:
-                handoff.commit(None)
+                if destructive_started:
+                    handoff.commit(None)
+                else:
+                    handoff.rollback()
             raise
         return handoff, old_primary is not None
 

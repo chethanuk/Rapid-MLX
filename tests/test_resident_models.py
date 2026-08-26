@@ -895,6 +895,67 @@ async def test_replacement_keeps_rollback_path_when_both_models_fit():
 
 
 @pytest.mark.asyncio
+async def test_keep_then_commit_preserves_existing_idle_lru_admission():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    image_engine = FakeImageEngine()
+    image = entry("image", image_engine)
+    spare_engine = FakeImageEngine()
+    spare = entry("spare-image", spare_engine)
+    registry.add(primary, is_default=True)
+    registry.add(image)
+    registry.add(spare)
+    load_observations: list[tuple[bool, bool]] = []
+
+    async def loader(name: str, path: str | None, performance=None):
+        load_observations.append((old_engine.stopped, image_engine.stopped))
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=13 * GIB,
+        memory_reader=lambda: 0,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+    manager._index_record(
+        ResidencyRecord(
+            entry=image,
+            estimated_bytes=4 * GIB,
+            loaded_at=0,
+            last_used_at=0,
+        )
+    )
+    manager._index_record(
+        ResidencyRecord(
+            entry=spare,
+            estimated_bytes=1 * GIB,
+            loaded_at=1,
+            last_used_at=1,
+        )
+    )
+
+    replacement = await manager.load(
+        "chat-new",
+        estimated_bytes=8 * GIB,
+        replace_group="assistant",
+    )
+
+    assert load_observations == [(False, True)]
+    assert old_engine.stopped is True
+    assert spare_engine.stopped is False
+    assert replacement.primary is True
+    assert registry.default_name == "chat-new"
+    assert replacement.replacement_projection is not None
+    assert replacement.replacement_projection.strategy == "keep_then_commit"
+    assert replacement.replacement_projection.models_to_free == (
+        ("image", 4 * GIB),
+        ("chat-old", 4 * GIB),
+    )
+
+
+@pytest.mark.asyncio
 async def test_replacement_evicts_first_only_when_that_makes_target_fit():
     registry = ModelRegistry()
     old_engine = FakeLifecycleEngine()
@@ -947,6 +1008,65 @@ async def test_replacement_evicts_first_only_when_that_makes_target_fit():
     assert primary_changes == [None, "chat-new"]
     handoff.commit.assert_called_once_with(replacement.entry)
     handoff.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_evict_first_projection_reuses_idle_lru_for_remaining_capacity():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    image_engine = FakeImageEngine()
+    image = entry("image", image_engine)
+    spare_engine = FakeImageEngine()
+    spare = entry("spare-image", spare_engine)
+    registry.add(primary, is_default=True)
+    registry.add(image)
+    registry.add(spare)
+
+    async def loader(name: str, path: str | None, performance=None):
+        assert old_engine.stopped is True
+        assert image_engine.stopped is True
+        assert spare_engine.stopped is False
+        return entry(name)
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=12 * GIB,
+        memory_reader=lambda: 0,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+    manager._index_record(
+        ResidencyRecord(
+            entry=image,
+            estimated_bytes=6 * GIB,
+            loaded_at=0,
+            last_used_at=0,
+        )
+    )
+    manager._index_record(
+        ResidencyRecord(
+            entry=spare,
+            estimated_bytes=1 * GIB,
+            loaded_at=1,
+            last_used_at=1,
+        )
+    )
+
+    replacement = await manager.load(
+        "chat-new",
+        estimated_bytes=10 * GIB,
+        replace_group="assistant",
+        memory_policy="evict_first_if_needed",
+    )
+
+    assert replacement.replacement_projection is not None
+    assert replacement.replacement_projection.models_to_free == (
+        ("chat-old", 4 * GIB),
+        ("image", 6 * GIB),
+    )
+    assert replacement.replacement_projection.projected_bytes == 11 * GIB
+    assert registry.default_name == "chat-new"
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1151,47 @@ async def test_evict_first_stop_failure_finishes_handoff_as_primary_absent():
     handoff.rollback.assert_not_called()
     assert registry.default_name is None
     assert manager.snapshot()["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_evict_first_primary_callback_failure_reopens_old_admission():
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    loader = AsyncMock()
+    handoff = Mock()
+
+    def fail_clear(replacement):
+        assert replacement is None
+        raise RuntimeError("primary clear failed")
+
+    manager = ResidentModelManager(
+        registry,
+        loader,
+        memory_limit_bytes=6 * GIB,
+        memory_reader=lambda: 0,
+        on_primary_handoff=lambda _entry: handoff,
+        on_primary_changed=fail_clear,
+    )
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    with pytest.raises(RuntimeError, match="primary clear failed"):
+        await manager.load(
+            "chat-new",
+            estimated_bytes=4 * GIB,
+            replace_group="assistant",
+            memory_policy="evict_first_if_needed",
+        )
+
+    loader.assert_not_awaited()
+    handoff.rollback.assert_called_once_with()
+    handoff.commit.assert_not_called()
+    assert old_engine.pauses == [("wait", 0)]
+    assert old_engine.paused is False
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+    assert [item["id"] for item in manager.snapshot()["models"]] == ["chat-old"]
 
 
 @pytest.mark.asyncio
