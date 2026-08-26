@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Rapid
 
-@Suite("Lane-owned session model restore")
+@Suite("Lane-owned session model restore", .serialized)
 struct SessionModelRestoreTests {
     private actor SequencedCatalogLoader {
         private var responses: [[ModelEntry]]

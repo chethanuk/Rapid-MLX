@@ -358,7 +358,10 @@ final class SamplingConfigTests {
         #expect(s.isAtDefaults)
     }
 
-    @Test("Zero / negative on a Double knob WOULD persist as 0 via UserDefaults.double(forKey:) — verify the absent-key fallback handles that distinction")
+    @Test(
+        "Zero / negative on a Double knob WOULD persist as 0 via UserDefaults.double(forKey:) — verify the absent-key fallback handles that distinction",
+        .timeLimit(.minutes(1))
+    )
     func zeroDoubleDistinguishedFromAbsent() {
         // The init uses ``object(forKey:)`` precisely so a missing
         // key on first launch doesn't read as 0.0 (which would
