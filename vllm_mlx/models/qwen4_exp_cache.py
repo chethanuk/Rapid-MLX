@@ -14,7 +14,12 @@ import json
 from collections.abc import Callable, Sequence
 
 import mlx.core as mx
-from mlx_lm.models.cache import ArraysCache
+
+from .. import _mlx_compat as _mlx_compat
+
+_mlx_compat.install()
+
+from mlx_lm.models.cache import ArraysCache  # noqa: E402
 
 
 class QSAIndexCache(ArraysCache):

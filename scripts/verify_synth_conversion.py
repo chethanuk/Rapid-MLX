@@ -163,7 +163,8 @@ def verify(src: Path, out: Path) -> int:
             continue
         mse = float(np.mean((rec - src_arr) ** 2))
         scale = float(np.abs(src_arr).max())
-        if scale > 0 and mse / scale > 0.1:
+        normalized_mse = mse / max(scale**2, 1e-12)
+        if normalized_mse > 0.1:
             failures.append(f"quant {name} excessive error mse={mse:.5g}")
     print(f"  mixed-quant tensors round-tripped: {len(quant_names)}")
 

@@ -67,10 +67,7 @@ def _tiny_config(**overrides):
 
 
 def _to_mx_state(state):
-    return {
-        key: mx.array(value.detach().numpy())
-        for key, value in state.items()
-    }
+    return {key: mx.array(value.detach().numpy()) for key, value in state.items()}
 
 
 def test_two_layer_text_logits_match_pinned_architecture_reference():
@@ -93,19 +90,19 @@ def test_two_layer_text_logits_match_pinned_architecture_reference():
         )
     actual = candidate(mx.array(input_ids))
     mx.eval(actual)
-    np.testing.assert_allclose(
-        np.array(actual), expected, rtol=3e-2, atol=1.2e-3
-    )
+    np.testing.assert_allclose(np.array(actual), expected, rtol=3e-2, atol=1.2e-3)
 
     with torch.no_grad():
-        reference_prompt = reference(
-            torch.from_numpy(input_ids), use_cache=True
+        reference_prompt = reference(torch.from_numpy(input_ids), use_cache=True)
+        reference_decode = (
+            reference(
+                torch.tensor([[4]]),
+                past_key_values=reference_prompt.past_key_values,
+                use_cache=True,
+            )
+            .logits.float()
+            .numpy()
         )
-        reference_decode = reference(
-            torch.tensor([[4]]),
-            past_key_values=reference_prompt.past_key_values,
-            use_cache=True,
-        ).logits.float().numpy()
     cache = candidate.make_cache()
     candidate_prompt = candidate(mx.array(input_ids), cache=cache)
     mx.eval(candidate_prompt, [layer.state for layer in cache])
@@ -139,9 +136,9 @@ def test_ple_output_matches_pinned_architecture_reference():
     embedding = state.pop("ple_embedding.ngram_embedding.weight")
     rows = embedding.shape[0] // len(candidate.ple_embedding.ngram_embedding.shards)
     for index in range(len(candidate.ple_embedding.ngram_embedding.shards)):
-        state[
-            f"ple_embedding.ngram_embedding.shards.{index}.weight"
-        ] = embedding[index * rows : (index + 1) * rows]
+        state[f"ple_embedding.ngram_embedding.shards.{index}.weight"] = embedding[
+            index * rows : (index + 1) * rows
+        ]
     conv = state["conv1d.weight"]
     state["conv1d.weight"] = conv.moveaxis(2, 1)
     candidate.load_weights(list(state.items()), strict=True)
@@ -150,13 +147,15 @@ def test_ple_output_matches_pinned_architecture_reference():
     hidden = rng.normal(0, 0.1, (1, 4, 32)).astype(np.float32)
     input_ids = np.array([[1, 2, 3, 4]], dtype=np.int64)
     with torch.no_grad():
-        expected = reference(
-            torch.from_numpy(hidden),
-            torch.from_numpy(input_ids),
-            None,
-        ).float().numpy()
+        expected = (
+            reference(
+                torch.from_numpy(hidden),
+                torch.from_numpy(input_ids),
+                None,
+            )
+            .float()
+            .numpy()
+        )
     actual = candidate(mx.array(hidden), mx.array(input_ids), None)
     mx.eval(actual)
-    np.testing.assert_allclose(
-        np.array(actual), expected, rtol=2e-4, atol=2e-5
-    )
+    np.testing.assert_allclose(np.array(actual), expected, rtol=2e-4, atol=2e-5)

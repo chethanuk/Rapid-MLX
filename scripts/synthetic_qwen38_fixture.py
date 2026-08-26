@@ -58,12 +58,8 @@ def build(
     # (COPY — shape [heads]).
     dense = {}
     dense["model.language_model.embed_tokens.weight"] = f32(64, hidden)
-    dense["model.language_model.layers.0.self_attn.q_proj.weight"] = f32(
-        hidden, hidden
-    )
-    dense["model.language_model.layers.0.self_attn.o_proj.weight"] = f32(
-        hidden, hidden
-    )
+    dense["model.language_model.layers.0.self_attn.q_proj.weight"] = f32(hidden, hidden)
+    dense["model.language_model.layers.0.self_attn.o_proj.weight"] = f32(hidden, hidden)
     dense["model.language_model.layers.0.mlp.gate.weight"] = f32(512, hidden)
     dense["model.language_model.layers.0.mlp.shared_expert_gate.weight"] = f32(
         1, hidden
@@ -82,9 +78,7 @@ def build(
             f"ngram_embedding.shard_{i}.weight"
         )
         ple[name] = f32(32, 160).astype(np.float16)
-    ple["model.language_model.layers.1.ple.ple_embedding.layer_multipliers"] = f32(
-        8
-    )
+    ple["model.language_model.layers.1.ple.ple_embedding.layer_multipliers"] = f32(8)
     put(ple)
 
     # Shard 4: a non-divisible-by-group-size 2-D tensor (COPY) and a true

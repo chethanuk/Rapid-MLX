@@ -22,12 +22,15 @@ from qwen38_streaming_convert import GUARD_EXPERT_SSD, convert  # noqa: E402
 FIXTURES = Path("/tmp/synth-guard-fixtures")
 
 
-def _fails(label: str, fn) -> tuple[bool, str]:
+def _fails(label: str, expected: str, fn) -> tuple[bool, str]:
     try:
         fn()
         return False, "NO EXCEPTION"
+    except RuntimeError as exc:
+        message = str(exc)
+        return expected in message, message
     except Exception as exc:  # noqa: BLE001
-        return True, str(exc)
+        return False, f"unexpected {type(exc).__name__}: {exc}"
 
 
 def _empty_out(tag: str) -> Path:
@@ -36,7 +39,7 @@ def _empty_out(tag: str) -> Path:
         shutil.rmtree(root)
     out = root / "out"
     out.mkdir(parents=True)
-    return root
+    return out
 
 
 def _conv_bad_index(src: Path, out: Path, mutate) -> None:
@@ -46,7 +49,7 @@ def _conv_bad_index(src: Path, out: Path, mutate) -> None:
         shutil.rmtree(FIXTURES / "bad-index")
     shutil.copytree(src, copy)
     mutate(copy)
-    convert(copy, out, max_shard_bytes=2_000_000)
+    convert(copy, out, max_shard_bytes=2_000_000, min_free_bytes=0)
 
 
 def main(src: Path) -> int:
@@ -59,7 +62,9 @@ def main(src: Path) -> int:
     out1 = _empty_out("existing-out")
     (out1 / "sentinel").write_text("x")
     ok, msg = _fails(
-        "existing-out", lambda: convert(src, out1 / "out", max_shard_bytes=2_000_000)
+        "existing-out",
+        "output already exists",
+        lambda: convert(src, out1, max_shard_bytes=2_000_000, min_free_bytes=0),
     )
     cases.append(("existing-output-dir", ok, msg))
 
@@ -68,7 +73,9 @@ def main(src: Path) -> int:
         (copy / "model.safetensors.index.json").unlink()
 
     ok, msg = _fails(
-        "missing-index", lambda: _conv_bad_index(src, out1 / "x", _no_index)
+        "missing-index",
+        "source has no model.safetensors.index.json",
+        lambda: _conv_bad_index(src, out1.parent / "x", _no_index),
     )
     cases.append(("missing-index", ok, msg))
 
@@ -80,13 +87,16 @@ def main(src: Path) -> int:
         (copy / "model.safetensors.index.json").write_text(json.dumps(idx))
 
     ok, msg = _fails(
-        "missing-shard", lambda: _conv_bad_index(src, out1 / "y", _missing_shard)
+        "missing-shard",
+        "missing source shard",
+        lambda: _conv_bad_index(src, out1.parent / "y", _missing_shard),
     )
     cases.append(("missing-source-shard", ok, msg))
 
     # 4 Extreme SSD
     ok, msg = _fails(
         "extreme-ssd",
+        "Extreme SSD is outside this task",
         lambda: convert(
             Path(GUARD_EXPERT_SSD + "/src"),
             Path("/tmp/x/out"),
@@ -98,8 +108,12 @@ def main(src: Path) -> int:
     # 5 free-space floor (absurd floor must reject)
     ok, msg = _fails(
         "free-space-floor",
+        "insufficient free space",
         lambda: convert(
-            src, out1 / "z", max_shard_bytes=2_000_000, min_free_bytes=10**30
+            src,
+            out1.parent / "z",
+            max_shard_bytes=2_000_000,
+            min_free_bytes=10**30,
         ),
     )
     cases.append(("free-space-floor", ok, msg))
