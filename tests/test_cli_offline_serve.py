@@ -160,6 +160,14 @@ def test_disk_gate_systemexit_still_propagates(monkeypatch, capsys):
     assert exc.value.code == 3
 
 
+class _DiskSpaceProbeError(Exception):
+    """Raised from ``_check_disk_space`` to prove the download path was
+    entered (not refused for offline). A real exception subclass, NOT
+    ``StopIteration`` — under PEP 479 a StopIteration sentinel thrown through a
+    generator becomes RuntimeError, so the assertion would fail on
+    interpreter/configs where that wraps the throw."""
+
+
 def test_online_uncached_still_attempts_download(monkeypatch, capsys):
     """Without offline switches, an uncached model still proceeds to the
     download path (no refusal) — connectivity may be available."""
@@ -170,10 +178,11 @@ def test_online_uncached_still_attempts_download(monkeypatch, capsys):
 
     # The download path reaches _check_disk_space first; swallow it so the
     # only assertion is that we did NOT hard-refuse for offline.
-    monkeypatch.setattr(
-        cli, "_check_disk_space", lambda *a, **k: (_ for _ in ()).throw(StopIteration())
-    )
-    with pytest.raises(StopIteration):
+    def _disk_gate_reached(*a, **k):
+        raise _DiskSpaceProbeError("entered disk-space gate")
+
+    monkeypatch.setattr(cli, "_check_disk_space", _disk_gate_reached)
+    with pytest.raises(_DiskSpaceProbeError):
         cli._ensure_model_downloaded("badorg/offline-missing-model")
     assert "is not cached and the network is unavailable" not in capsys.readouterr().err
 
@@ -227,7 +236,16 @@ def test_serve_audio_alias_refuses_offline_uncached(monkeypatch, capsys):
     main()'s B2 gate, and ``_serve_audio_mode`` loads weights lazily — so the
     audio fork itself must refuse an offline + uncached model BEFORE booting
     the audio server (codex #2357-P1-a)."""
+    from vllm_mlx.audio import probe
     from vllm_mlx.audio.registry import AudioAliasEntry
+
+    # ``serve_command`` gates audio aliases on ``require_audio_or_exit`` at the
+    # top, which exits(2) when ``mlx_audio`` is absent (base install / the
+    # no-MLX CI lane). Stub that availability seam so the test still reaches
+    # the offline-refusal fork below even with no ``mlx-audio`` installed —
+    # same technique neighbouring audio tests use (``_spy`` / probe stubs).
+    monkeypatch.setattr(probe, "is_audio_model_alias", lambda _name: True)
+    monkeypatch.setattr(probe, "require_audio_or_exit", lambda _name: None)
 
     # The resolved audio entry drives runnability + the refusal message.
     entry = AudioAliasEntry(
