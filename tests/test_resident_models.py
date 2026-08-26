@@ -450,6 +450,51 @@ def manager_fixture(*, limit_gib=10, ttl=0):
     return manager, registry, loaded, clock
 
 
+def test_residency_snapshot_exposes_live_serving_lane_truth():
+    manager, registry, _, _ = manager_fixture()
+    engine = registry.get_entry("chat").engine
+    engine.serving_lane = "text"
+    engine.serving_lane_reason = "vision_hybrid_runtime_unsupported"
+
+    payload = manager.snapshot()["models"][0]
+
+    assert payload["serving_lane"] == "text"
+    assert payload["serving_lane_reason"] == "vision_hybrid_runtime_unsupported"
+
+
+def test_live_engine_exposes_serving_lane_decision():
+    from vllm_mlx.engine.batched import BatchedEngine
+
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._is_mllm = True
+    engine._serving_lane_reason = "vision_hybrid_runtime_supported"
+
+    assert engine.serving_lane == "vision"
+    assert engine.serving_lane_reason == "vision_hybrid_runtime_supported"
+
+
+def test_models_lane_fields_use_matching_live_engine(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_mlx.routes import models as models_route
+
+    engine = SimpleNamespace(
+        serving_lane="text",
+        serving_lane_reason="vision_hybrid_runtime_unsupported",
+    )
+    monkeypatch.setattr(
+        models_route,
+        "_engine_for",
+        lambda model_id: engine if model_id == "served-alias" else None,
+    )
+
+    assert models_route._served_lane_fields("served-alias") == (
+        "text",
+        "vision_hybrid_runtime_unsupported",
+    )
+    assert models_route._served_lane_fields("unknown") == (None, None)
+
+
 @pytest.fixture
 def residency_activity_contract(monkeypatch):
     """Exercise the activity SSOT from the MLX-free Linux fixed selector."""

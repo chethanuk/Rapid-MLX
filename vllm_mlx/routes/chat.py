@@ -54,6 +54,7 @@ from ..api.tool_calling import (
     validate_output_against_schema,
 )
 from ..api.utils import (
+    UnsupportedContentBlockError,
     clean_output_text,
     decode_inline_tool_call_arguments,
     extract_json_from_response,
@@ -4014,6 +4015,13 @@ async def _create_chat_completion_impl(
             allow_video=engine.is_mllm,
             allow_audio=False,
         )
+    except UnsupportedContentBlockError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=e.openai_detail(
+                serving_lane_reason=getattr(engine, "serving_lane_reason", None)
+            ),
+        ) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

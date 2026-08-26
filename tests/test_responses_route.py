@@ -350,6 +350,40 @@ class TestResponsesNonStream:
         assert body["output"][0]["content"][0]["text"] == document
         assert all(item["type"] != "reasoning" for item in body["output"])
 
+        # This fixed-list protocol test also guards the typed multimodal
+        # rejection envelope before either path can enter generation.
+        engine.serving_lane_reason = "vision_hybrid_runtime_unsupported"
+        image_response = responses_client.client.post(
+            "/v1/responses",
+            json=_payload(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,abc",
+                            }
+                        ],
+                    }
+                ]
+            ),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+        assert image_response.status_code == 400
+        image_body = image_response.json()
+        assert image_body.get("detail", image_body)["error"] == {
+            "message": (
+                "Model 'test-model' is serving text-only; image input is unsupported."
+            ),
+            "type": "invalid_request_error",
+            "code": "image_input_unsupported",
+            "param": "messages.content",
+            "serving_lane_reason": "vision_hybrid_runtime_unsupported",
+        }
+
     def test_response_carries_loaded_model_not_request_alias(self, responses_client):
         """The response.model field must be the loaded engine's model
         name, not whatever the client typed — same convention as #557."""
@@ -737,8 +771,9 @@ class TestResponsesNonStream:
 
         assert response.status_code == 400, response.text
         body = response.json()
-        msg = body.get("detail") or body.get("error", {}).get("message", "")
-        assert "image inputs" in msg
+        error = body.get("detail", body)["error"]
+        assert error["code"] == "image_input_unsupported"
+        assert "serving text-only" in error["message"]
         assert engine.calls == []
 
     @pytest.mark.parametrize(
