@@ -1189,9 +1189,7 @@ def test_maybe_confirm_download_gates_catalog_alias_offline_via_manifest():
         patch("vllm_mlx._download_gate.is_repo_cached", return_value=False),
         patch(
             "vllm_mlx._download_gate.estimate_download_size_bytes",
-            side_effect=lambda repo: (
-                None if repo != resolved else 470_632_354_731
-            ),
+            side_effect=lambda repo: None if repo != resolved else 470_632_354_731,
         ),
         patch("vllm_mlx._download_gate.confirm_or_abort") as confirm,
     ):
