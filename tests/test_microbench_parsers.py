@@ -72,32 +72,78 @@ def test_unknown_parser_gets_default_threshold(mb):
 # ---------- sample / parser wiring -----------------------------------
 
 
-def test_each_threshold_has_a_sample(mb):
-    """Every parser in THRESHOLDS_US_PER_CALL must have a SAMPLES entry.
+def test_each_base_us_has_a_sample(mb):
+    """Every parser in BASE_US must have a SAMPLES entry.
     Otherwise the bench silently skips it without complaining, which
     would let a regression slip through unbenched."""
-    missing = sorted(set(mb.THRESHOLDS_US_PER_CALL) - set(mb.SAMPLES))
+    missing = sorted(set(mb.BASE_US) - set(mb.SAMPLES))
     assert not missing, (
-        f"parsers in THRESHOLDS but missing in SAMPLES: {missing}. "
+        f"parsers in BASE_US but missing in SAMPLES: {missing}. "
         "Add a realistic sample input to SAMPLES so it actually benches."
     )
 
 
-def test_each_sample_has_a_threshold(mb):
-    """And vice versa — every SAMPLES entry should have a threshold so
+def test_each_sample_has_a_base_us(mb):
+    """And vice versa — every SAMPLES entry should have a base cost so
     the gate is enforced, not just a printed timing."""
-    missing = sorted(set(mb.SAMPLES) - set(mb.THRESHOLDS_US_PER_CALL))
+    missing = sorted(set(mb.SAMPLES) - set(mb.BASE_US))
     assert not missing, (
-        f"parsers in SAMPLES but missing in THRESHOLDS: {missing}. "
-        "Either add a threshold or remove from SAMPLES."
+        f"parsers in SAMPLES but missing in BASE_US: {missing}. "
+        "Either add a base cost or remove from SAMPLES."
     )
 
 
-def test_thresholds_are_positive(mb):
-    """Catch the 'paste-bug' where someone sets a threshold to 0 or
+def test_base_us_are_positive(mb):
+    """Catch the 'paste-bug' where someone sets a base cost to 0 or
     negative — that would make every measurement fail."""
-    for name, val in mb.THRESHOLDS_US_PER_CALL.items():
-        assert val > 0, f"{name}: threshold must be positive, got {val}"
+    for name, val in mb.BASE_US.items():
+        assert val > 0, f"{name}: base cost must be positive, got {val}"
+
+
+def test_regression_limit_sane(mb):
+    """The relative gate must be a positive multiple > 1 so it actually
+    catches an order-of-magnitude regression rather than being inverted
+    or a no-op."""
+    assert mb.REGRESSION_LIMIT > 1.0
+
+
+def test_slow_runner_scales_threshold_up(mb):
+    """A slower runner must produce a proportionally higher effective
+    threshold, so an unchanged parser doesn't flake (issue #2344)."""
+    base = mb.bench_one("hermes", lambda _t: None, "x", iters=10, runner_speedup=1.0)
+    slow = mb.bench_one("hermes", lambda _t: None, "x", iters=10, runner_speedup=5.0)
+    # 5x slower runner -> threshold scales in kind; the same fast callable
+    # must still pass on BOTH (relative budget, not absolute wall-clock).
+    assert slow.threshold_us > base.threshold_us
+    assert slow.passed and base.passed
+
+
+def test_relative_budget_catches_regression_across_runner_speeds(mb):
+    """The gate is a ratio (parser / calibrated baseline), so the SAME
+    relative slowdown fails regardless of how slow the runner is. This is
+    what makes the gate runner-speed-independent (#2344)."""
+
+    def slow(_t):
+        # ~1ms per call, i.e. far more than REGRESSION_LIMIT × any base.
+        import time
+
+        time.sleep(0.001)
+
+    on_m3 = mb.bench_one("hermes", slow, "x", iters=3, runner_speedup=1.0)
+    on_slow_runner = mb.bench_one("hermes", slow, "x", iters=3, runner_speedup=5.0)
+    assert not on_m3.passed
+    # On a 5x slower runner the effective threshold scales 5x too, so the
+    # ~1ms absolute slowdown is still (first-order) a hard FAIL on both.
+    assert not on_slow_runner.passed
+
+
+def test_calibration_returns_positive_finite(mb):
+    """``_measure_runner_speedup`` must return a positive, finite scalar."""
+    import math
+
+    speedup = mb._measure_runner_speedup()
+    assert math.isfinite(speedup)
+    assert speedup >= mb._RUNNER_SPEEDUP_FLOOR
 
 
 # ---------- entry point ----------------------------------------------

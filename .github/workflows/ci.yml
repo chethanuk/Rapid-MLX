@@ -168,20 +168,23 @@ jobs:
           done
 
       # Parser microbench — catches >10x regressions in tool-call
-      # extraction. Pure Python (parsers don't import mlx); thresholds
-      # are intentionally generous (3-5x measured M3 numbers) to
-      # absorb ubuntu-latest's shared-hardware variance.
+      # extraction. Pure Python (parsers don't import mlx). The gate is a
+      # RELATIVE budget (parser cost vs a same-run calibration baseline),
+      # so shared-runner speed no longer flakes it (#2344). This step runs
+      # `--report` (advisory) so a slow shared runner can never red a PR on
+      # timing noise — the numbers print for visibility, and the hard gate
+      # is reserved for a dedicated-M3 / maintainer check.
       #
       # PYTHONPATH=. so `from vllm_mlx.tool_parsers...` resolves
       # without installing the package — pytest auto-adds rootdir but
       # bare `python` doesn't, and we don't want a full `pip install -e .`
       # here just for the parser module.
-      - name: Parser microbench
+      - name: Parser microbench (advisory)
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pip install pydantic transformers jsonschema openai-harmony
-          python scripts/microbench_parsers.py
+          python scripts/microbench_parsers.py --report
 
   mlx-bound-guard:
     # #1248 — a change to an mlx / mlx-lm / mlx-vlm version bound can re-open the
