@@ -374,7 +374,7 @@ struct SessionModelRestoreTests {
             cached: true,
             kind: .chat
         )
-        let catalog = SequencedCatalogLoader([[removedChat], [remainingChat]])
+        let catalog = SequencedCatalogLoader([[removedChat], [remainingChat], []])
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -406,6 +406,16 @@ struct SessionModelRestoreTests {
         #expect(restarted)
         #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
             == "previous-chat")
+
+        await server.stop()
+        let failedProbeRestart = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo
+        )
+        #expect(failedProbeRestart)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat",
+            "a later empty probe must not revive proof invalidated by the authoritative catalog")
         await server.stop()
     }
 

@@ -2006,6 +2006,8 @@ final class ServerManager {
             } else {
                 catalogProvenChatAliases.remove(provenanceKey)
             }
+        } else if !probedCatalogEntries.isEmpty {
+            catalogProvenChatAliases.remove(provenanceKey)
         }
         let retainedChatProof = catalogEntry == nil
             && probedCatalogEntries.isEmpty
