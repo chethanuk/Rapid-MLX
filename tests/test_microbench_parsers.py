@@ -107,34 +107,98 @@ def test_regression_limit_sane(mb):
     assert mb.REGRESSION_LIMIT > 1.0
 
 
+# The two runner-speed tests use a CPU-bound synthetic parser whose work
+# scales linearly with its iteration count. Because the work is CPU-bound on
+# the same hardware, a parser asked to do N ops takes ~2× the wall-time of
+# N/2 ops — and, critically, the SAME N on a 5×-slower runner takes ~5× the
+# wall-time. We pick N so the parser costs ``BASE_US * eps * speedup`` μs, so
+# its measured μs/call grows with ``runner_speedup`` exactly like the
+# calibration baseline does. The verdict then reduces to ``eps <= LIMIT``
+# independent of runner speed — which is the property that kills the #2344
+# shared-runner flake.
+_CAL_TEXT = (
+    "<tool_call>get_weather city San Francisco "
+    "<arg_key>city</arg_key><arg_value>San Francisco</arg_value></tool_call>"
+)
+
+
+def _cpu_iter_cost_us() -> float:
+    """Measure the per-iteration μs of the CPU-bound op on THIS machine."""
+    import time
+
+    n = 30_000
+    t0 = time.perf_counter()
+    for _ in range(n):
+        _CAL_TEXT.count("x")
+    dt = time.perf_counter() - t0
+    return (dt / n) * 1_000_000
+
+
+def _prop_parser():
+    """A synthetic parser whose per-call wall-time ∝ its iteration count."""
+
+    def _make(us_per_call: float):
+        k = _cpu_iter_cost_us()
+        n = max(1, int(us_per_call / k))
+
+        def fn(_t):
+            c = 0
+            for _ in range(n):
+                c += _CAL_TEXT.count("x")
+            return c
+
+        return fn
+
+    return _make
+
+
 def test_slow_runner_scales_threshold_up(mb):
-    """A slower runner must produce a proportionally higher effective
-    threshold, so an unchanged parser doesn't flake (issue #2344)."""
-    base = mb.bench_one("hermes", lambda _t: None, "x", iters=10, runner_speedup=1.0)
-    slow = mb.bench_one("hermes", lambda _t: None, "x", iters=10, runner_speedup=5.0)
-    # 5x slower runner -> threshold scales in kind; the same fast callable
-    # must still pass on BOTH (relative budget, not absolute wall-clock).
-    assert slow.threshold_us > base.threshold_us
-    assert slow.passed and base.passed
+    """A slower runner produces a proportionally higher effective threshold,
+    and a speed-proportional parser keeps the SAME verdict on both (the
+    relative gate does not flake on shared-runner speed, #2344)."""
+    make = _prop_parser()
+    # A healthy parser at 5× hermes base (well under REGRESSION_LIMIT).
+    base_us = mb.BASE_US["hermes"]
+    on_m3 = mb.bench_one(
+        "hermes",
+        make(base_us * 5.0 * 1.0),
+        "x",
+        iters=5,
+        runner_speedup=1.0,
+    )
+    on_slow = mb.bench_one(
+        "hermes",
+        make(base_us * 5.0 * 5.0),
+        "x",
+        iters=5,
+        runner_speedup=5.0,
+    )
+    # Threshold scales with the runner; the same relative parser passes both.
+    assert on_slow.threshold_us > on_m3.threshold_us
+    assert on_m3.passed and on_slow.passed
 
 
 def test_relative_budget_catches_regression_across_runner_speeds(mb):
-    """The gate is a ratio (parser / calibrated baseline), so the SAME
-    relative slowdown fails regardless of how slow the runner is. This is
-    what makes the gate runner-speed-independent (#2344)."""
+    """The gate is a ratio: a parser at REGRESSION_LIMIT × its base fails at
+    EVERY runner speed (fast M3 and 5×-slower shared runner alike), and one
+    just under the limit passes at every speed (#2344)."""
+    make = _prop_parser()
+    base_us = mb.BASE_US["hermes"]
+    limit = mb.REGRESSION_LIMIT
 
-    def slow(_t):
-        # ~1ms per call, i.e. far more than REGRESSION_LIMIT × any base.
-        import time
+    def bench(speedup: float, eps_mult: float):
+        # Cost scales with speedup, threshold scales with speedup too.
+        target = base_us * limit * eps_mult * speedup
+        return mb.bench_one(
+            "hermes", make(target), "x", iters=5, runner_speedup=speedup
+        )
 
-        time.sleep(0.001)
-
-    on_m3 = mb.bench_one("hermes", slow, "x", iters=3, runner_speedup=1.0)
-    on_slow_runner = mb.bench_one("hermes", slow, "x", iters=3, runner_speedup=5.0)
-    assert not on_m3.passed
-    # On a 5x slower runner the effective threshold scales 5x too, so the
-    # ~1ms absolute slowdown is still (first-order) a hard FAIL on both.
-    assert not on_slow_runner.passed
+    # Under the limit: passes on 1x and 5x runners.
+    assert bench(1.0, 0.8).passed
+    assert bench(5.0, 0.8).passed
+    # Over the limit: fails on 1x and 5x runners alike.
+    assert not bench(1.0, 1.2).passed
+    assert not bench(5.0, 1.2).passed
 
 
 def test_calibration_returns_positive_finite(mb):

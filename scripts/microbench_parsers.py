@@ -91,9 +91,14 @@ _CAL_STRING = (
 _CAL_PATTERN = re.compile(r"<tool_call>.*?</tool_call>", re.S)
 _CAL_ITERS: int = 20_000
 _CAL_REPS: int = 5
-# Reference cost of one calibration op on the M3 (cancels in the ratio; here
-# just to report a meaningful μs scale). Set to a plausible M3 value.
-_CAL_REF_US_PER_ITER: float = 0.45
+# Reference cost of one calibration op, MEASURED on the same reference M3
+# used for ``BASE_US`` (warmed, 100k iters, 9 reps → 0.476 μs/op; set to
+# 0.48). Because both ``BASE_US`` and this reference are measured on the same
+# M3, their ratio is the parser's intrinsic cost expressed in calibration-ops
+# — so on any runner the gate reduces to ε ≤ REGRESSION_LIMIT regardless of
+# that runner's speed (#2344). This is a real measurement, not a knob to
+# relax the gate.
+_CAL_REF_US_PER_ITER: float = 0.48
 
 # Floor so a suspiciously-fast calibration can't compress the effective
 # threshold below the reference machine's own budget (guards the signal).
@@ -184,13 +189,16 @@ def _run_calibration() -> float:
 
 
 def _measure_runner_speedup() -> float:
-    """How much slower this runner is than the reference M3 (ratio >= 1).
+    """How much slower this runner is than the reference M3, right now.
 
     Times the calibration workload a few times and takes the MIN so a
     transient slow stretch during calibration can't over-relax the gate
     (issue #2344: the whole point is to normalize the runner's *typical*
-    speed this run). Floored so a curious measurement can't compress the
-    effective threshold below the reference budget.
+    speed this run). Returns the ratio (≈ 1 on an M3, larger on slower
+    shared runners), floored at ``_RUNNER_SPEEDUP_FLOOR`` (0.5) so a
+    suspiciously fast measurement can't compress the effective threshold
+    below the reference budget. ``main`` calls this fresh for EACH parser so
+    a runner that becomes busy mid-run still reflects the local speed.
     """
     per_op = min(_run_calibration() for _ in range(_CAL_REPS))
     speedup = per_op / _CAL_REF_US_PER_ITER
@@ -254,14 +262,15 @@ def main(argv: list[str] | None = None) -> int:
         print("FAIL: no parsers loaded — import path broken", file=sys.stderr)
         return 1
 
-    # Calibrate runner speed once so every parser's effective threshold
-    # shares the same same-run baseline (issue #2344: relative budget, not
-    # absolute wall-clock on shared hardware).
-    runner_speedup = _measure_runner_speedup()
+    # Calibrate runner speed fresh for EACH parser, immediately before its
+    # bench, so a runner that becomes busy mid-run still normalizes the
+    # parser it is about to time (issue #2344 #2). Relative budget, not an
+    # absolute wall-clock ceiling.
+    first_speedup = _measure_runner_speedup()
 
     print(
         f"Parser microbench × {args.iters} iters/parser "
-        f"(runner speedup vs M3 ref: {runner_speedup:.2f}×)"
+        f"(runner speedup vs M3 ref: {first_speedup:.2f}×)"
     )
     print(f"{'parser':<12}{'us/call':>12}{'threshold':>14}{'verdict':>10}")
     print("-" * 48)
@@ -272,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         if not sample:
             print(f"  [skip] {name}: no sample wired", file=sys.stderr)
             continue
-        r = bench_one(name, fn, sample, args.iters, runner_speedup=runner_speedup)
+        speedup = _measure_runner_speedup()
+        r = bench_one(name, fn, sample, args.iters, runner_speedup=speedup)
         results.append(r)
         verdict = "OK" if r.passed else "FAIL"
         print(f"{r.name:<12}{r.us_per_call:>12.2f}{r.threshold_us:>14.2f}{verdict:>10}")
