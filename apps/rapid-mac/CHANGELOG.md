@@ -118,8 +118,6 @@ can actually understand.
 - Published a reproducible M2 Pro comparison of 0.13.0 and 0.12.18.
   ([#2375](https://github.com/raullenchai/Rapid-MLX/pull/2375))
 
-<!-- Remaining train 4 entries are added here only after that train lands. -->
-
 ## [0.13.0] — 2026-08-26
 
 Rapid-MLX 0.13.0 makes first setup clearer, expands local model support, keeps
