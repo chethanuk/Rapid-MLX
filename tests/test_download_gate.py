@@ -536,6 +536,93 @@ def test_whisper_cache_rejects_files_symlinked_outside_repo(
     )
 
 
+# --- #2406 part A: family-appropriate audio runnability ---------------------
+
+
+@pytest.mark.parametrize(
+    "family,weight",
+    [
+        ("whisper", "weights.npz"),  # classic mlx-community Whisper layout
+        ("whisper", "weights.safetensors"),  # whisper-large-v3-turbo layout
+        ("kokoro", "kokoro-v1_0.safetensors"),  # Kokoro canonical base weights
+    ],
+)
+def test_audio_family_runnable_with_family_weights(
+    tmp_path, monkeypatch, family, weight
+):
+    """A cached audio repo with its family-appropriate weight file is runnable
+    (the text probe would reject it because audio repos ship no
+    ``model*.safetensors``)."""
+    repo = "mlx-community/example-audio"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-audio"
+    sha = "audio123"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / weight).write_bytes(b"x" * 4096)
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, family) is True
+
+
+@pytest.mark.parametrize(
+    "family,weight",
+    [
+        ("whisper", "weights.safetensors"),
+        ("kokoro", "kokoro-v1_0.safetensors"),
+    ],
+)
+def test_audio_family_incomplete_when_only_config(
+    tmp_path, monkeypatch, family, weight
+):
+    """config.json without any weight file must NOT count as runnable — that is
+    a metadata-only stub, exactly like the text path's weightless-cache guard."""
+    repo = "mlx-community/example-audio"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-audio"
+    sha = "audiostub"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, family) is False
+
+
+@pytest.mark.parametrize(
+    "family,weight",
+    [
+        ("kokoro", "kokoro-v1_0.safetensors"),
+        ("whisper", "weights.safetensors"),
+    ],
+)
+def test_audio_family_rejects_weights_symlinked_outside(
+    tmp_path, monkeypatch, family, weight
+):
+    """A crafted cache symlink must not borrow proof from an unrelated file
+    (mirrors the whisper probe's escape guard)."""
+    repo = "mlx-community/example-audio"
+    cache_root = tmp_path / "hf-cache"
+    repo_root = cache_root / "models--mlx-community--example-audio"
+    sha = "audioesc"
+    snap = repo_root / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    outside = tmp_path / f"outside-{family}"
+    outside.write_bytes(b"x" * 4096)
+    (snap / weight).symlink_to(outside)
+    _seed_refs_main(repo_root, sha)
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    assert gate._snapshot_is_complete_audio_model(repo, family) is False
+
+
 def test_is_repo_cached_false_when_no_snapshot(tmp_path, monkeypatch):
     """Empty HF cache directory → False."""
     empty_cache = tmp_path / "hf-cache"

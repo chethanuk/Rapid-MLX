@@ -771,6 +771,73 @@ def _snapshot_is_complete_whisper_model(repo_id: str) -> bool:
         return False
 
 
+def _snapshot_is_complete_audio_model(repo_id: str, family: str) -> bool:
+    """True when a pinned audio snapshot carries its family-appropriate weights.
+
+    Audio repos do not share the text ``model*.safetensors`` layout, so the
+    text probe would reject a fully-downloaded audio model. The weight file a
+    given audio family expects varies:
+
+      * Whisper (STT) historically ships ``weights.npz`` + ``config.json``
+        with no safetensors; the ``whisper-large-v3-turbo`` upload ships
+        ``weights.safetensors`` instead. Both count as runnable.
+      * Kokoro (TTS) ships ``kokoro-v1_0.safetensors`` (index-sharded or a
+        single shard).
+
+    Mirror ``_snapshot_is_complete_whisper_model``: resolve the pinned sha,
+    require ``config.json`` present + on-this-repo (no crafted symlink
+    pointing outside), and require a non-empty weight file for the family.
+    Families without a verified layout (other TTS/STT) accept any non-empty
+    ``*.safetensors`` (or ``weights.npz``) so a genuinely-cached upload is
+    never falsely marked incomplete — a real weights file is never a
+    metadata-only stub.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        repo_root = os.path.join(
+            HF_HUB_CACHE,
+            f"models--{repo_id.replace('/', '--')}",
+        )
+        resolved_sha = _resolved_snapshot_sha(repo_root)
+        if resolved_sha is None:
+            return False
+        snap_dir = os.path.join(repo_root, "snapshots", resolved_sha)
+        repo_root_real = os.path.realpath(repo_root)
+
+        def _present(name: str) -> bool:
+            path = os.path.join(snap_dir, name)
+            if not os.path.isfile(path):
+                return False
+            # HF snapshot files normally point into this repo's own ``blobs``
+            # directory. Do not let an unrelated local file satisfy the cache
+            # gate through a crafted symlink.
+            real = os.path.realpath(path)
+            if real != repo_root_real and not real.startswith(repo_root_real + os.sep):
+                return False
+            return os.path.getsize(path) > 0
+
+        if not _present("config.json"):
+            return False
+        if family == "whisper":
+            return _present("weights.npz") or _present("weights.safetensors")
+        if family == "kokoro":
+            return _present("kokoro-v1_0.safetensors") or any(
+                _present(name)
+                for name in os.listdir(snap_dir)
+                if name.endswith(".safetensors")
+            )
+        # Any other audio family: a real weights file (single or sharded
+        # safetensors, or the NPZ layout some STT models use).
+        return any(
+            _present(name)
+            for name in os.listdir(snap_dir)
+            if name.endswith(".safetensors")
+        ) or _present("weights.npz")
+    except Exception:
+        return False
+
+
 def _snapshot_is_complete_split_model(repo_id: str) -> bool:
     """True if the resolved snapshot is a mlx-video component-split model whose
     EVERY declared component weight is cached — the non-text analogue of
