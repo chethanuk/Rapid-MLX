@@ -91,6 +91,69 @@ def test_summary_printed_on_hf_success(
     assert any(p.endswith("s") and p[0].isdigit() for p in parts), line
 
 
+def test_hf_cached_fallback_reports_verified(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A cached no-op on the HF-fallback path is labelled ``Already cached``.
+
+    codex round-4 BLOCKING #2/#3: even when the mirror miss forces the HF
+    fallback, a pull that transfers zero bytes must NOT print ``Downloaded``.
+    Here ``snapshot_download`` constructs the real ``unit="B"`` byte bars the
+    way huggingface_hub 1.28 does but records zero bytes (all files cached),
+    so the pull is reported as verified, not downloaded.
+    """
+    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+
+    def _download(*args, tqdm_class=None, **_kwargs):
+        # Byte bars exist but record zero = nothing transferred (cached).
+        tqdm_class(desc="Downloading bytes", total=0, unit="B")
+        tqdm_class(desc="Reconstructing", total=0, unit="B")
+        # The file bar advances per completed file (cache hits too) but is
+        # NOT counted as bytes — it must not flip the label to "Downloaded".
+        tqdm_class(desc="Fetching 7 files", total=7, unit="it").update(7)
+        return str(snapshot_dir)
+
+    args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        patch("huggingface_hub.snapshot_download", side_effect=_download),
+    ):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Already cached" in out, out
+    assert "verified (nothing to download)" in out, out
+    assert "Downloaded" not in out, out
+
+
+def test_hf_fallback_transfers_bytes_as_download(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A real HF-fallback transfer (byte bar records bytes) is a download."""
+    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+
+    def _download(*args, tqdm_class=None, **_kwargs):
+        # The transfer byte-bar recorded 2048 bytes -> a real download.
+        tqdm_class(desc="Downloading bytes", total=2048, unit="B").update(2048)
+        tqdm_class(desc="Reconstructing", total=0, unit="B")
+        return str(snapshot_dir)
+
+    args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        patch("huggingface_hub.snapshot_download", side_effect=_download),
+    ):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Downloaded" in out, out
+    assert "Already cached" not in out, out
+
+
 def test_summary_printed_on_mirror_success(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -119,7 +182,7 @@ def test_summary_printed_on_mirror_success(
         snapshot_dir = repo_root / "snapshots" / revision
         _make_fake_snapshot(snapshot_dir, total_bytes=4096)
         if out is not None:
-            out["transferred_bytes"] = 4096
+            out["network_fetch"] = True
         return True
 
     args = argparse.Namespace(model=repo_id)
@@ -165,7 +228,7 @@ def test_cached_pull_reports_verified_not_downloaded(
     # already cached) -> "verified (nothing to download)", not "Downloaded".
     def _mirror_already_cached(model_name: str, *, out=None) -> bool:
         if out is not None:
-            out["transferred_bytes"] = 0
+            out["network_fetch"] = False
         return True
 
     with patch.object(cli, "_try_mirror_prefetch", side_effect=_mirror_already_cached):
@@ -210,7 +273,7 @@ def test_moved_main_reported_as_download(
         (refs_dir / "main").write_text(head_rev)
         _make_fake_snapshot(repo_root / "snapshots" / head_rev, total_bytes=4096)
         if out is not None:
-            out["transferred_bytes"] = 4096
+            out["network_fetch"] = True
         return True
 
     args = argparse.Namespace(model=repo_id)
