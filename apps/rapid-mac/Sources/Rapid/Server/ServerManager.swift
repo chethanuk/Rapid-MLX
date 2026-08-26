@@ -2001,9 +2001,7 @@ final class ServerManager {
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }
         let provenanceKey = trimmedAlias.lowercased()
-        if !probedCatalogEntries.isEmpty {
-            catalogProvenStartEntries.removeValue(forKey: provenanceKey)
-        }
+        catalogProvenStartEntries.removeValue(forKey: provenanceKey)
         if let probedCatalogEntry {
             if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
                 catalogProvenChatAliases.insert(provenanceKey)
@@ -2012,6 +2010,12 @@ final class ServerManager {
             }
         } else if !probedCatalogEntries.isEmpty {
             catalogProvenChatAliases.remove(provenanceKey)
+        } else if let retainedCatalogHint {
+            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: retainedCatalogHint) {
+                catalogProvenChatAliases.insert(provenanceKey)
+            } else {
+                catalogProvenChatAliases.remove(provenanceKey)
+            }
         }
         let retainedChatProof = catalogEntry == nil
             && probedCatalogEntries.isEmpty

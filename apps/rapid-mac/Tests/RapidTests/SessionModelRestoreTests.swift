@@ -259,6 +259,21 @@ struct SessionModelRestoreTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
 
+        var hintedChat = ModelEntry(
+            alias: "qwen3.5-4b-8bit",
+            hfRepo: "mlx-community/Qwen3.5-4B-MLX-8bit",
+            sizeOnDisk: "4.5 GB",
+            cached: true,
+            kind: .chat
+        )
+        hintedChat.isBuiltinProfile = true
+        hintedChat.isTextOnly = false
+        #expect(ModelBrandStyle.supportsImageInput(
+            forAlias: hintedChat.alias,
+            isBuiltinProfile: hintedChat.isBuiltinProfile,
+            isTextOnly: hintedChat.isTextOnly
+        ))
+
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -273,16 +288,31 @@ struct SessionModelRestoreTests {
         server._testSetCatalogEntriesProvider { _, _ in [] }
 
         let ready = await server.ensureServing(
-            alias: chat.alias,
-            hfPath: chat.hfRepo,
+            alias: hintedChat.alias,
+            hfPath: hintedChat.hfRepo,
             estimatedMemoryGB: nil,
             replacementGroup: .assistant,
-            catalogEntryHint: chat
+            catalogEntryHint: hintedChat
         )
 
         #expect(ready)
-        #expect(server.servingAlias == chat.alias)
-        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        #expect(server.servingAlias == hintedChat.alias)
+        #expect(server.launchedImageInputLane == true)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == hintedChat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: hintedChat.alias,
+            hfPath: hintedChat.hfRepo
+        )
+        #expect(restarted)
+        #expect(server.launchedImageInputLane == false,
+                "a consumed hint must retain only chat-lane proof, not image capability")
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == hintedChat.alias)
         await server.stop()
     }
 
