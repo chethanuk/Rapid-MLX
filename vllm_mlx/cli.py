@@ -1714,28 +1714,38 @@ def _ensure_model_downloaded(
     """
     if os.path.exists(model_name):
         return
-    # Reuse the cache inventory's single runnability predicate
-    # (``_cache_entry_is_runnable``, the same source ``models --cached`` uses)
-    # so what counts as "already cached" is identical everywhere and spans
-    # every modality: text ``model*.safetensors`` (``is_repo_cached``), mflux
+    # Reuse the cache inventory's single runnability probe core
+    # (``_cache_runnability``, the same source ``models --cached`` uses) so
+    # what counts as "already cached" is identical everywhere and spans every
+    # modality: text ``model*.safetensors`` (``is_repo_cached``), mflux
     # component weights, component-split video, and family-scoped Whisper
     # ``weights.npz``. A text-only ``is_repo_cached`` check would wrongly read
     # a fully-downloaded mflux / split-video model as uncached and re-download
     # on every start — a slow start at best, a hung one (SYN_SENT against a
     # poisoned address) on a hostile DNS path (codex round-3 BLOCKING #2).
-    if _cache_entry_is_runnable(model_name):
+    #
+    # Keep the tri-state result here, not the boolean wrapper: only a
+    # definitively-runnable result short-circuits the download, and only a
+    # definitively-not-runnable result triggers the offline refusal. A probe
+    # fault (``None``) must neither skip the download (never assume usable
+    # weights we couldn't verify) nor refuse offline (never assert uncached we
+    # couldn't establish) — it falls through to the normal online path.
+    cachedness = _cache_runnability(model_name)
+    if cachedness is True:
         return
 
     # Offline + uncached refusal (#2357): reaching this point means the model is
     # NOT cached (the probes above returned on every cached/complete shape) and
-    # it is not a local path. If the hub is pinned to offline mode, a download
-    # is impossible, so refuse NOW with one actionable message instead of
-    # falling through to the network attempts that each fail and let the serve
+    # it is not a local path. Refuse ONLY when uncachedness is actually
+    # established (``is False``) — a probe fault is inconclusive and must not
+    # be refused. If the hub is pinned to offline mode, a download is
+    # impossible, so refuse NOW with one actionable message instead of falling
+    # through to the network attempts that each fail and let the serve
     # subprocess re-download — which duplicates "First-time download" /
     # "Pre-download skipped" and eventually ends in misleading --mllm/--no-mllm
     # lane advice when the checkpoint is simply absent. This mirrors the
     # TimeoutError / disk-space exits: refuse before server initialization.
-    if _offline_hub_mode_active():
+    if _offline_hub_mode_active() and cachedness is False:
         _refuse_offline_uncached(model_name)
 
     # Disk-space gate + mirror pull. Both the disk probe (HF ``model_info``)

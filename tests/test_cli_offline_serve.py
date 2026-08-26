@@ -126,9 +126,10 @@ def test_offline_local_path_is_noop_not_refused(monkeypatch, capsys):
 
 def test_offline_cached_repo_is_noop_not_refused(monkeypatch, capsys):
     """A fully-cached repo (any modality, judged by the single runnability
-    predicate) never hits the offline refusal."""
+    probe core) never hits the offline refusal."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: True)
+    monkeypatch.setattr(cli, "_cache_runnability", lambda name: True)
+    monkeypatch.setattr(cli, "_try_mirror_prefetch", lambda *a, **k: True)
     cli._ensure_model_downloaded("acme/already-cached")
     assert "is not cached" not in capsys.readouterr().err
 
@@ -136,9 +137,10 @@ def test_offline_cached_repo_is_noop_not_refused(monkeypatch, capsys):
 def test_offline_cached_mflux_is_noop_not_refused(monkeypatch, capsys):
     """A fully-cached mflux checkpoint (no root ``model*.safetensors``, so a
     text-only ``is_repo_cached`` read misses it) must NOT be refused — the
-    shared runnability predicate accepts it (codex #2357-P1)."""
+    shared runnability probe core accepts it (codex #2357-P1)."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: True)
+    monkeypatch.setattr(cli, "_cache_runnability", lambda name: True)
+    monkeypatch.setattr(cli, "_try_mirror_prefetch", lambda *a, **k: True)
     cli._ensure_model_downloaded("acme/qwen-image-cached")
     assert "is not cached" not in capsys.readouterr().err
 
@@ -449,3 +451,33 @@ def test_cache_probe_fault_fails_open_for_offline(monkeypatch):
     )
     assert cli._cache_runnability("any/repo") is None
     assert cli._cache_runnability("any/repo") is not False
+
+
+def test_ensure_model_downloaded_does_not_refuse_offline_on_probe_fault(
+    monkeypatch, capsys
+) -> None:
+    """The real ``_ensure_model_downloaded`` refusal path must NOT fire when a
+    cachedness probe faults (inconclusive), even offline.
+
+    Codex R2: the boolean wrapper collapses ``None`` -> ``False``; the refusal
+    must therefore key on ``is False`` in the production path, not on the
+    boolean result, or a permission/malformed-cache fault would be reported as
+    definitively uncached and refuse the serve. Setting offline + inducing the
+    probe exception, the offline refusal (a ``SystemExit`` with the
+    "not cached and the network is unavailable" message) must NOT occur; the
+    function falls through to the normal online path.
+    """
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    # Induce a probe fault: _cache_runnability -> resolve_audio_alias raises.
+    monkeypatch.setattr(
+        "vllm_mlx.audio.registry.resolve_audio_alias",
+        lambda repo: (_ for _ in ()).throw(OSError("denied")),
+    )
+    # The refusal must not fire, so the function proceeds to the download path;
+    # stub the post-refusal network steps so we only exercise the gate itself.
+    monkeypatch.setattr(cli, "_check_disk_space", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_try_mirror_prefetch", lambda *a, **k: True)
+    # No SystemExit (offline refusal) should be raised on the probe fault.
+    cli._ensure_model_downloaded("some/repo")
+    err = capsys.readouterr().err
+    assert "is not cached and the network is unavailable" not in err
