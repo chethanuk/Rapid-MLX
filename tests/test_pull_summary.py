@@ -38,6 +38,37 @@ def _make_fake_snapshot(root: Path, total_bytes: int) -> Path:
     return root
 
 
+def _hf_snapshot_layout(
+    repo_id: str,
+    revision: str,
+    root: Path,
+    *,
+    files: dict[str, bytes] | None = None,
+    already_cached: bool = False,
+) -> tuple[Path, Path]:
+    """Build a deterministic HF cache entry ``root/models--<id>/`` for the
+    HF-fallback transfer-account tests.
+
+    Returns ``(cache_root, snapshot_dir)``. Points ``refs/main`` at
+    ``revision``. When ``already_cached`` the snapshot dir already exists
+    with ``files`` (a warm, fully-cached pull leaves it untouched); when not,
+    no snapshot exists up front — the test's ``snapshot_download`` mock is
+    expected to create one during the pull so the before-inventory is empty.
+    ``repo_id`` must map to no catalog subfolder (the tests use
+    ``mlx-community/Qwen3-0.6B-4bit``), so the layout is flat.
+    """
+    cache_root = root / "hub"
+    repo_root = cache_root / f"models--{repo_id.replace('/', '--')}"
+    (repo_root / "refs").mkdir(parents=True, exist_ok=True)
+    (repo_root / "refs" / "main").write_text(revision)
+    snapshot_dir = repo_root / "snapshots" / revision
+    if already_cached:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        for name, data in (files or {"model.safetensors": b"\x00" * 2048}).items():
+            (snapshot_dir / name).write_bytes(data)
+    return cache_root, snapshot_dir
+
+
 def _looks_like_size(token: str) -> bool:
     """Loose acceptance of either SI (``GB``) or IEC (``GiB``) suffixes.
 
@@ -62,20 +93,28 @@ def _summary_line(captured: str) -> str:
 def test_summary_printed_on_hf_success(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HF-fallback path prints ``Downloaded ... — <size> in <duration>``."""
-    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+    revision = "abc123" * 6
+    cache_root, snapshot_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=False
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    def _download(*_args, **_kwargs):
+        # Not cached at entry (no resolved snapshot); the pull actually
+        # transfers bytes — the before-inventory is empty and the after-side
+        # (this freshly-written snapshot) differs, so the summary is a download.
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (snapshot_dir / "model.safetensors").write_bytes(b"\x00" * 2048)
+        return str(snapshot_dir)
 
     args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
 
     with (
-        # Not cached at entry (no resolved snapshot), so this pull actually
-        # transfers bytes — the summary reports a download.
         patch.object(cli, "_try_mirror_prefetch", return_value=False),
-        patch(
-            "huggingface_hub.snapshot_download",
-            return_value=str(snapshot_dir),
-        ),
+        patch("huggingface_hub.snapshot_download", side_effect=_download),
     ):
         cli.pull_command(args)
 
@@ -94,26 +133,25 @@ def test_summary_printed_on_hf_success(
 def test_hf_cached_fallback_reports_verified(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cached no-op on the HF-fallback path is labelled ``Already cached``.
 
-    codex round-4 BLOCKING #2/#3: even when the mirror miss forces the HF
-    fallback, a pull that transfers zero bytes must NOT print ``Downloaded``.
-    Here ``snapshot_download`` constructs the real ``unit="B"`` byte bars the
-    way huggingface_hub 1.28 does but records zero bytes (all files cached),
-    so the pull is reported as verified, not downloaded.
+    Even when the mirror miss forces the HF fallback, a pull that transfers
+    zero bytes must NOT print ``Downloaded``. The transfer account is the
+    stable on-disk snapshot inventory BEFORE vs AFTER the pull (Codex #2392,
+    no huggingface_hub tqdm-progress internals): a warm, fully-cached pull
+    leaves the snapshot untouched, so before == after and it reports verified.
     """
-    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+    revision = "abc123" * 6
+    cache_root, snapshot_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=True
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
-    def _download(*args, tqdm_class=None, **_kwargs):
-        # The transfer ("Download") bar exists but never updates = nothing
-        # crossed the network (cached). The reconstruction bar IS updated (HF
-        # writes the symlink/dedup metadata to disk on a warm pull) and the
-        # file bar advances per cached file, but neither is network traffic
-        # (codex round-4 #2) — so the label must stay "Already cached".
-        tqdm_class(desc="Downloading bytes", total=0, unit="B")
-        tqdm_class(desc="Reconstructing", total=4096, unit="B").update(4096)
-        tqdm_class(desc="Fetching 7 files", total=7, unit="it").update(7)
+    def _download(*_args, **_kwargs):
+        # A warm pull touches NOTHING on disk: the snapshot was already there,
+        # complete. before == after -> verified.
         return str(snapshot_dir)
 
     args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
@@ -133,20 +171,26 @@ def test_hf_cached_fallback_reports_verified(
 def test_hf_fetch_zero_byte_file_counts_as_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fetched zero-byte file is a network fetch, not a cache hit.
 
-    codex round-4 BLOCKING #3: a transfer bar that records zero bytes could
-    be mislabelled "Already cached". HF still calls ``update()`` on the
-    transfer bar for a fetched file even when it is zero-byte; ``_touched``
-    flags that as a real network fetch, so the summary says ``Downloaded``.
+    codex round-4 BLOCKING #3 carried over to the stable seam: a fetched
+    zero-byte file adds a NEW row to the snapshot inventory (the file did not
+    exist before), so before != after and the summary says ``Downloaded`` even
+    though the file carries no bytes.
     """
-    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+    revision = "abc123" * 6
+    cache_root, snapshot_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=False
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
-    def _download(*args, tqdm_class=None, **_kwargs):
-        # A file was fetched but its size is 0 bytes.
-        tqdm_class(desc="Downloading bytes", total=0, unit="B").update(0)
-        tqdm_class(desc="Reconstructing", total=0, unit="B")
+    def _download(*_args, **_kwargs):
+        # The pull fetched a file that is 0 bytes: it appears in the
+        # snapshot now (a new inventory row) though it carries no bytes.
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (snapshot_dir / "empty.bin").write_bytes(b"")
         return str(snapshot_dir)
 
     args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
@@ -165,14 +209,20 @@ def test_hf_fetch_zero_byte_file_counts_as_download(
 def test_hf_fallback_transfers_bytes_as_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real HF-fallback transfer (byte bar records bytes) is a download."""
-    snapshot_dir = _make_fake_snapshot(tmp_path / "snap", total_bytes=2048)
+    """A real HF-fallback transfer is a download: the snapshot inventory
+    changes across the pull (files appear), so before != after -> Downloaded."""
+    revision = "abc123" * 6
+    cache_root, snapshot_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=False
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
 
-    def _download(*args, tqdm_class=None, **_kwargs):
-        # The transfer byte-bar recorded 2048 bytes -> a real download.
-        tqdm_class(desc="Downloading bytes", total=2048, unit="B").update(2048)
-        tqdm_class(desc="Reconstructing", total=0, unit="B")
+    def _download(*_args, **_kwargs):
+        # A real fetch creates the snapshot with 2048 bytes of content.
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        (snapshot_dir / "model.safetensors").write_bytes(b"\x00" * 2048)
         return str(snapshot_dir)
 
     args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
@@ -359,45 +409,62 @@ def test_format_pull_duration_units() -> None:
     assert cli._format_pull_duration(119.9) == "2m 0s"
 
 
-def test_hf_bytes_bar_tracks_transfer_and_reports_network_fetch() -> None:
-    """The network-transfer bar class (issue #2349) detects a real fetch.
-
-    ``_hf_bytes_bar_class`` returns a tqdm subclass that records ONLY the
-    network-transfer bar (``unit="B"`` + ``desc.startswith("Download")``),
-    flags ``_touched`` on any ``update()`` (even ``n=0``, for zero-byte
-    files), and ``_hf_network_fetch`` turns that into the authoritative
-    transfer verdict. These exercise the real construction path with no
-    network and no MLX.
+def test_snapshot_identifier_is_a_stable_transfer_seam(tmp_path: Path) -> None:
+    """``_snapshot_identifier`` fingerprints snapshot content so a before/after
+    comparison classifies the pull without huggingface_hub tqdm internals
+    (Codex #2392). The cases directly mirror the old byte-bar verdicts:
+    unchanged content == cache hit; any new/changed file — INCLUDING a newly
+    fetched zero-byte file — == a network fetch.
     """
-    # Each call to ``_hf_bytes_bar_class`` returns a fresh tqdm subclass
-    # with its own ``_bar_instances``, so the four cases below are isolated.
+    # Nothing cached yet -> empty fingerprint (before-side of a fresh pull).
+    assert cli._snapshot_identifier(None) == ()
+    assert cli._snapshot_identifier(str(tmp_path / "does-not-exist")) == ()
 
-    # No transfer bar constructed -> unknown (None), never a false cache hit.
-    empty = cli._hf_bytes_bar_class()
-    assert cli._hf_network_fetch(empty) is None
+    # A warm, untouched snapshot: before == after -> verified (no transfer).
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "model.safetensors").write_bytes(b"\x00" * 2048)
+    before = cli._snapshot_identifier(str(snap))
+    after = cli._snapshot_identifier(str(snap))
+    assert before == after != ()
 
-    # A non-transfer file bar (unit "it") is NOT registered as a transfer →
-    # still None (the file bar counts completions, not network bytes).
-    base = cli._hf_bytes_bar_class()
-    file_bar = base(unit="it", desc="Fetching 4 files", total=10)
-    file_bar.update(n=10)
-    file_bar.close()
-    assert cli._hf_network_fetch(base) is None
+    # A real fetch adds a file -> the inventory changes -> Download.
+    (snap / "config.json").write_bytes(b"{}")
+    assert cli._snapshot_identifier(str(snap)) != before
 
-    # A transfer bar CONSTRUCTED but never updated -> False (clean cache hit).
-    cached_cls = cli._hf_bytes_bar_class()
-    cached_bar = cached_cls(unit="B", desc="Downloading model.safetensors", total=None)
-    cached_bar.close()
-    assert cli._hf_network_fetch(cached_cls) is False
+    # A fetched ZERO-byte file (new row, no bytes) still changes the inventory
+    # -> Download, never a false cache hit (carried from codex round-4 #3).
+    (snap / "empty.bin").write_bytes(b"")
+    assert cli._snapshot_identifier(str(snap)) != before
 
-    # A transfer bar that observes an update() -> True, including an n=0
-    # (zero-byte) file, which still orchestrates a fetch.
-    fetched = cli._hf_bytes_bar_class()
-    transfer = fetched(unit="B", desc="Downloading model.safetensors", total=None)
-    transfer.update(n=0)  # zero-byte file still counts as a transfer
-    transfer.update(n=512)
-    transfer.close()
-    assert cli._hf_network_fetch(fetched) is True
+    # Empty vs populated: a fresh pull's before (()) differs from after.
+    assert before == () or after != ()
+
+
+def test_hf_snapshot_dir_for_resolves_cached_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_hf_snapshot_dir_for`` locates the current on-disk snapshot (the
+    before-side target) purely from the hub cache, with no network — and
+    returns None when nothing is cached yet (Codex #2392 before-side)."""
+    revision = "abc123" * 6
+    cache_root, snapshot_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=True
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    assert cli._hf_snapshot_dir_for("mlx-community/Qwen3-0.6B-4bit") == Path(
+        snapshot_dir
+    )
+
+    # Nothing cached yet -> no before-side dir to fingerprint.
+    cache_root2, _ = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit",
+        revision,
+        tmp_path / "fresh",
+        already_cached=False,
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root2))
+    assert cli._hf_snapshot_dir_for("mlx-community/Qwen3-0.6B-4bit") is None
 
 
 def test_print_pull_summary_was_cached_branch(

@@ -6423,67 +6423,83 @@ def _external_tree_size_bytes(path: str) -> int:
     return total
 
 
-def _hf_bytes_bar_class():
-    """Return a ``tqdm_class`` for ``snapshot_download`` that records bytes.
+def _narrow_to_subfolder(repo_id: str, snapshot_dir):
+    """Narrow a snapshot root to the catalog subfolder a filtered pull serves.
 
-    huggingface_hub builds its ``snapshot_download`` progress from several
-    bars via ``tqdm_class``: a network-transfer bar (``unit="B"``, desc
-    "Download complete"/"Downloading bytes"), a local-reconstruction bar
-    (``unit="B"``, desc "Reconstruction…"),
-    and a file bar (``unit="it"``, desc "Fetching N files") that advances once
-    per completed file, cache hits included.
-
-    Only the NETWORK-TRANSFER bar measures actual bytes fetched; the
-    reconstruction and file bars count local disk writes / file completions,
-    so they must NOT count as network traffic (codex round-4 BLOCKING #2).
-    We therefore track instances only for the transfer bar (desc starts with
-    "Download"), and additionally set ``_touched`` on ANY ``update()`` call —
-    including ``n=0`` — so a fetched zero-byte file is still recognized as a
-    network fetch even though it records no bytes (codex round-4 BLOCKING #3).
-
-    Returns a real ``tqdm`` subclass (not a callable) because HF hands it to
-    code that expects class methods (e.g. ``get_lock``). Defined lazily to
-    avoid a module-scope ``tqdm`` import (the mirror path never needs it).
+    A repo that ships one folder per quantization holds far more on disk than
+    any single alias needs; sizing or fingerprinting the ROOT would include
+    sibling quant folders left by earlier pulls. Returns the subfolder path
+    when ``repo_id`` is a catalog alias with one, else the root unchanged.
+    Shared by the transfer account and the pull summary so both key on the
+    same directory.
     """
-    from tqdm import tqdm
+    import os as _os
 
-    class _HFBytesBar(tqdm):
-        _bar_instances: list["_HFBytesBar"] = []
+    from vllm_mlx.model_aliases import resolve_subfolder
 
-        def __init__(self, *args, **kwargs):
-            self._recorded: list[int] = []
-            self._touched = False
-            super().__init__(*args, **kwargs)
-            desc = str(getattr(self, "desc", "") or "")
-            if getattr(self, "unit", None) == "B" and desc.startswith("Download"):
-                self._bar_instances.append(self)
-
-        def update(self, n=1):
-            # Flag any update() call — even n=0 — as evidence a network fetch
-            # was orchestrated for this file (covers zero-byte files).
-            self._touched = True
-            if n:
-                self._recorded.append(int(n))
-            return super().update(n)
-
-    return _HFBytesBar
+    _sub = resolve_subfolder(repo_id)
+    if _sub:
+        _candidate = _os.path.join(str(snapshot_dir), _sub)
+        if _os.path.isdir(_candidate):
+            return _candidate
+    return snapshot_dir
 
 
-def _hf_network_fetch(bar_cls) -> bool | None:
-    """Did the HF pull fetch bytes over the network? True/False/None.
+def _hf_snapshot_dir_for(repo_id: str):
+    """Locate the CURRENT on-disk HF snapshot content dir for ``repo_id``.
 
-    Considers only the network-transfer bar (see :func:`_hf_bytes_bar_class`).
-    True if that bar observed any ``update()`` — i.e. a file was fetched,
-    whether it carried bytes or was zero-byte (codex round-4 #3); False if the
-    transfer bar was constructed but never updated (a clean no-op cache hit);
-    None if no transfer bar was constructed at all (offline/anomalous
-    downloader) — the caller treats None as unknown and reports a download
-    rather than over-claiming a cache hit.
+    Pure path computation from the hub cache (no network): resolves
+    ``refs/main`` and narrows to the catalog subfolder, mirroring how
+    ``snapshot_download``'s return path is narrowed. Returns None when
+    nothing is cached yet. This is the stable 'before' side of the pull
+    transfer account (Codex #2392).
     """
-    bars = bar_cls._bar_instances
-    if not bars:
+    from pathlib import Path
+
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:
         return None
-    return any(b._touched for b in bars)
+    cache_root = Path(HF_HUB_CACHE)
+    owner, _, repo = repo_id.partition("/")
+    repo_root = cache_root / f"models--{owner}--{repo}"
+    try:
+        rev = (repo_root / "refs" / "main").read_text().strip()
+    except OSError:
+        return None
+    snap = repo_root / "snapshots" / rev
+    return _narrow_to_subfolder(repo_id, snap) if snap.is_dir() else None
+
+
+def _snapshot_identifier(directory) -> tuple[tuple[str, int, int], ...]:
+    """Sorted ``(relpath, size, mtime_ns)`` per file under ``directory``.
+
+    Stable snapshot fingerprint for the pull transfer account (Codex #2392) —
+    independent of huggingface_hub's tqdm progress internals (bar ``desc``/
+    ``unit``/``update()`` are an undocumented presentation detail that changes
+    between hub versions). The snapshot CONTENT is the source of truth: an
+    identical inventory before and after the pull means nothing crossed the
+    wire (cache hit); any new/changed file means bytes were fetched this pull
+    (including a fetched zero-byte file, which still adds a new inventory row).
+    ``directory`` may be None (nothing cached yet) -> empty fingerprint.
+    Symlinks are fingerprinted via ``lstat`` (their own metadata, not the
+    blob target), so a warm pull that leaves the snapshot untouched is
+    identical while a fetch adds/rewrites entries.
+    """
+    import os as _os
+
+    if not directory:
+        return ()
+    rows: list[tuple[str, int, int]] = []
+    for dirpath, _dirnames, files in _os.walk(directory, followlinks=False):
+        for name in files:
+            p = _os.path.join(dirpath, name)
+            try:
+                st = _os.lstat(p)
+            except OSError:
+                continue
+            rows.append((_os.path.relpath(p, directory), st.st_size, st.st_mtime_ns))
+    return tuple(sorted(rows))
 
 
 def _print_pull_summary(
@@ -6502,22 +6518,15 @@ def _print_pull_summary(
     * ``False`` — the downloader reports it fetched bytes -> "Downloaded".
     * ``None``  — unknown (e.g. the HF-fallback's downloader could not prove
       either way) -> "Downloaded", never a false cache claim.
-    This is derived from the downloader's own transfer result, never inferred
-    from pre/post filesystem state — a moved ``main`` that fetches new blobs
-    reports a real download.
+    For the HF-fallback path the account is the on-disk snapshot file
+    inventory before vs after the pull (a stable seam, Codex #2392) — never
+    huggingface_hub's tqdm progress internals. A moved ``main`` that fetches
+    new blobs changes the inventory and reports a real download.
     """
-    import os as _os
-
-    from vllm_mlx.model_aliases import resolve_subfolder
-
     # A filtered pull fetched one folder, but the snapshot root may also
     # hold quant folders left by earlier pulls of a sibling alias. Sizing
     # the root would report those as part of THIS download.
-    _sub = resolve_subfolder(repo_id)
-    if _sub:
-        _candidate = _os.path.join(str(snapshot_dir), _sub)
-        if _os.path.isdir(_candidate):
-            snapshot_dir = _candidate
+    snapshot_dir = _narrow_to_subfolder(repo_id, snapshot_dir)
     size = _snapshot_size_bytes(snapshot_dir)
     # "Already cached" only on a proven no-transfer (``was_cached is True``);
     # ``None`` (unknown) falls through to "Downloaded" rather than a false
@@ -6791,16 +6800,23 @@ def pull_command(args):
                 )
             _allow = [f"{_subfolder}/*"] if _subfolder else None
         # HF-fallback runs only after a mirror miss — but a cached HF no-op is
-        # still possible and must be labelled "Already cached", so instrument
-        # the byte bars (codex round-3/4 BLOCKING #2/#3). A fully-cached pull
-        # records zero bytes on the ``unit="B"`` bars -> verified.
-        _bar_cls = _hf_bytes_bar_class()
+        # still possible and must be labelled "Already cached", so account the
+        # TRANSFER from stable on-disk state (Codex #2392), never
+        # huggingface_hub's tqdm progress internals: capture the snapshot
+        # content inventory BEFORE the pull, then AFTER. Identical => zero
+        # bytes crossed the wire this pull (cache hit); any new/changed file
+        # (including a fetched zero-byte file, which adds an inventory row)
+        # => a real download. ``_hf_snapshot_dir_for`` resolves the CURRENT
+        # on-disk snapshot (no network); the returned ``path`` is the
+        # authoritative after-side, narrowed to the same subfolder.
+        _before = _snapshot_identifier(_hf_snapshot_dir_for(repo_id))
         path = (
-            snapshot_download(repo_id, allow_patterns=_allow, tqdm_class=_bar_cls)
+            snapshot_download(repo_id, allow_patterns=_allow)
             if _allow
-            else snapshot_download(repo_id, tqdm_class=_bar_cls)
+            else snapshot_download(repo_id)
         )
-        _was_cached = _hf_network_fetch(_bar_cls) is False
+        _after = _snapshot_identifier(_narrow_to_subfolder(repo_id, path))
+        _was_cached = _before == _after and _before != ()
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
