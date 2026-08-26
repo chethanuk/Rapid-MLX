@@ -21,6 +21,10 @@ can actually understand.
 
 ### Added
 
+- **Experimental Qwen3.8-Flash-Next text inference.** The M1 lane supports the
+  mixed 4-bit checkpoint on Macs with at least 128 GB of unified memory. MTP
+  and vision support remain planned for a later release.
+  ([#2433](https://github.com/raullenchai/Rapid-MLX/pull/2433))
 - **Assistant changes are explicit, safe transactions.** API clients can choose
   whether a busy text or vision model switch should reject, wait, or abort
   active assistant work. Desktop rejects a busy switch safely, and auxiliary
