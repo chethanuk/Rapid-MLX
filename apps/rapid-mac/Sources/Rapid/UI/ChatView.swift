@@ -755,12 +755,13 @@ struct ChatView: View {
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isStreaming)
-            .help("Conversation instructions")
-            .accessibilityLabel("Conversation instructions")
+            .help("Conversation system prompt")
+            .accessibilityLabel("Conversation system prompt")
             .accessibilityIdentifier("ChatView.ConversationInstructions")
             .popover(isPresented: $showsConversationInstructions, arrowEdge: .bottom) {
                 ConversationInstructionsPopover(
                     draft: $conversationInstructionsDraft,
+                    global: viewModel.customInstructions.global,
                     onSave: { value in
                         viewModel.setConversationInstructions(value)
                         showsConversationInstructions = false
