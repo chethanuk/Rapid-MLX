@@ -163,9 +163,7 @@ def test_forced_named_tool_on_mllm_uses_prefix_not_dropped_processors(
     def _unexpected_reasoning_budget(*_args, **_kwargs):
         raise AssertionError("MLLM requests must not build logits processors")
 
-    monkeypatch.setattr(
-        chat_route, "_offload_tool_grammar_build", _unexpected_grammar
-    )
+    monkeypatch.setattr(chat_route, "_offload_tool_grammar_build", _unexpected_grammar)
     monkeypatch.setattr(
         chat_route, "_enforce_tool_grammar_bounds_or_400", _unexpected_bounds
     )
@@ -221,10 +219,13 @@ def test_forced_named_tool_on_mllm_uses_prefix_not_dropped_processors(
     )
     assert "grammar_logits_processor" not in kwargs
     assert "reasoning_budget_logits_processor" not in kwargs
-    assert sum(
-        "cannot apply logits processors" in record.getMessage()
-        for record in caplog.records
-    ) == 1
+    assert (
+        sum(
+            "cannot apply logits processors" in record.getMessage()
+            for record in caplog.records
+        )
+        == 1
+    )
 
 
 def test_chat_route_rejects_image_on_text_lane_with_typed_reason():
