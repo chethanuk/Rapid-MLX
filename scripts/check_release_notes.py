@@ -16,25 +16,46 @@ def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"invalid release version: {version!r}")
 
-    headings = {
-        match.group(1)
-        for line in changelog.read_text(encoding="utf-8").splitlines()
-        if (match := CHANGELOG_HEADING_RE.match(line))
-    }
-    if version not in headings:
+    changelog_lines = changelog.read_text(encoding="utf-8").splitlines()
+    section_start = next(
+        (
+            index + 1
+            for index, line in enumerate(changelog_lines)
+            if (match := CHANGELOG_HEADING_RE.match(line)) and match.group(1) == version
+        ),
+        None,
+    )
+    if section_start is None:
         raise ValueError(f"{changelog} has no exact '## [{version}]' section")
+
+    section_end = next(
+        (
+            index
+            for index in range(section_start, len(changelog_lines))
+            if changelog_lines[index].startswith("## ")
+        ),
+        len(changelog_lines),
+    )
 
     notes = notes_dir / f"v{version}.md"
     if not notes.is_file():
         raise ValueError(f"release notes are missing: {notes}")
     normalizer = Path(__file__).with_name("strip_release_note_comments.awk")
-    normalized = subprocess.run(
-        ["awk", "-f", str(normalizer), str(notes)],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    if not normalized.strip():
+
+    def visible(markdown: str) -> bool:
+        normalized = subprocess.run(
+            ["awk", "-f", str(normalizer)],
+            input=markdown,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return bool(normalized.strip())
+
+    section = "\n".join(changelog_lines[section_start:section_end])
+    if not visible(section):
+        raise ValueError(f"{changelog} has an empty '## [{version}]' section")
+    if not visible(notes.read_text(encoding="utf-8")):
         raise ValueError(f"release notes are empty: {notes}")
 
 

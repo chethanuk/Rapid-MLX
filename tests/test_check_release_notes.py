@@ -9,7 +9,8 @@ from scripts.check_release_notes import check_release_notes, main
 def _inputs(tmp_path: Path, version: str = "0.13.1") -> tuple[Path, Path]:
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(
-        f"# Changelog\n\n## [{version}] — 2026-08-26\n", encoding="utf-8"
+        f"# Changelog\n\n## [{version}] — 2026-08-26\n\nVisible change.\n",
+        encoding="utf-8",
     )
     notes_dir = tmp_path / "notes"
     notes_dir.mkdir()
@@ -27,6 +28,16 @@ def test_rejects_missing_exact_changelog_section(tmp_path: Path) -> None:
     changelog, notes_dir = _inputs(tmp_path)
     changelog.write_text("## [0.13.10]\n", encoding="utf-8")
     with pytest.raises(ValueError, match="no exact"):
+        check_release_notes("0.13.1", changelog, notes_dir)
+
+
+def test_rejects_empty_exact_changelog_section(tmp_path: Path) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    changelog.write_text(
+        "## [0.13.1] — 2026-08-26\n\n<!-- draft -->\n\n## [0.13.0]\nold\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="empty '## \\[0.13.1\\]'"):
         check_release_notes("0.13.1", changelog, notes_dir)
 
 
