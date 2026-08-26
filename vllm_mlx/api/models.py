@@ -1562,7 +1562,12 @@ class ChatCompletionRequest(BaseModel):
     stream_options: StreamOptions | None = (
         None  # Streaming options (include_usage, etc.)
     )
-    stop: list[str] | None = None
+    # OpenAI request shape: ``stop`` accepts a scalar string OR an array
+    # of strings; declare the union so the OpenAPI/JSON schema advertises
+    # both. ``_normalize_stop`` (mode="before") wraps a scalar into a
+    # one-element list, so the runtime value stays a list for downstream
+    # code (``SamplingParams.stop: list[str]``).
+    stop: str | list[str] | None = None
     # Extended OpenAI-compatible sampling parameters. Without these declared,
     # Pydantic drops them on parse (#355). top_k / min_p flow through to the
     # mlx-lm sampler; repetition_penalty / presence_penalty / frequency_penalty
@@ -2215,7 +2220,12 @@ class CompletionRequest(BaseModel):
     # LangChain / AI-SDK accumulators (same root cause as the
     # chat-route bug). Default ``None`` ⇒ no usage on the wire.
     stream_options: StreamOptions | None = None
-    stop: list[str] | None = None
+    # OpenAI request shape: ``stop`` accepts a scalar string OR an array
+    # of strings; declare the union so the OpenAPI/JSON schema advertises
+    # both. ``_normalize_stop`` (mode="before") wraps a scalar into a
+    # one-element list, so the runtime value stays a list for downstream
+    # code (``SamplingParams.stop: list[str]``).
+    stop: str | list[str] | None = None
     # Extended OpenAI-compatible sampling parameters — see #355 + the
     # matching block on ChatCompletionRequest for wiring + caveats.
     # H-10: ``top_k`` / ``repetition_penalty`` finite-range gates

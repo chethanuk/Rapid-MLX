@@ -607,6 +607,20 @@ class TestStopScalar:
         with pytest.raises(ValidationError):
             factory(stop=["END", 42])
 
+    @pytest.mark.parametrize("req_model", [ChatCompletionRequest, CompletionRequest])
+    def test_openapi_schema_advertises_scalar_or_array(self, req_model):
+        """The OpenAPI/JSON schema for ``stop`` must advertise both a
+        scalar string and an array of strings (the accepted wire shapes),
+        so generated clients accept the newly supported scalar form."""
+        stop_prop = req_model.model_json_schema()["properties"]["stop"]
+        assert "anyOf" in stop_prop, f"stop schema is not a union: {stop_prop}"
+        type_set = {arm.get("type") for arm in stop_prop["anyOf"]}
+        # string or array are the OpenAI-accepted wire shapes; ``null`` is
+        # present because the field is optional (None = server default).
+        assert type_set == {"string", "array", "null"}, (
+            f"stop schema wrong: {stop_prop}"
+        )
+
 
 class TestTimeoutValidation:
     """A non-positive / non-finite ``timeout`` must be rejected with a
