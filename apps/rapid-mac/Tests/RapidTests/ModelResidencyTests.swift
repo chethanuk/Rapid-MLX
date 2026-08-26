@@ -220,6 +220,83 @@ struct ModelResidencyTests {
         ))
     }
 
+    @Test("Model switch confirmation defaults on and supports explicit automation opt-out")
+    func modelSwitchConfirmationPreferenceContract() throws {
+        let suite = "ModelSwitchConfirmationPreferenceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(ModelSwitchConfirmationPreference.isEnabled(in: defaults))
+        defaults.set(false, forKey: ModelSwitchConfirmationPreference.storageKey)
+        #expect(!ModelSwitchConfirmationPreference.isEnabled(in: defaults))
+        defaults.set(true, forKey: ModelSwitchConfirmationPreference.storageKey)
+        #expect(ModelSwitchConfirmationPreference.isEnabled(in: defaults))
+    }
+
+    @Test(
+        "Cancelling an active-request model switch leaves the live model untouched",
+        .timeLimit(.minutes(1))
+    )
+    func cancelledBusySwitchPreservesLiveModel() async throws {
+        var client = ServerResidencyClient()
+        client.session = BusyResidencyProtocol.session()
+        let defaultsSuite = "CancelledBusySwitch.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let server = ServerManager(
+            testingState: .ready(alias: "current-model"),
+            residency: .empty,
+            activeBearer: "test-bearer",
+            sessionDefaults: defaults
+        )
+        server._testSetResidencyClient(client)
+        server._testInstallChild(ProcessGroupChild.testStub())
+
+        let switchTask = Task {
+            await server.ensureServing(
+                alias: "target-model",
+                hfPath: "test/target-model",
+                estimatedMemoryGB: nil,
+                replacementGroup: .assistant
+            )
+        }
+        let request = await waitForPendingModelSwitch(on: server)
+        #expect(request.risk.activeRequests == 1)
+        server.cancelPendingModelSwitch(request)
+
+        #expect(await switchTask.value == false)
+        #expect(server.state == .ready(alias: "current-model"))
+        #expect(server.servingAlias == "current-model")
+        #expect(server.pendingModelSwitch == nil)
+    }
+
+    private func waitForPendingModelSwitch(
+        on server: ServerManager
+    ) async -> ServerManager.PendingModelSwitch {
+        if let request = server.pendingModelSwitch {
+            return request
+        }
+
+        let changes = AsyncStream<Void> { continuation in
+            withObservationTracking {
+                if server.pendingModelSwitch != nil {
+                    continuation.yield()
+                    continuation.finish()
+                }
+            } onChange: {
+                continuation.yield()
+                continuation.finish()
+            }
+        }
+        for await _ in changes {
+            if let request = server.pendingModelSwitch {
+                return request
+            }
+        }
+        Issue.record("The model-switch confirmation request was never published")
+        fatalError("unreachable after recording a missing confirmation request")
+    }
+
     @Test("Connector restart prefers a resident text model over the process-owning audio alias")
     func connectorRestartTextAlias() {
         let text = ResidentModelStatus(
@@ -815,6 +892,29 @@ struct ModelResidencyTests {
             memoryBandwidthGBs: 150
         )
     }
+}
+
+private final class BusyResidencyProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BusyResidencyProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override func startLoading() {
+        let payload = #"{"memory_limit_bytes":10,"memory_used_bytes":1,"memory_available_bytes":9,"idle_ttl_seconds":60,"loads_total":1,"evictions_total":0,"models":[{"id":"current-model","model_path":"test/current-model","aliases":[],"modality":"text","state":"resident","pinned":true,"primary":true,"active_requests":1,"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}],"audio_lanes":[]}"#.data(using: .utf8)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class ResidencyLoadCaptureProtocol: URLProtocol, @unchecked Sendable {

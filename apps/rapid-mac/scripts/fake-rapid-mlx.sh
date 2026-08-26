@@ -316,6 +316,29 @@ SERVED_ALIAS = ""
 # a sidecar replacement starts a fresh process with no resident audio lanes.
 RESIDENT_AUDIO_LANES = {}
 
+
+class _ActiveChatRequests:
+    """Thread-safe active-request count for model-switch golden flows."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def begin(self):
+        with self._lock:
+            self._count += 1
+
+    def end(self):
+        with self._lock:
+            self._count = max(0, self._count - 1)
+
+    def value(self):
+        with self._lock:
+            return self._count
+
+
+ACTIVE_CHAT_REQUESTS = _ActiveChatRequests()
+
 # The engine's own, actionable rejection reason. Kept out of the snapshot so a
 # stock persona never changes residency shape; a flow opts in with
 # ``FAKE_REJECT_IMAGE_LOAD=1`` to exercise the rejected non-404/405 load path.
@@ -572,6 +595,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
         return
 
+    def setup(self):
+        super().setup()
+        self._owns_active_chat_request = False
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            if self._owns_active_chat_request:
+                ACTIVE_CHAT_REQUESTS.end()
+                self._owns_active_chat_request = False
+
     def do_GET(self):
         if self.path == "/healthz":
             self._json(200, {"ok": True})
@@ -632,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 "state": "resident",
                 "pinned": True,
                 "primary": True,
-                "active_requests": 0,
+                "active_requests": ACTIVE_CHAT_REQUESTS.value(),
                 "estimated_bytes": 1,
                 "measured_bytes": None,
                 "idle_seconds": 0.0,
@@ -881,6 +916,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self._json(404, {"error": "not_found"})
             return
+        ACTIVE_CHAT_REQUESTS.begin()
+        self._owns_active_chat_request = True
+        _event("chat_active", active_requests=ACTIVE_CHAT_REQUESTS.value())
         # Decode only enough of the request to drive normal SSE chat.
         length = int(self.headers.get("content-length", "0") or "0")
         body = {}

@@ -125,11 +125,9 @@ enum ModelReadiness: Equatable {
             }
         }
 
-        /// True when the action should render as a real button. See the
-        /// ``chooseModel`` note above.
+        /// Every public action is executable and renders as a real button.
         var isRenderable: Bool {
-            if case .chooseModel = self { return false }
-            return true
+            true
         }
 
         /// The alias this action operates on, when it has one.

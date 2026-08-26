@@ -693,10 +693,13 @@ struct ContentView: View {
     private func performReadinessAction(_ action: ModelReadiness.Action) {
         switch action {
         case .chooseModel:
-            // The model picker in the composer owns this step; the
-            // banner names it but deliberately renders no second
-            // control. See ``ModelReadiness.Action.isRenderable``.
-            break
+            // Use the existing model-management destination: it owns the
+            // RAM-aware recommendations and cached-model choices. This keeps
+            // the empty-state action useful without reopening onboarding or
+            // introducing a second picker state machine.
+            settingsRouter.route(.openModelManagement) {
+                openWindow(id: "settings")
+            }
         case .download(let target):
             downloadModel(target)
         case .start(let target):
