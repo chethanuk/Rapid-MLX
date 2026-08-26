@@ -690,6 +690,17 @@ final class ServerManager {
     /// memory-confirmation re-entry does not lose the proof carried by the
     /// original Start action when a later catalog subprocess fails.
     private var catalogProvenStartEntries: [String: ModelEntry] = [:]
+    /// Lane-only provenance learned from an authoritative start-time lookup.
+    /// This intentionally retains no launch capabilities: a later empty probe
+    /// may preserve chat persistence, but must not reuse stale image/runtime
+    /// metadata when assembling a new serve command.
+    private var catalogProvenChatAliases: Set<String> = []
+    /// Catalog dependency shared by the residency decision and spawn path.
+    /// Production uses the process-wide cache; lifecycle tests replace only
+    /// this boundary so successive authoritative/transient results are fully
+    /// deterministic without spawning the real catalog subprocess.
+    @ObservationIgnored
+    private var catalogEntriesProvider: ((URL, UInt) async -> [ModelEntry])?
 
     /// v0.6 audit P1 (ServerManager — silent-crash detection):
     /// once the child has reported ready, continue polling /healthz
@@ -1006,18 +1017,36 @@ final class ServerManager {
         self.state = newState
     }
 
+    internal func _testSetCatalogEntriesProvider(
+        _ provider: @escaping (URL, UInt) async -> [ModelEntry]
+    ) {
+        catalogEntriesProvider = provider
+    }
+
+    private func catalogEntries(binary: URL, generation: UInt) async -> [ModelEntry] {
+        if let catalogEntriesProvider {
+            return await catalogEntriesProvider(binary, generation)
+        }
+        return await ModelCatalogCache.shared.entries(
+            binary: binary,
+            generation: generation
+        )
+    }
+
     /// Publish the selection consequence of a successful health transition.
     /// Kept as one lifecycle boundary so tests exercise the same call that the
     /// real `/healthz` success path uses instead of calling persistence policy
     /// in isolation.
     internal func recordReadySelection(
         alias: String,
-        catalogEntry: ModelEntry?
+        catalogEntry: ModelEntry?,
+        retainedChatProof: Bool = false
     ) {
         guard let sessionDefaults else { return }
         SessionModelRestore.persistReadyAlias(
             alias,
             catalogEntry: catalogEntry,
+            retainedChatProof: retainedChatProof,
             defaults: sessionDefaults
         )
     }
@@ -1221,7 +1250,7 @@ final class ServerManager {
         // authoritatively. This probe is needed only to decide whether an
         // already-running text-lane sidecar can accept a resident load.
         if child != nil, let binary = binaryPath {
-            let entry = await ModelCatalogCache.shared.entries(
+            let entry = await catalogEntries(
                 binary: binary,
                 generation: downloads?.cacheGeneration ?? 0
             ).first {
@@ -1955,20 +1984,42 @@ final class ServerManager {
         // launch a visual checkpoint in its text lane. Keeping this await
         // before `isOperating = true` preserves the cancellable startup
         // contract; re-check every entry guard after actor reentrancy.
-        let probedCatalogEntry = await ModelCatalogCache.shared.entries(
+        let probedCatalogEntries = await catalogEntries(
             binary: binary,
             generation: downloads?.cacheGeneration ?? 0
-        ).first {
+        )
+        let probedCatalogEntry = probedCatalogEntries.first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
+        let retainedCatalogHint = catalogEntryHint
+            ?? catalogProvenStartEntries[trimmedAlias.lowercased()]
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
             probed: probedCatalogEntry,
-            hint: catalogEntryHint
-                ?? catalogProvenStartEntries[trimmedAlias.lowercased()]
+            hint: probedCatalogEntries.isEmpty ? retainedCatalogHint : nil
         )
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }
+        let provenanceKey = trimmedAlias.lowercased()
+        catalogProvenStartEntries.removeValue(forKey: provenanceKey)
+        if let probedCatalogEntry {
+            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: probedCatalogEntry) {
+                catalogProvenChatAliases.insert(provenanceKey)
+            } else {
+                catalogProvenChatAliases.remove(provenanceKey)
+            }
+        } else if !probedCatalogEntries.isEmpty {
+            catalogProvenChatAliases.remove(provenanceKey)
+        } else if let retainedCatalogHint {
+            if SessionModelRestore.shouldPersistChatAlias(catalogEntry: retainedCatalogHint) {
+                catalogProvenChatAliases.insert(provenanceKey)
+            } else {
+                catalogProvenChatAliases.remove(provenanceKey)
+            }
+        }
+        let retainedChatProof = catalogEntry == nil
+            && probedCatalogEntries.isEmpty
+            && catalogProvenChatAliases.contains(provenanceKey)
         let catalogSupportsImageInput = ModelBrandStyle.supportsImageInput(
             forAlias: trimmedAlias,
             isBuiltinProfile: catalogEntry?.isBuiltinProfile,
@@ -2423,7 +2474,11 @@ final class ServerManager {
                 // overwrite the previous good-known value, so a
                 // crashed launch attempt doesn't strand the resume
                 // logic on a model the user can't actually load.
-                recordReadySelection(alias: trimmedAlias, catalogEntry: catalogEntry)
+                recordReadySelection(
+                    alias: trimmedAlias,
+                    catalogEntry: catalogEntry,
+                    retainedChatProof: retainedChatProof
+                )
                 await refreshResidency()
                 // v0.6 audit P1 (silent-crash detection): now that
                 // the child is ready, start the runtime health

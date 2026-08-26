@@ -34,9 +34,12 @@ struct SessionModelRestore: Equatable, Sendable {
     static func persistReadyAlias(
         _ alias: String,
         catalogEntry: ModelEntry?,
+        retainedChatProof: Bool = false,
         defaults: UserDefaults = .standard
     ) {
-        guard shouldPersistChatAlias(catalogEntry: catalogEntry) else { return }
+        guard retainedChatProof || shouldPersistChatAlias(catalogEntry: catalogEntry) else {
+            return
+        }
         defaults.set(alias, forKey: chatAliasStorageKey)
     }
 
