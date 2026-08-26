@@ -17,6 +17,8 @@ can actually understand.
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-08-26
+
 ### Added
 
 - **Assistant changes are explicit, safe transactions.** Desktop and API
@@ -91,6 +93,11 @@ can actually understand.
 - **System-prompt settings explain what is actually sent.** Saved and effective
   prompts are distinguished, and optional credentials are read only when
   needed. ([#2341](https://github.com/raullenchai/Rapid-MLX/pull/2341))
+- **Generated images can be removed safely from the session gallery.** A
+  confirmation protects against accidental deletion, adjacent selection and
+  the empty state recover correctly, and files already saved to disk are left
+  untouched. Contributed by
+  [osdodo](https://github.com/osdodo). ([#2387](https://github.com/raullenchai/Rapid-MLX/pull/2387))
 
 ### Documentation
 
@@ -99,7 +106,7 @@ can actually understand.
 - Published a reproducible M2 Pro comparison of 0.13.0 and 0.12.18.
   ([#2375](https://github.com/raullenchai/Rapid-MLX/pull/2375))
 
-<!-- Train 3 entries are added here only after that train lands. -->
+<!-- Remaining train 3/4 entries are added here only after those trains land. -->
 
 ## [0.13.0] — 2026-08-26
 
