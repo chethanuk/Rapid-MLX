@@ -98,6 +98,18 @@ can actually understand.
   the empty state recover correctly, and files already saved to disk are left
   untouched. Contributed by
   [osdodo](https://github.com/osdodo). ([#2387](https://github.com/raullenchai/Rapid-MLX/pull/2387))
+- **Complete offline snapshots remain available without a branch ref.** A
+  single immutable cached revision is recognized as runnable, while ambiguous
+  multi-snapshot caches still fail closed. ([#2351](https://github.com/raullenchai/Rapid-MLX/issues/2351),
+  [#2404](https://github.com/raullenchai/Rapid-MLX/pull/2404))
+- **Model switching no longer scans mounted filesystems to discover servers.**
+  Live socket ownership supplies the same port and process facts without
+  prompting for access to unrelated volumes. ([#2343](https://github.com/raullenchai/Rapid-MLX/issues/2343),
+  [#2408](https://github.com/raullenchai/Rapid-MLX/pull/2408))
+- **Files can be dropped directly into the chat composer.** Supported native
+  file URLs use the existing attachment importer, while unsupported drops
+  cannot leak a local path into the message. Contributed by
+  [osdodo](https://github.com/osdodo). ([#2396](https://github.com/raullenchai/Rapid-MLX/pull/2396))
 
 ### Documentation
 
@@ -106,7 +118,7 @@ can actually understand.
 - Published a reproducible M2 Pro comparison of 0.13.0 and 0.12.18.
   ([#2375](https://github.com/raullenchai/Rapid-MLX/pull/2375))
 
-<!-- Remaining train 3/4 entries are added here only after those trains land. -->
+<!-- Remaining train 4 entries are added here only after that train lands. -->
 
 ## [0.13.0] — 2026-08-26
 
