@@ -17,6 +17,48 @@ struct SessionModelRestoreTests {
         }
     }
 
+    private actor ReentrantCatalogLoader {
+        private var callCount = 0
+        private var firstStarted = false
+        private var firstStartWaiters: [CheckedContinuation<Void, Never>] = []
+        private var firstResult: CheckedContinuation<[ModelEntry], Never>?
+        private let newerResult: [ModelEntry]
+
+        init(newerResult: [ModelEntry]) {
+            self.newerResult = newerResult
+        }
+
+        func load() async -> [ModelEntry] {
+            callCount += 1
+            switch callCount {
+            case 1:
+                firstStarted = true
+                let waiters = firstStartWaiters
+                firstStartWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                return await withCheckedContinuation { continuation in
+                    firstResult = continuation
+                }
+            case 2:
+                return newerResult
+            default:
+                return []
+            }
+        }
+
+        func waitUntilFirstStarted() async {
+            if firstStarted { return }
+            await withCheckedContinuation { continuation in
+                firstStartWaiters.append(continuation)
+            }
+        }
+
+        func releaseFirst(with entries: [ModelEntry]) {
+            firstResult?.resume(returning: entries)
+            firstResult = nil
+        }
+    }
+
     private let chat = ModelEntry(
         alias: "qwen3.5-4b-4bit",
         hfRepo: "mlx-community/Qwen3.5-4B-MLX-4bit",
@@ -217,6 +259,21 @@ struct SessionModelRestoreTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
 
+        var hintedChat = ModelEntry(
+            alias: "qwen3.5-4b-8bit",
+            hfRepo: "mlx-community/Qwen3.5-4B-MLX-8bit",
+            sizeOnDisk: "4.5 GB",
+            cached: true,
+            kind: .chat
+        )
+        hintedChat.isBuiltinProfile = true
+        hintedChat.isTextOnly = false
+        #expect(ModelBrandStyle.supportsImageInput(
+            forAlias: hintedChat.alias,
+            isBuiltinProfile: hintedChat.isBuiltinProfile,
+            isTextOnly: hintedChat.isTextOnly
+        ))
+
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -228,18 +285,231 @@ struct SessionModelRestoreTests {
             sessionDefaults: defaults
         )
         server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in [] }
 
         let ready = await server.ensureServing(
-            alias: chat.alias,
-            hfPath: chat.hfRepo,
+            alias: hintedChat.alias,
+            hfPath: hintedChat.hfRepo,
             estimatedMemoryGB: nil,
             replacementGroup: .assistant,
-            catalogEntryHint: chat
+            catalogEntryHint: hintedChat
         )
 
         #expect(ready)
-        #expect(server.servingAlias == chat.alias)
-        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        #expect(server.servingAlias == hintedChat.alias)
+        #expect(server.launchedImageInputLane == true)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == hintedChat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: hintedChat.alias,
+            hfPath: hintedChat.hfRepo
+        )
+        #expect(restarted)
+        #expect(server.launchedImageInputLane == false,
+                "a consumed hint must retain only chat-lane proof, not image capability")
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == hintedChat.alias)
+        await server.stop()
+    }
+
+    @Test(
+        "An authoritative chat start remains proven across a transiently empty restart probe",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func authoritativeChatProofSurvivesRestartProbeFailure() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        var authoritativeChat = ModelEntry(
+            alias: "qwen3.5-4b-8bit",
+            hfRepo: "mlx-community/Qwen3.5-4B-MLX-8bit",
+            sizeOnDisk: "4.5 GB",
+            cached: true,
+            kind: .chat
+        )
+        authoritativeChat.isBuiltinProfile = true
+        authoritativeChat.isTextOnly = false
+        #expect(ModelBrandStyle.supportsImageInput(
+            forAlias: authoritativeChat.alias,
+            isBuiltinProfile: authoritativeChat.isBuiltinProfile,
+            isTextOnly: authoritativeChat.isTextOnly
+        ))
+        let catalog = SequencedCatalogLoader([[authoritativeChat], []])
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in
+            await catalog.load()
+        }
+
+        let firstReady = await server.ensureServing(
+            alias: authoritativeChat.alias,
+            hfPath: authoritativeChat.hfRepo
+        )
+        #expect(firstReady)
+        #expect(server.launchedImageInputLane == true)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == authoritativeChat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: authoritativeChat.alias,
+            hfPath: authoritativeChat.hfRepo
+        )
+        #expect(restarted)
+        #expect(server.servingAlias == authoritativeChat.alias)
+        #expect(server.launchedImageInputLane == false,
+                "retained chat-lane proof must not retain stale launch capabilities")
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == authoritativeChat.alias)
+        await server.stop()
+    }
+
+    @Test(
+        "A nonempty authoritative catalog invalidates missing-alias chat proof",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func authoritativeCatalogMissingAliasInvalidatesChatProof() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let removedChat = ModelEntry(
+            alias: "removed-chat",
+            hfRepo: "example/removed-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let remainingChat = ModelEntry(
+            alias: "remaining-chat",
+            hfRepo: "example/remaining-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let catalog = SequencedCatalogLoader([[removedChat], [remainingChat], []])
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in await catalog.load() }
+
+        let firstReady = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo,
+            estimatedMemoryGB: nil,
+            replacementGroup: .assistant,
+            catalogEntryHint: removedChat
+        )
+        #expect(firstReady)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == removedChat.alias)
+
+        await server.stop()
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let restarted = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo
+        )
+        #expect(restarted)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
+
+        await server.stop()
+        let failedProbeRestart = await server.ensureServing(
+            alias: removedChat.alias,
+            hfPath: removedChat.hfRepo
+        )
+        #expect(failedProbeRestart)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat",
+            "a later empty probe must not revive proof invalidated by the authoritative catalog")
+        await server.stop()
+    }
+
+    @Test(
+        "A superseded catalog probe cannot restore stale chat provenance",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func supersededProbeCannotRewriteChatProvenance() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("previous-chat", forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let sharedAlias = "lane-reclassified-model"
+        let formerlyChat = ModelEntry(
+            alias: sharedAlias,
+            hfRepo: "example/former-chat",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .chat
+        )
+        let nowAudio = ModelEntry(
+            alias: sharedAlias,
+            hfRepo: "example/now-audio",
+            sizeOnDisk: "1 GB",
+            cached: true,
+            kind: .audio,
+            audioCapability: .transcription
+        )
+        let catalog = ReentrantCatalogLoader(newerResult: [nowAudio])
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+        server.memorySnapshotProvider = { Self.safeMemorySnapshot }
+        server._testSetCatalogEntriesProvider { _, _ in await catalog.load() }
+
+        let older = Task { await server.start(alias: sharedAlias) }
+        await catalog.waitUntilFirstStarted()
+        let newer = Task { await server.start(alias: sharedAlias) }
+        await newer.value
+        await catalog.releaseFirst(with: [formerlyChat])
+        await older.value
+
+        #expect(server.servingAlias == sharedAlias)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
+
+        await server.stop()
+        let restarted = await server.ensureServing(alias: sharedAlias, hfPath: nil)
+        #expect(restarted)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey)
+            == "previous-chat")
         await server.stop()
     }
 
