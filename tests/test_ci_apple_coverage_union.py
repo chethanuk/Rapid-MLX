@@ -22,12 +22,6 @@ def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
     assert "coverage-linux-${{ matrix.python-version }}.data" in text
     assert "coverage-apple.data" in text
     assert "--cov=vllm_mlx" in apple["steps"][-2]["run"]
-    for qwen38_contract in (
-        "tests/test_dspark_scheduler.py",
-        "tests/test_prefix_cache_persistence.py",
-        "tests/test_qwen4_exp_vendored.py",
-    ):
-        assert qwen38_contract in apple["steps"][-2]["run"]
     assert set(gate["needs"]) == {
         "changes",
         "test-matrix",
@@ -50,6 +44,20 @@ def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
     early_exit = aggregate_run.index('if [ "$expected" != "true" ]')
     union_check = aggregate_run.index("needs.changed-lines-coverage.result")
     assert early_exit < union_check
+
+
+def test_apple_coverage_roster_contains_only_tracked_tests() -> None:
+    _, workflow = _workflow()
+    apple_run = workflow["jobs"]["test-apple-silicon"]["steps"][-2]["run"]
+    test_paths = [
+        token.rstrip(" \\")
+        for token in apple_run.splitlines()
+        if token.strip().startswith("tests/")
+    ]
+
+    assert test_paths
+    for relative_path in test_paths:
+        assert (WORKFLOW.parents[2] / relative_path.strip()).is_file(), relative_path
 
 
 def test_coverage_data_is_commit_bound_and_fail_closed() -> None:

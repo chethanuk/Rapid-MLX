@@ -466,9 +466,6 @@ jobs:
             tests/test_muse_glimmer_model.py \
             tests/test_bailing_hybrid_model.py \
             tests/test_mtp_spec_decode.py \
-            tests/test_dspark_scheduler.py \
-            tests/test_prefix_cache_persistence.py \
-            tests/test_qwen4_exp_vendored.py \
             -v --tb=short \
             -m "not slow" \
             -k "not Integration" \
