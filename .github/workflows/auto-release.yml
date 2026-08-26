@@ -255,6 +255,8 @@ jobs:
           # drift or eviction fail closed instead of silently downloading.
           SIDECAR_VISION_SMOKE_MODEL: mlx-community/Qwen3.5-9B-4bit
           SIDECAR_VISION_SMOKE_REVISION: 8b2b98c00a6b4d291155e4890773ca8f769aee53
+          SIDECAR_GEMMA_SMOKE_MODEL: mlx-community/gemma-4-e2b-it-8bit
+          SIDECAR_GEMMA_SMOKE_REVISION: 03dcf209f3f549b4075e7191e77cf69b3d48e1b2
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
@@ -276,6 +278,18 @@ jobs:
           # incompatible reduced dependency set, or failed image request.
           HF_HUB_OFFLINE=1 bash apps/rapid-mac/scripts/build-sidecar.sh \
             --out "$RUNNER_TEMP/desktop-vision-sidecar-$VERSION"
+
+          # The reduced dependency-set exception covers both Qwen and Gemma
+          # chat-photo families. The build-sidecar invocation proves Qwen;
+          # reuse those exact built bytes for an independent Gemma4 request.
+          SIDE="$RUNNER_TEMP/desktop-vision-sidecar-$VERSION/rapid-mlx"
+          HF_HUB_OFFLINE=1 PYTHONPATH="$SIDE/site-packages" PYTHONNOUSERSITE=1 \
+            "$SIDE/python/bin/python3.12" \
+            apps/rapid-mac/scripts/smoke-sidecar-vision.py \
+            --sidecar-root "$SIDE" \
+            --model "$SIDECAR_GEMMA_SMOKE_MODEL" \
+            --revision "$SIDECAR_GEMMA_SMOKE_REVISION" \
+            --image apps/rapid-mac/Sources/Rapid/Resources/cheetah.png
           rm -rf "$V"
 
   # 2b) Desktop candidate gate (macos-15). Builds + signs + notarises + DMG-

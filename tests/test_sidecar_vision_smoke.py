@@ -33,7 +33,14 @@ def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
         "SIDECAR_VISION_SMOKE_REVISION: 8b2b98c00a6b4d291155e4890773ca8f769aee53"
         in workflow
     )
+    assert "SIDECAR_GEMMA_SMOKE_MODEL: mlx-community/gemma-4-e2b-it-8bit" in workflow
+    assert (
+        "SIDECAR_GEMMA_SMOKE_REVISION: 03dcf209f3f549b4075e7191e77cf69b3d48e1b2"
+        in workflow
+    )
     assert "HF_HUB_OFFLINE=1 bash apps/rapid-mac/scripts/build-sidecar.sh" in workflow
+    assert '"$SIDE/python/bin/python3.12"' in workflow
+    assert '--model "$SIDECAR_GEMMA_SMOKE_MODEL"' in workflow
     assert "apps/rapid-mac/scripts/build-sidecar.sh" in workflow
 
 
