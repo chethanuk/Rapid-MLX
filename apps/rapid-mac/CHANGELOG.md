@@ -21,10 +21,10 @@ can actually understand.
 
 ### Added
 
-- **Assistant changes are explicit, safe transactions.** Desktop and API
-  clients can choose whether a busy text or vision model switch should reject,
-  wait, or abort active assistant work, without evicting auxiliary speech
-  models or leaving request ownership ambiguous. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
+- **Assistant changes are explicit, safe transactions.** API clients can choose
+  whether a busy text or vision model switch should reject, wait, or abort
+  active assistant work. Desktop rejects a busy switch safely, and auxiliary
+  speech models remain resident. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
 - **Large multi-variant repositories can download one serving format.** The CLI
   accepts `--bits` or `--format`, so users do not need to fetch every
   quantization in a repository. ([#2145](https://github.com/raullenchai/Rapid-MLX/issues/2145),
@@ -3301,7 +3301,8 @@ Older versions: see the
 [GitHub Releases page](https://github.com/machinefi/rapid-desktop/releases)
 for auto-generated notes against earlier tags.
 
-[Unreleased]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.12.16...HEAD
+[Unreleased]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.1...HEAD
+[0.13.1]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.0...rapid-mac-v0.13.1
 [0.5.16]: https://github.com/machinefi/rapid-desktop/compare/v0.5.15...v0.5.16
 [0.5.15]: https://github.com/machinefi/rapid-desktop/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/machinefi/rapid-desktop/compare/v0.5.13...v0.5.14
