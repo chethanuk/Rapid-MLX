@@ -3989,6 +3989,16 @@ final class ServerManager {
 /// `DownloadManager` on `Process` because downloads do not fork a live
 /// server tree.
 final class ProcessGroupChild: @unchecked Sendable {
+    /// Process exit observation is event-driven. A blocking `waitpid` parked
+    /// on a shared GCD pool can starve on small hosted runners; the resulting
+    /// unreaped group leader makes `terminateChild` burn its entire SIGTERM
+    /// grace and can strand the next launch behind the old port. The source
+    /// wakes this dedicated serial queue only after the kernel reports exit.
+    private static let exitMonitorQueue = DispatchQueue(
+        label: "com.rapidmlx.desktop.process-exit-monitor",
+        qos: .userInitiated
+    )
+
     let processIdentifier: pid_t
     let processGroupID: pid_t
 
@@ -4009,6 +4019,7 @@ final class ProcessGroupChild: @unchecked Sendable {
     private var rawTerminationStatus: Int32 = 0
     private var rawTerminationReason: Process.TerminationReason = .exit
     private var terminationHandler: (@Sendable (ProcessGroupChild) -> Void)?
+    private var exitSource: (any DispatchSourceProcess)?
 
     var isRunning: Bool {
         lock.lock()
@@ -4207,20 +4218,43 @@ final class ProcessGroupChild: @unchecked Sendable {
         }
         monitorStarted = true
         lock.unlock()
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            var waitStatus: Int32 = 0
-            let waited = waitpid(self.processIdentifier, &waitStatus, 0)
-            guard waited == self.processIdentifier else { return }
-            let decoded = Self.decode(waitStatus: waitStatus)
-            self.lock.lock()
-            self.running = false
-            self.rawTerminationStatus = decoded.status
-            self.rawTerminationReason = decoded.reason
-            let handler = self.terminationHandler
-            self.lock.unlock()
-            handler?(self)
+
+        let source = DispatchSource.makeProcessSource(
+            identifier: processIdentifier,
+            eventMask: .exit,
+            queue: Self.exitMonitorQueue
+        )
+        source.setEventHandler { [weak self] in
+            self?.reapExitedProcess()
         }
+        lock.lock()
+        exitSource = source
+        lock.unlock()
+        source.activate()
+    }
+
+    /// Reap only after the process-exit source fires, so `waitpid` is no
+    /// longer a blocking worker-pool reservation. Retry EINTR, then publish
+    /// the same once-only lifecycle callback as the prior monitor.
+    private func reapExitedProcess() {
+        var waitStatus: Int32 = 0
+        var waited: pid_t
+        repeat {
+            waited = waitpid(processIdentifier, &waitStatus, 0)
+        } while waited == -1 && errno == EINTR
+        guard waited == processIdentifier else { return }
+
+        let decoded = Self.decode(waitStatus: waitStatus)
+        lock.lock()
+        running = false
+        rawTerminationStatus = decoded.status
+        rawTerminationReason = decoded.reason
+        let handler = terminationHandler
+        let source = exitSource
+        exitSource = nil
+        lock.unlock()
+        source?.cancel()
+        handler?(self)
     }
 
     private static func dup(

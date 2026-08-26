@@ -10,6 +10,28 @@ import Testing
 @MainActor
 @Suite("ServerManager state transitions")
 struct ServerManagerStateTests {
+    private func sourceURL(_ relativePath: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Rapid")
+            .appendingPathComponent(relativePath)
+    }
+
+    private final class ChildRetentionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var child: ProcessGroupChild?
+
+        func retain(_ child: ProcessGroupChild) {
+            lock.withLock { self.child = child }
+        }
+
+        func release() {
+            lock.withLock { child = nil }
+        }
+    }
+
     private func waitUntil(
         deadline: Date,
         predicate: () -> Bool
@@ -46,6 +68,48 @@ struct ServerManagerStateTests {
             !child.isProcessGroupAlive
         }
         #expect(exited)
+    }
+
+    @Test("Process exit observation reaps consecutive children without a blocking worker")
+    func processExitObservationIsReusable() async throws {
+        func run(_ exitCode: Int32) async throws -> Int32 {
+            let box = ChildRetentionBox()
+            return try await withCheckedThrowingContinuation { continuation in
+                do {
+                    let child = try ProcessGroupChild.spawn(
+                        executableURL: URL(fileURLWithPath: "/bin/sh"),
+                        arguments: ["-c", "exit \(exitCode)"],
+                        standardInput: .nullDevice,
+                        standardOutput: Pipe(),
+                        standardError: Pipe()
+                    ) { child in
+                        let status = child.terminationStatus
+                        box.release()
+                        continuation.resume(returning: status)
+                    }
+                    box.retain(child)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+
+        #expect(try await run(17) == 17)
+        #expect(try await run(23) == 23)
+    }
+
+    @Test("Process exit monitoring is event-driven")
+    func processExitMonitorSourceContract() throws {
+        let source = try String(contentsOf: sourceURL("Server/ServerManager.swift"))
+        let monitor = try #require(source.range(of: "func startMonitor()"))
+        let nextFunction = source.range(
+            of: "private static func dup(",
+            range: monitor.upperBound..<source.endIndex
+        )
+        let body = source[monitor.lowerBound..<(nextFunction?.lowerBound ?? source.endIndex)]
+
+        #expect(body.contains("DispatchSource.makeProcessSource"))
+        #expect(!body.contains("DispatchQueue.global"))
     }
 
     @Test("dismissTerminalState: .crashed with a binary path → .idle")
