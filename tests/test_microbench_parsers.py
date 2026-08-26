@@ -238,3 +238,22 @@ def test_report_mode_returns_zero_even_with_failures(mb):
     # if perf is degenerate, --report should still exit 0.
     rc = mb.main(["--iters", "1", "--report"])
     assert rc == 0
+
+
+def test_enforced_gate_returns_nonzero_without_report(mb, monkeypatch):
+    """The ENFORCED relative-budget gate (running WITHOUT ``--report``) must
+    exit nonzero when a parser exceeds its budget — this is the hard gate the
+    ci.yml microbench step now relies on (issue #2409 Codex: `--report` was
+    neutering the promised enforced gate). ``--report`` remains the explicit,
+    intentional opt-out for an info-only run."""
+    import time
+
+    def slow(_t):
+        # ~1000 µs/call — orders of magnitude over the 12× relative budget.
+        time.sleep(0.001)
+
+    monkeypatch.setattr(mb, "_build_parsers", lambda: {"hermes": slow})
+    # Enforced: a regression reddens the run (exit 1).
+    assert mb.main(["--iters", "5"]) == 1
+    # Explicit opt-out: --report still returns 0 even with the same failure.
+    assert mb.main(["--iters", "5", "--report"]) == 0
