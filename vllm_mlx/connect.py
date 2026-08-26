@@ -297,13 +297,15 @@ def _parse_base_url(base_url: str) -> tuple[str, int]:
         path = raw[:-1] if raw.endswith("/") else raw
     if path not in ("", "/v1"):
         raise ValueError(f"base-url path must be empty or /v1, got {base_url!r}")
-    # Decode ONLY the ``%25`` that represents a scoped IPv6 zone-id separator
-    # (``fe80::1%25en0`` -> ``fe80::1%en0``); :func:`_authority` then re-encodes
-    # it consistently when rendering, so the round-trip is stable. Other
-    # percent-escapes inside a hostname (``%2F``, ``%20``, …) are genuine octets
-    # and must NOT be blanket-unquoted or the host would be corrupted into a
-    # malformed URL (codex #2348-R2).
-    host = host.replace("%25", "%")
+    # A scoped IPv6 literal is the only host that carries a ``%25`` zone-id
+    # separator (``fe80::1%25en0`` -> raw ``fe80::1%en0``); :func:`_authority`
+    # then re-encodes it consistently when rendering, so the round-trip is
+    # stable. Detect IPv6 the same way ``_authority`` does (a ``:`` in the
+    # host) and decode ``%25`` ONLY there — in an ordinary hostname ``%25`` is
+    # a genuine encoded octet that must be left untouched, or the generated
+    # URL would be malformed (codex #2348-R2/R3).
+    if ":" in host:
+        host = host.replace("%25", "%")
     port = split.port if split.port is not None else 8000
     if not (1 <= port <= 65535):
         raise ValueError(f"base-url port must be between 1 and 65535, got {port}")

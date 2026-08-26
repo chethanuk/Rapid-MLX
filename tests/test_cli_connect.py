@@ -518,14 +518,24 @@ def test_parse_base_url_ipv6_bracketing():
 
 
 def test_parse_base_url_does_not_decode_non_zone_host_escapes():
-    # Only the zone-id `%25` is decoded back to `%`; other percent-escapes in a
-    # hostname are genuine octets and must survive, else the host would corrupt
-    # into a malformed URL (codex #2348-R2).
+    # In an ordinary (non-IPv6) hostname every percent-escape is a genuine
+    # octet and must survive untouched — including `%25` — else the generated
+    # URL would be malformed (codex #2348-R2/R3).
     assert connect._parse_base_url("http://%2Fexample.com:8000/v1") == (
         "%2Fexample.com",
         8000,
     )
     assert connect._parse_base_url("http://%20host:8000/v1") == ("%20host", 8000)
+    assert connect._parse_base_url("http://%25example.com:8000/v1") == (
+        "%25example.com",
+        8000,
+    )
+    # Only in a scoped IPv6 literal is `%25` a zone-id separator, decoded back
+    # to `%`.
+    assert connect._parse_base_url("http://[fe80::1%25en0]:8123/v1") == (
+        "fe80::1%en0",
+        8123,
+    )
 
 
 def test_parse_base_url_default_port_and_errors():
