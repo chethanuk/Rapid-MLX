@@ -28,6 +28,7 @@ struct DeferredTelemetryConsentBanner: View {
 
             Button("No thanks", role: .cancel) { consent.decline() }
                 .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
                 .accessibilityIdentifier("TelemetryConsent.PostValue.Decline")
 
             Button("Share") { consent.share() }
