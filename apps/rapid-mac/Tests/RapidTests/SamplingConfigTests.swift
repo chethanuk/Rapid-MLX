@@ -11,6 +11,8 @@ import Testing
 @MainActor
 @Suite("SamplingConfig defaults + persistence")
 final class SamplingConfigTests {
+    init() { CIHangWatchdog.noteProgress() }
+
     /// Names of every suite ``freshDefaults`` minted for this test
     /// instance. Each ``@Test`` gets a fresh instance of the suite
     /// type, so ``deinit`` runs after the test exits — the suite is
@@ -24,7 +26,10 @@ final class SamplingConfigTests {
     /// test`` runs.
     nonisolated(unsafe) private var createdSuiteNames: [String] = []
 
-    deinit { TestDefaultsScope.cleanup(suiteNames: createdSuiteNames) }
+    deinit {
+        CIHangWatchdog.noteProgress()
+        TestDefaultsScope.cleanup(suiteNames: createdSuiteNames)
+    }
 
     /// Issue #139 dedupe — the cleanup mechanics that used to live
     /// here are now shared with the other suite-minting tests via
