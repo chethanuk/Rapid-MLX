@@ -6819,6 +6819,14 @@ def pull_command(args):
         # re-link recreated snapshot symlinks; any changed blob (new file, or
         # a repaired corrupt/truncated blob whose size/mtime changed) => a real
         # download. ``_hf_cache_root`` resolves the cache entry (no network).
+        # The mirror may have ALREADY fetched some blobs before it returned
+        # False (a partial/failed attempt). Those bytes must still count: honor
+        # whatever the mirror reported on ANY exit path (Codex #2353). The R5
+        # per-file aggregation sets ``_mirror_out["network_fetch"]`` on the
+        # mirror's success AND partial-miss returns, so a partial mirror
+        # transfer forces "Downloaded" even when the snapshot_download that
+        # follows is a no-op.
+        _mirror_fetched = _mirror_out.get("network_fetch", False)
         _cache_root = _hf_cache_root(repo_id)
         _before = _blob_identifier(_cache_root)
         path = (
@@ -6827,7 +6835,7 @@ def pull_command(args):
             else snapshot_download(repo_id)
         )
         _after = _blob_identifier(_cache_root)
-        _was_cached = _before == _after and _before != ()
+        _was_cached = (_before == _after and _before != ()) and not _mirror_fetched
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a

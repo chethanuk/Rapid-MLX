@@ -165,6 +165,52 @@ def test_hf_cached_fallback_reports_verified(
     assert "Downloaded" not in out, out
 
 
+
+def test_partial_mirror_fetch_combines_into_fallback_verdict(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mirror that fetched SOME bytes before failing must still report
+    ``Downloaded``, even though the snapshot_download that follows is a no-op
+    (Codex #2353).
+
+    When the mirror returns False (partial/failed) it still records
+    ``out["network_fetch"] = True`` for the blobs it DID fetch. The HF-fallback
+    baseline is captured AFTER the mirror wrote those blobs, so its own
+    before/after blob comparison is a no-op -> ""Already cached"". The mirror's
+    transfer state must therefore be OR'd in: bytes did cross the wire this
+    invocation, so the summary says ``Downloaded``.
+    """
+    revision = "abc123" * 6
+    cache_root, blob_dir = _hf_snapshot_layout(
+        "mlx-community/Qwen3-0.6B-4bit", revision, tmp_path, already_cached=True
+    )
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+
+    def _mirror_partial(model_name: str, *, out=None) -> bool:
+        # Mirror fetched some blobs (network_fetch=True) but ultimately
+        # returned False (a file missed both R2 and HF).
+        if out is not None:
+            out["network_fetch"] = True
+        return False
+
+    def _download(*_args, **_kwargs):
+        # The fallback is a no-op: the mirror already laid down the blobs, so
+        # this invocation's before/after blob comparison is unchanged.
+        return str(blob_dir.parent / "snapshots" / revision)
+
+    args = argparse.Namespace(model="mlx-community/Qwen3-0.6B-4bit")
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", side_effect=_mirror_partial),
+        patch("huggingface_hub.snapshot_download", side_effect=_download),
+    ):
+        cli.pull_command(args)
+
+    out = capsys.readouterr().out
+    assert "Downloaded" in out, out
+    assert "Already cached" not in out, out
 def test_hf_fetch_zero_byte_file_counts_as_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
