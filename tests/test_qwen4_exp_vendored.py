@@ -1,3 +1,4 @@
+import json
 from dataclasses import asdict
 
 import numpy as np
@@ -9,6 +10,7 @@ pytest.importorskip("mlx_lm")
 from mlx_lm.models.cache import ArraysCache, BatchKVCache, CacheList, KVCache
 
 import vllm_mlx.models.qwen4_exp as qwen4_exp
+from scripts import qwen38_streaming_convert as converter
 from scripts.qwen38_streaming_convert import quantized_tensor_names
 from vllm_mlx.models.qwen4_exp import (
     GatedDeltaNet,
@@ -58,6 +60,18 @@ def _args(**overrides):
     }
     values.update(overrides)
     return TextModelArgs(**values)
+
+
+def _repair_fixture(tmp_path, shard_tensors, weight_map):
+    output = tmp_path / "converted"
+    output.mkdir()
+    for shard_name, tensors in shard_tensors.items():
+        mx.save_safetensors(str(output / shard_name), tensors)
+    (output / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 8}, "weight_map": weight_map})
+    )
+    converter._write_sha256sums(output)
+    return output
 
 
 def test_config_normalizes_checkpoint_full_attention_to_qsa():
@@ -676,6 +690,64 @@ def test_converter_quantized_keys_match_loader_sanitizer_contract():
             }
         )
     assert set(sanitized) == expected
+
+
+def test_quantized_aux_repair_preflights_cross_shard_collision(tmp_path):
+    output = _repair_fixture(
+        tmp_path,
+        {
+            "model-00001-of-00002.safetensors": {
+                "layer.weight.scales": mx.array([1.0])
+            },
+            "model-00002-of-00002.safetensors": {"layer.scales": mx.array([2.0])},
+        },
+        {
+            "layer.weight.scales": "model-00001-of-00002.safetensors",
+            "layer.scales": "model-00002-of-00002.safetensors",
+        },
+    )
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+
+    with pytest.raises(RuntimeError, match="output index rename collision"):
+        converter.repair_quantized_aux_names(output)
+
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
+
+
+def test_quantized_aux_repair_commits_validated_plan(tmp_path):
+    shard_name = "model-00001-of-00001.safetensors"
+    output = _repair_fixture(
+        tmp_path,
+        {shard_name: {"layer.weight.scales": mx.array([1.0])}},
+        {"layer.weight.scales": shard_name},
+    )
+
+    result = converter.repair_quantized_aux_names(output)
+
+    assert result["changed_keys"] == result["changed_shards"] == 1
+    tensors = mx.load(str(output / shard_name))
+    assert set(tensors) == {"layer.scales"}
+    index = json.loads((output / "model.safetensors.index.json").read_text())
+    assert index["weight_map"] == {"layer.scales": shard_name}
+
+
+def test_quantized_aux_repair_rolls_back_commit_failure(tmp_path, monkeypatch):
+    output = _repair_fixture(
+        tmp_path,
+        {"model-00001-of-00001.safetensors": {"layer.weight.scales": mx.array([1.0])}},
+        {"layer.weight.scales": "model-00001-of-00001.safetensors"},
+    )
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    monkeypatch.setattr(
+        converter,
+        "_write_sha256sums",
+        lambda _output: (_ for _ in ()).throw(OSError("injected checksum failure")),
+    )
+
+    with pytest.raises(OSError, match="injected checksum failure"):
+        converter.repair_quantized_aux_names(output)
+
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
 
 
 def test_quantization_contract_uses_shape_exact_ple_groups_and_q8_routing():

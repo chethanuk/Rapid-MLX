@@ -32,10 +32,12 @@ import hashlib
 import json
 import math
 import mmap
+import os
 import resource
 import shutil
 import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -206,12 +208,30 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Replace one metadata file only after its complete payload is durable."""
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def _write_sha256sums(output: Path) -> None:
     lines = []
     for p in sorted(output.rglob("*")):
         if p.is_file() and p.name != "SHA256SUMS.txt":
             lines.append(f"{_sha256(p)}  {p.relative_to(output).as_posix()}\n")
-    (output / "SHA256SUMS.txt").write_text("".join(lines))
+    _atomic_write_bytes(output / "SHA256SUMS.txt", "".join(lines).encode())
 
 
 _AUX_COPY_NAMES = (
@@ -512,11 +532,12 @@ def repair_quantized_aux_names(output: Path) -> dict:
     if not index_path.is_file():
         raise RuntimeError(f"missing output index: {index_path}")
 
-    changed_keys = 0
-    changed_shards = 0
-    payload_checks: dict[str, tuple[str, str]] = {}
+    # Phase 1: build and validate the complete tree-wide plan without opening
+    # any model file for writing. In particular, an index collision may span
+    # two different shards and must be rejected before the first header moves.
+    plans: list[tuple[Path, int, bytes, bytes, int]] = []
     for shard in sorted(output.glob("model-*.safetensors")):
-        with shard.open("r+b") as handle:
+        with shard.open("rb") as handle:
             raw_len = handle.read(8)
             if len(raw_len) != 8:
                 raise RuntimeError(f"truncated safetensors prefix: {shard}")
@@ -546,16 +567,13 @@ def repair_quantized_aux_names(output: Path) -> dict:
                 raise RuntimeError(
                     f"repaired header grew in {shard}: {len(encoded)} > {header_len}"
                 )
-            handle.seek(8)
-            handle.write(encoded)
-            handle.write(b" " * (header_len - len(encoded)))
-            handle.flush()
-            changed_keys += shard_changes
-            changed_shards += 1
-            payload_checks[shard.name] = (str(header_len), str(shard.stat().st_size))
+            padded = encoded + b" " * (header_len - len(encoded))
+            plans.append((shard, header_len, raw_header, padded, shard_changes))
 
     index = json.loads(index_path.read_text())
     old_map: dict[str, str] = index.get("weight_map", {})
+    if not isinstance(old_map, dict):
+        raise RuntimeError("output index weight_map must be an object")
     new_map: dict[str, str] = {}
     for key, shard_name in old_map.items():
         new_key = _renamed_quantized_aux_key(key)
@@ -563,13 +581,64 @@ def repair_quantized_aux_names(output: Path) -> dict:
             raise RuntimeError(f"output index rename collision: {new_key}")
         new_map[new_key] = shard_name
     index["weight_map"] = dict(sorted(new_map.items()))
-    index_path.write_text(json.dumps(index, indent=2) + "\n")
-    _write_sha256sums(output)
+    encoded_index = (json.dumps(index, indent=2) + "\n").encode()
+
+    # Phase 2: commit the already-validated fixed-size headers, then metadata.
+    # A multi-file atomic rename would duplicate the 98 GiB payload, so retain
+    # the original headers/index/checksum and roll the transaction back if any
+    # write fails. Every header write preserves offsets and payload bytes.
+    old_index = index_path.read_bytes()
+    sums_path = output / "SHA256SUMS.txt"
+    old_sums = sums_path.read_bytes() if sums_path.is_file() else None
+    applied: list[tuple[Path, bytes]] = []
+    try:
+        for shard, header_len, original, repaired, _ in plans:
+            # Register rollback before the first mutable write so even a short
+            # or failed header write restores this shard.
+            applied.append((shard, original))
+            with shard.open("r+b") as handle:
+                handle.seek(8)
+                handle.write(repaired)
+                handle.flush()
+                os.fsync(handle.fileno())
+        _atomic_write_bytes(index_path, encoded_index)
+        _write_sha256sums(output)
+    except Exception as commit_error:
+        rollback_errors = []
+        for shard, original in reversed(applied):
+            try:
+                with shard.open("r+b") as handle:
+                    handle.seek(8)
+                    handle.write(original)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception as rollback_error:  # pragma: no cover - I/O failure
+                rollback_errors.append(f"{shard}: {rollback_error}")
+        try:
+            _atomic_write_bytes(index_path, old_index)
+            if old_sums is None:
+                sums_path.unlink(missing_ok=True)
+            else:
+                _atomic_write_bytes(sums_path, old_sums)
+        except Exception as rollback_error:  # pragma: no cover - I/O failure
+            rollback_errors.append(f"metadata: {rollback_error}")
+        if rollback_errors:  # pragma: no cover - double I/O failure
+            raise RuntimeError(
+                "quantized auxiliary repair failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from commit_error
+        raise
+
+    changed_keys = sum(plan[4] for plan in plans)
+    payload_checks = {
+        shard.name: (str(header_len), str(shard.stat().st_size))
+        for shard, header_len, _, _, _ in plans
+    }
     return {
         "status": "ok",
         "output": str(output),
         "changed_keys": changed_keys,
-        "changed_shards": changed_shards,
+        "changed_shards": len(plans),
         "unchanged_payload_layout": payload_checks,
     }
 
