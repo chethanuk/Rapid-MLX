@@ -305,7 +305,9 @@ class TestResponsesNonStream:
         assert body["usage"]["output_tokens"] == 2
         assert body["usage"]["total_tokens"] == 5
 
-    def test_structured_output_keeps_bare_json_out_of_reasoning(self, responses_client):
+    def test_structured_output_keeps_bare_json_out_of_reasoning(
+        self, responses_client, monkeypatch
+    ):
         from vllm_mlx.reasoning.cohere_command_parser import (
             CohereCommand4ReasoningParser,
         )
@@ -383,6 +385,32 @@ class TestResponsesNonStream:
             "param": "messages.content",
             "serving_lane_reason": "vision_hybrid_runtime_unsupported",
         }
+
+        from vllm_mlx.api.utils import UnsupportedContentBlockError
+        from vllm_mlx.routes import responses as responses_route
+
+        def reject_at_route(*_args, **_kwargs):
+            raise UnsupportedContentBlockError(
+                "forced route-boundary rejection",
+                code="image_input_unsupported",
+                param="messages.content",
+            )
+
+        monkeypatch.setattr(
+            responses_route,
+            "validate_content_blocks_for_capabilities",
+            reject_at_route,
+        )
+        route_response = responses_client.client.post(
+            "/v1/responses",
+            json=_payload(input="hello"),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+        assert route_response.status_code == 400
+        route_body = route_response.json()
+        assert route_body.get("detail", route_body)["error"]["code"] == (
+            "image_input_unsupported"
+        )
 
     def test_response_carries_loaded_model_not_request_alias(self, responses_client):
         """The response.model field must be the loaded engine's model

@@ -2156,3 +2156,21 @@ class TestGptOssSpecialTokens:
         text = "<|channel|>analysis<|message|>Just thinking <|constrain|>something"
         result = clean_output_text(text)
         assert "<|constrain|>" not in result
+
+
+def test_dflash_runtime_probe_uses_symbol_level_discovery(monkeypatch):
+    """The lightweight probe checks the required drafter package itself."""
+    import importlib.util
+
+    from vllm_mlx.speculative.dflash.eligibility import have_runtime
+
+    probes: list[str] = []
+
+    def find_spec(name: str):
+        probes.append(name)
+        return object()
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+    assert have_runtime() is True
+    assert probes == ["mlx_vlm.speculative.drafters"]
