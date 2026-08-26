@@ -797,6 +797,7 @@ class BatchedEngine(BaseEngine):
         enable_disk_stream: bool = False,
         disk_stream_cache_gb: float = 1.0,
         chat_template_id: str | None = None,
+        serving_lane_reason: str | None = None,
     ):
         """
         Initialize the batched engine.
@@ -833,6 +834,9 @@ class BatchedEngine(BaseEngine):
             chat_template_id: Keyword-only model-profile prompt contract.
                 Control-plane callers pass this when ``model_name`` is a local
                 snapshot path whose originating profile is already known.
+            serving_lane_reason: Machine-readable reason from the shared
+                serving-lane decision. Kept on the live engine so model and
+                residency APIs report the decision that was actually loaded.
         """
         self._model_name = model_name
         if chat_template_id is None:
@@ -866,6 +870,7 @@ class BatchedEngine(BaseEngine):
         # demand for the vision lane, so a missing vision tower must hard-fail
         # for that operator rather than silently degrade behind their back.
         self._force_mllm = force_mllm
+        self._serving_lane_reason = serving_lane_reason
         if force_text:
             # User explicitly opted out of MLLM routing. Skip the probe
             # entirely so a False from auto-detection can't be overridden
@@ -911,6 +916,16 @@ class BatchedEngine(BaseEngine):
     def model_name(self) -> str:
         """Get the model name."""
         return self._model_name
+
+    @property
+    def serving_lane(self) -> str:
+        """The live request lane exposed to capability consumers."""
+        return "vision" if self._is_mllm else "text"
+
+    @property
+    def serving_lane_reason(self) -> str | None:
+        """Stable reason supplied by the shared serving-lane contract."""
+        return self._serving_lane_reason
 
     @property
     def is_mllm(self) -> bool:
@@ -1414,6 +1429,7 @@ class BatchedEngine(BaseEngine):
             )
             gc.collect()
             self._is_mllm = False
+            self._serving_lane_reason = "vision_weights_unavailable"
             await self._start_llm()
             return
 
