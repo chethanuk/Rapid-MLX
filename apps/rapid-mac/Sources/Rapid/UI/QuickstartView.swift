@@ -1486,7 +1486,10 @@ struct QuickstartView: View {
             // it with an eligible cached model, but an immediate Skip can
             // never leak the static 16 GB starter onto a smaller Mac.
             .onAppear {
-                coordinator.applyDefaultChoice(hardware: hardware, catalog: [])
+                coordinator.applyDefaultChoice(
+                    hardware: hardware,
+                    catalog: catalogLoaded ? cachedModels : []
+                )
             }
             // Observe serve transitions so we can flip to ``.ready`` (and
             // seed the welcome message) as soon as the sidecar comes
@@ -1871,6 +1874,14 @@ struct QuickstartView: View {
                     // #1653; it does not any more, because a user asking to
                     // see the catalogue has not asked to leave setup.
                     Button("Skip for now") {
+                        // The catalog can become authoritative one run-loop
+                        // turn before its `.task` executes. Resolve that live
+                        // snapshot synchronously so Skip never outruns an
+                        // eligible cached-model preference.
+                        coordinator.applyDefaultChoice(
+                            hardware: hardware,
+                            catalog: catalogLoaded ? cachedModels : []
+                        )
                         onSkip()
                     }
                     .buttonStyle(.onboardingQuiet)

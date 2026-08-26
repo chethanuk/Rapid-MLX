@@ -71,9 +71,12 @@ struct OnboardingDirectionDTests {
         let source = try Self.strippedSource("Sources/Rapid/UI/QuickstartView.swift")
         let body = try #require(source.range(of: "varbody:someView{"))
         let content = try #require(source.range(of: "privatevarcontent:someView{"))
-        let baseline = try #require(source.range(of: ".onAppear{coordinator.applyDefaultChoice(hardware:hardware,catalog:[])"))
+        let baseline = try #require(source.range(of: ".onAppear{coordinator.applyDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])"))
         let policyTask = try #require(source.range(of: ".task(id:StarterSelectionKey("))
         let chooser = try #require(source.range(of: "privatevarchooseModelStep:someView{"))
+        let skipRefresh = try #require(source.range(
+            of: "Button(\"Skipfornow\"){coordinator.applyDefaultChoice(hardware:hardware,catalog:catalogLoaded?cachedModels:[])onSkip()"
+        ))
 
         #expect(baseline.lowerBound > body.lowerBound)
         #expect(baseline.lowerBound < content.lowerBound,
@@ -83,6 +86,8 @@ struct OnboardingDirectionDTests {
                 "the policy task must mount with the root view before welcome Skip is actionable")
         #expect(policyTask.lowerBound < chooser.lowerBound,
                 "the policy task must not be owned by Step 2")
+        #expect(skipRefresh.lowerBound < chooser.lowerBound,
+                "welcome Skip must synchronously consume the latest authoritative snapshot")
     }
 
     /// #2033 finding 2 — a first-time user reported two enabled "Start"
