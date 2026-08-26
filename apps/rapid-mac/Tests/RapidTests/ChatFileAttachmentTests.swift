@@ -263,7 +263,8 @@ struct ChatFileAttachmentTests {
 
     @Test("A file dropped on the native text view is imported instead of inserting its path")
     func nativeTextViewDropUsesAttachmentImporter() {
-        let textView = AutosizingTextView()
+        let textView = AutosizingTextView.makeForComposer()
+        #expect(textView.registeredDraggedTypes.contains(.fileURL))
         let file = URL(fileURLWithPath: "/tmp/chat-drop.txt")
         let pasteboard = NSPasteboard(
             name: NSPasteboard.Name("rapid.chat.drop.\(UUID().uuidString)")

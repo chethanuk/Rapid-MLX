@@ -2127,6 +2127,12 @@ struct ComposeField: View {
 /// width changes both re-measure, so wrapping caused by resizing the
 /// window grows the field just like typing does.
 final class AutosizingTextView: NSTextView {
+    static func makeForComposer() -> AutosizingTextView {
+        let view = AutosizingTextView()
+        view.registerForDraggedTypes([.fileURL])
+        return view
+    }
+
     /// Called with the measured content height whenever the text or the
     /// view's width changes. The receiver owns the clamping; this only
     /// reports what the layout manager actually used.
@@ -2371,7 +2377,7 @@ struct ComposeTextEditor: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let tv = AutosizingTextView()
+        let tv = AutosizingTextView.makeForComposer()
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
