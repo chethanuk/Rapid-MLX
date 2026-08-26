@@ -800,14 +800,16 @@ enum ChatStreamError: LocalizedError {
         }
     }
 
-    /// The standard error envelope is the server's public, user-facing reason
-    /// for the exact attachment request that failed. Bare bodies and HTML are
-    /// still diagnostics only and must not leak into the transcript.
+    /// Only the typed image-rejection contract is safe, user-facing copy.
+    /// Other structured 4xx/5xx envelopes may contain operational details and
+    /// must continue through the normal actionable-error diagnosis.
     var attachmentFailureMessage: String? {
         guard case .httpStatus(let code, let body) = self,
               (400..<600).contains(code),
               let data = body.data(using: .utf8),
               let envelope = try? JSONDecoder().decode(Wire.ErrorEnvelope.self, from: data),
+              envelope.error.type == "invalid_request_error",
+              envelope.error.code == "image_input_unsupported",
               let message = envelope.error.message?.trimmingCharacters(
                 in: .whitespacesAndNewlines
               ),

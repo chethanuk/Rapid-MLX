@@ -301,7 +301,8 @@ struct ContentView: View {
         .task(id: SelectedModelProfileKey(
             alias: alias,
             isResident: server.isModelResident(alias),
-            port: server.activePort
+            port: server.activePort,
+            bearer: server.activeBearer
         )) {
             let requestedAlias = alias
             server.clearActiveModelProfile()
@@ -323,12 +324,6 @@ struct ContentView: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
-    }
-
-    private struct SelectedModelProfileKey: Equatable {
-        let alias: String
-        let isResident: Bool
-        let port: Int
     }
 
     /// First-run setup, filling the window (Paper 05.1.A).
@@ -1472,6 +1467,16 @@ struct ContentView: View {
             return .chat
         }
     }
+}
+
+/// Identity of the exact live server session whose selected-model profile is
+/// shown by the composer. A fresh sidecar rotates its bearer even when it
+/// reuses the same alias and port, so capability state must be fetched again.
+struct SelectedModelProfileKey: Equatable {
+    let alias: String
+    let isResident: Bool
+    let port: Int
+    let bearer: String?
 }
 
 /// Approval dialog for the ``browse`` tool: present while a request is

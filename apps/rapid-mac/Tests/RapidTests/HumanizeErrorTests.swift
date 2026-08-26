@@ -55,12 +55,16 @@ struct HumanizeErrorTests {
         #expect(!ChatViewModel.humanize(error).contains("image input"))
     }
 
-    @Test("Structured server failure reason is available only to the failed attachment")
-    func structuredServerFailureReason() {
+    @Test("Unrelated structured server failures remain private diagnostics")
+    func structuredServerFailureReasonStaysPrivate() {
         #expect(ChatStreamError.httpStatus(
             500,
             #"{"error":{"message":"Internal server error"}}"#
-        ).attachmentFailureMessage == "Internal server error")
+        ).attachmentFailureMessage == nil)
+        #expect(ChatStreamError.httpStatus(
+            503,
+            #"{"error":{"message":"Metal is out of memory","type":"server_error","code":"oom"}}"#
+        ).attachmentFailureMessage == nil)
     }
 
     @Test("Unstructured error bodies never become user copy")

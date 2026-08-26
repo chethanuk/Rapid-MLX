@@ -689,7 +689,7 @@ final class ChatViewModel {
     /// history, so they cannot safely own this focus state.
     private func setImageDeliveryStatus(
         messageID: UUID?,
-        status: ChatMessage.ImageDeliveryStatus,
+        status: ChatMessage.ImageDeliveryStatus?,
         epoch: Int
     ) {
         guard epoch == conversationEpoch else { return }
@@ -706,7 +706,7 @@ final class ChatViewModel {
     static func updateImageDeliveryStatus(
         in messages: inout [ChatMessage],
         messageID: UUID?,
-        status: ChatMessage.ImageDeliveryStatus
+        status: ChatMessage.ImageDeliveryStatus?
     ) {
         guard let messageID,
               let index = messages.firstIndex(where: { $0.id == messageID })
@@ -715,7 +715,7 @@ final class ChatViewModel {
         // token, a later transport failure means the response was interrupted,
         // not that the image was rejected. An explicit retry may still move a
         // previously rejected image to accepted when its own first token lands.
-        if messages[index].imageDeliveryStatus == .accepted, status == .rejected {
+        if messages[index].imageDeliveryStatus == .accepted, status != .accepted {
             return
         }
         messages[index].imageDeliveryStatus = status
@@ -2811,9 +2811,15 @@ Your previous draft refused the question by claiming you lack real-time access o
             }
             return .terminal
         } catch {
+            let imageRejection = request.imageMessageID == nil
+                ? nil
+                : (error as? ChatStreamError)?.attachmentFailureMessage
             setImageDeliveryStatus(
                 messageID: request.imageMessageID,
-                status: .rejected,
+                // A transient transport/busy/runtime failure does not prove
+                // the attachment was unsupported. Return it to the legacy
+                // unknown state so a later plain follow-up can retry it.
+                status: imageRejection == nil ? nil : .rejected,
                 epoch: epoch
             )
             current.status = .failed
@@ -2821,9 +2827,6 @@ Your previous draft refused the question by claiming you lack real-time access o
             // humanize()'s clean, jargon-free copy.
             print("[chat] stream failed: \(error.localizedDescription)")
             let failureKind = FailureDiagnoser.chatFailureKind(error: error)
-            let imageRejection = request.imageMessageID == nil
-                ? nil
-                : (error as? ChatStreamError)?.attachmentFailureMessage
             let actionable = imageRejection ?? FailureDiagnoser.diagnosis(
                 for: failureKind,
                 modelAlias: request.alias

@@ -241,6 +241,21 @@ struct ChatImageAttachmentTests {
         #expect(messages[0].imageDeliveryStatus == .accepted)
     }
 
+    @Test("transient pre-token failure leaves an image eligible for a later follow-up")
+    @MainActor
+    func transientFailureRestoresUnknownDelivery() {
+        let id = UUID()
+        var messages = [
+            ChatMessage(id: id, role: .user, imageDeliveryStatus: .pending)
+        ]
+
+        ChatViewModel.updateImageDeliveryStatus(
+            in: &messages, messageID: id, status: nil
+        )
+
+        #expect(messages[0].imageDeliveryStatus == nil)
+    }
+
     @Test("plain-text follow-up after a document does not resurrect an older image")
     func documentFollowUpKeepsDocumentFocus() throws {
         let image = try ChatImageAttachment(

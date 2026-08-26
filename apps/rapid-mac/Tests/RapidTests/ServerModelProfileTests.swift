@@ -139,6 +139,17 @@ final class ServerModelProfileTests {
         ).isAvailable)
     }
 
+    @Test("A replacement sidecar invalidates the selected-model profile task")
+    func selectedProfileTracksServerSession() {
+        let first = SelectedModelProfileKey(
+            alias: "model", isResident: true, port: 8000, bearer: "session-a"
+        )
+        let replacement = SelectedModelProfileKey(
+            alias: "model", isResident: true, port: 8000, bearer: "session-b"
+        )
+        #expect(first != replacement)
+    }
+
     @Test("Partial sampling block — only some keys populated")
     func decodesPartialSampling() throws {
         // aliases.json may set only ``temperature`` for some

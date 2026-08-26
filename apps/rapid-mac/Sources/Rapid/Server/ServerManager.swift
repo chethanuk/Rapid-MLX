@@ -654,6 +654,14 @@ final class ServerManager {
         activeModelProfile = nil
     }
 
+    /// Publish or retire one sidecar session as a unit. Model profiles belong
+    /// to the bearer-authenticated process that returned them and must never
+    /// survive a process replacement on the same alias and port.
+    private func setActiveServerSession(bearer: String?) {
+        activeBearer = bearer
+        activeModelProfile = nil
+    }
+
     func applyActiveModelProfile(_ profile: ServerModelProfile, forAlias alias: String) {
         guard isModelResident(alias),
               profile.id.caseInsensitiveCompare(alias) == .orderedSame
@@ -2321,7 +2329,7 @@ final class ServerManager {
         self.launchedPerformanceFlags = performanceFlags
         // Codex r1 P3 (#17): only publish the bearer after the spawn
         // has succeeded — see comment at the bearer guard above.
-        self.activeBearer = bearer
+        setActiveServerSession(bearer: bearer)
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
         // #20: persist ownership before startMonitor() so a crash
@@ -2588,7 +2596,7 @@ final class ServerManager {
         // post-stop chat request can't slip through with a stale
         // secret targeting whatever happens to bind the port next.
         // (#1035: the nil transition evicts cached MCP tools via didSet.)
-        activeBearer = nil
+        setActiveServerSession(bearer: nil)
         // Issue #278: honour the "readyAt cleared on every child
         // exit" invariant in shutdownSync too (parallel to the
         // terminateChild defensive teardown). App-termination only,
@@ -2675,7 +2683,7 @@ final class ServerManager {
             launchedImageInputLane = nil
             // #17: see shutdownSync — bearer is dead the moment the
             // child is.
-            activeBearer = nil
+            setActiveServerSession(bearer: nil)
             startedAt = nil
             // Issue #278: defensive teardown also has to honour the
             // "readyAt cleared on every child exit" invariant in
@@ -2746,7 +2754,7 @@ final class ServerManager {
         launchedImageInputLane = nil
         // #17: the child owns the secret; the secret is meaningless
         // (and a leak vector) once the child is gone.
-        activeBearer = nil
+        setActiveServerSession(bearer: nil)
         startedAt = nil
         // Issue #278: snapshot + window-gate the auto-respawn budget
         // reset, then clear ``readyAt``. The wasExpected-stop branch
