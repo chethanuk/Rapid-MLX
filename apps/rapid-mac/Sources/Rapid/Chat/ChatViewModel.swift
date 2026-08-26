@@ -684,6 +684,36 @@ final class ChatViewModel {
         return messages[index]
     }
 
+    /// Persist attachment acceptance on the user turn itself. Failed empty
+    /// assistant placeholders are intentionally removed from later wire
+    /// history, so they cannot safely own this focus state.
+    private func setImageDeliveryStatus(
+        messageID: UUID?,
+        status: ChatMessage.ImageDeliveryStatus,
+        epoch: Int
+    ) {
+        guard epoch == conversationEpoch else { return }
+        Self.updateImageDeliveryStatus(
+            in: &messages,
+            messageID: messageID,
+            status: status
+        )
+    }
+
+    /// Pure state-layer seam for the request lifecycle. Matching by persisted
+    /// message identity prevents a late response from changing a newer image
+    /// turn after conversation branching or editing.
+    static func updateImageDeliveryStatus(
+        in messages: inout [ChatMessage],
+        messageID: UUID?,
+        status: ChatMessage.ImageDeliveryStatus
+    ) {
+        guard let messageID,
+              let index = messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+        messages[index].imageDeliveryStatus = status
+    }
+
     /// Start a fresh conversation — drops the transcript and any stale
     /// error banner. The in-flight stream (if any) is cancelled first.
     func newConversation() {
@@ -767,6 +797,7 @@ final class ChatViewModel {
             role: .user,
             content: trimmed,
             imageAttachments: imageAttachments,
+            imageDeliveryStatus: imageAttachments.isEmpty ? nil : .pending,
             fileAttachments: ChatFileAttachment.fittedForMessage(fileAttachments),
             status: .complete
         )
@@ -2551,6 +2582,11 @@ Your previous draft refused the question by claiming you lack real-time access o
                 guard let self else { return }
                 switch event {
                 case .firstToken(let at):
+                    self.setImageDeliveryStatus(
+                        messageID: request.imageMessageID,
+                        status: .accepted,
+                        epoch: epoch
+                    )
                     // The stream says the first generated token landed, on
                     // whichever lane carried it. Stamping per-lane here
                     // instead would miss a turn that opens with a tool-call
@@ -2584,6 +2620,11 @@ Your previous draft refused the question by claiming you lack real-time access o
                     capturedPromptTokens = prompt
                     capturedCompletionTokens = completion
                 case .finished(let reason):
+                    self.setImageDeliveryStatus(
+                        messageID: request.imageMessageID,
+                        status: .accepted,
+                        epoch: epoch
+                    )
                     capturedFinish = reason
                     current.status = .complete
                     // v0.4.35 + cycle-2 (2026-06-19): classify the
@@ -2763,6 +2804,11 @@ Your previous draft refused the question by claiming you lack real-time access o
             }
             return .terminal
         } catch {
+            setImageDeliveryStatus(
+                messageID: request.imageMessageID,
+                status: .rejected,
+                epoch: epoch
+            )
             current.status = .failed
             // Raw error → log for support; the user only ever sees
             // humanize()'s clean, jargon-free copy.

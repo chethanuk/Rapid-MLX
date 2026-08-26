@@ -137,6 +137,87 @@ struct ChatImageAttachmentTests {
         #expect(wire.contains(second.data.base64EncodedString()))
     }
 
+    @Test("plain-text follow-up never inherits an image rejected by an earlier request")
+    @MainActor
+    func followUpDoesNotInheritRejectedImage() throws {
+        let image = try ChatImageAttachment(
+            filename: "photo.png", mimeType: "image/png", data: Data("photo".utf8)
+        )
+        let history = ChatViewModel.filterEmptyAssistantsForWire([
+            ChatMessage(
+                role: .user,
+                content: "Describe this",
+                imageAttachments: [image],
+                imageDeliveryStatus: .rejected
+            ),
+            ChatMessage(
+                role: .assistant,
+                status: .failed,
+                errorMessage: "This model is running text-only."
+            ),
+            ChatMessage(role: .user, content: "hi"),
+        ])
+        let request = ChatStreamClient.Request(
+            alias: "vision-model",
+            messages: history,
+            supportsImageInput: true
+        )
+
+        let wire = String(decoding: try JSONEncoder().encode(request.messages), as: UTF8.self)
+        #expect(!wire.contains("data:image/"))
+        #expect(wire.contains("\"hi\""))
+    }
+
+    @Test("retrying a rejected image turn sends that image again")
+    func directRetryIncludesRejectedImage() throws {
+        let image = try ChatImageAttachment(
+            filename: "photo.png", mimeType: "image/png", data: Data("photo".utf8)
+        )
+        let request = ChatStreamClient.Request(
+            alias: "vision-model",
+            messages: [
+                ChatMessage(
+                    role: .user,
+                    content: "Describe this",
+                    imageAttachments: [image],
+                    imageDeliveryStatus: .rejected
+                )
+            ],
+            supportsImageInput: true
+        )
+
+        let wire = String(decoding: try JSONEncoder().encode(request.messages), as: UTF8.self)
+        #expect(wire.contains(image.data.base64EncodedString()))
+    }
+
+    @Test("request outcome updates only its exact persisted image turn")
+    @MainActor
+    func deliveryOutcomeUsesMessageIdentity() throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        var messages = [
+            ChatMessage(
+                id: firstID,
+                role: .user,
+                imageDeliveryStatus: .pending
+            ),
+            ChatMessage(
+                id: secondID,
+                role: .user,
+                imageDeliveryStatus: .pending
+            ),
+        ]
+
+        ChatViewModel.updateImageDeliveryStatus(
+            in: &messages,
+            messageID: firstID,
+            status: .rejected
+        )
+
+        #expect(messages[0].imageDeliveryStatus == .rejected)
+        #expect(messages[1].imageDeliveryStatus == .pending)
+    }
+
     @Test("plain-text follow-up after a document does not resurrect an older image")
     func documentFollowUpKeepsDocumentFocus() throws {
         let image = try ChatImageAttachment(
@@ -182,6 +263,41 @@ struct ChatImageAttachmentTests {
         object.removeValue(forKey: "imageAttachments")
         let legacyData = try JSONSerialization.data(withJSONObject: object)
         #expect(try JSONDecoder().decode(ChatMessage.self, from: legacyData).imageAttachments.isEmpty)
+    }
+
+    @Test("image delivery outcome persists and legacy turns remain follow-up compatible")
+    func deliveryOutcomeCodableCompatibility() throws {
+        let attachment = try ChatImageAttachment(
+            filename: "photo.jpg", mimeType: "image/jpeg", data: Data([1, 2, 3])
+        )
+        let rejected = ChatMessage(
+            role: .user,
+            content: "look",
+            imageAttachments: [attachment],
+            imageDeliveryStatus: .rejected
+        )
+        let restored = try JSONDecoder().decode(
+            ChatMessage.self,
+            from: JSONEncoder().encode(rejected)
+        )
+        #expect(restored.imageDeliveryStatus == .rejected)
+
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(rejected)) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "imageDeliveryStatus")
+        let legacy = try JSONDecoder().decode(
+            ChatMessage.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        #expect(legacy.imageDeliveryStatus == nil)
+
+        legacyObject["imageDeliveryStatus"] = "future-outcome"
+        let forward = try JSONDecoder().decode(
+            ChatMessage.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)
+        )
+        #expect(forward.imageDeliveryStatus == .rejected)
     }
 
     @Test("20 MB cap and accepted MIME types are enforced")
