@@ -246,6 +246,12 @@ class QSAIndexCache(ArraysCache):
         """Amount-aware preflight consumed by composite cache rollback."""
         return all(self._can_trim_row(offset, n) for offset in self._offsets)
 
+    def trim_checkpoint(self):
+        return list(self._offsets), list(self._compressed_counts)
+
+    def restore_trim_checkpoint(self, state):
+        self._offsets, self._compressed_counts = state
+
     def _can_trim_row(self, offset: int, n: int) -> bool:
         if n < 0 or n > offset:
             return False

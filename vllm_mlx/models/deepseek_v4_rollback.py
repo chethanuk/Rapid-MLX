@@ -84,6 +84,21 @@ def install_rotating_undo() -> None:
             undo = self._rapid_undo
             return undo is not None and int(undo[1].shape[2]) >= n
 
+        def trim_checkpoint(self):
+            snapshot = {}
+            for name in (*fields, "_rapid_undo"):
+                value = getattr(self, name)
+                snapshot[name] = (
+                    copy.deepcopy(value)
+                    if isinstance(value, (dict, list, set))
+                    else value
+                )
+            return snapshot
+
+        def restore_trim_checkpoint(self, snapshot):
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+
         def trim(self, n):
             if original_is_trimmable(self):
                 self._rapid_undo = None
@@ -105,6 +120,8 @@ def install_rotating_undo() -> None:
         cls.update_and_fetch = update_and_fetch
         cls.is_trimmable = is_trimmable
         cls.can_trim = can_trim
+        cls.trim_checkpoint = trim_checkpoint
+        cls.restore_trim_checkpoint = restore_trim_checkpoint
         cls.trim = trim
         cls._rapid_undo = None
         cls._rapid_dspark_undo = True

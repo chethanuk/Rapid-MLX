@@ -213,6 +213,34 @@ class PoolingCache(_BaseCache):
     def can_trim(self, n):
         return n >= 0 and (n <= self.remainder or self._can_undo(n))
 
+    def trim_checkpoint(self):
+        """Capture the small rolling state that trim may overwrite in-place."""
+        state = {
+            "undo": self._undo,
+            "remainder": self.remainder,
+            "pooled": self.pooled,
+            "buf_kv": None if self.buf_kv is None else self.buf_kv + 0,
+            "buf_gate": None if self.buf_gate is None else self.buf_gate + 0,
+            "overlap_kv": getattr(self, "overlap_kv", None),
+            "overlap_gate": getattr(self, "overlap_gate", None),
+        }
+        arrays = [
+            value for value in (state["buf_kv"], state["buf_gate"]) if value is not None
+        ]
+        if arrays:
+            mx.eval(*arrays)
+        return state
+
+    def restore_trim_checkpoint(self, state):
+        self._undo = state["undo"]
+        self.remainder = state["remainder"]
+        self.pooled = state["pooled"]
+        self.buf_kv = state["buf_kv"]
+        self.buf_gate = state["buf_gate"]
+        if hasattr(self, "overlap_kv"):
+            self.overlap_kv = state["overlap_kv"]
+            self.overlap_gate = state["overlap_gate"]
+
     def _can_undo(self, n):
         undo = getattr(self, "_undo", None)
         return undo is not None and undo[4].shape[1] >= n
@@ -540,6 +568,38 @@ class BatchPoolingCache(_BaseCache):
 
     def can_trim(self, n):
         return n >= 0 and (n <= min(self.remainder) or self._can_undo(n))
+
+    def trim_checkpoint(self):
+        """Capture the small per-batch rolling state mutated by trim."""
+        state = {
+            "undo": self._undo,
+            "remainder": list(self.remainder),
+            "pool_lengths": list(self._pool_lengths),
+            "processed": list(self._processed),
+            "pooled": self.pooled,
+            "buf_kv": None if self.buf_kv is None else self.buf_kv + 0,
+            "buf_gate": None if self.buf_gate is None else self.buf_gate + 0,
+            "overlap_kv": getattr(self, "overlap_kv", None),
+            "overlap_gate": getattr(self, "overlap_gate", None),
+        }
+        arrays = [
+            value for value in (state["buf_kv"], state["buf_gate"]) if value is not None
+        ]
+        if arrays:
+            mx.eval(*arrays)
+        return state
+
+    def restore_trim_checkpoint(self, state):
+        self._undo = state["undo"]
+        self.remainder = state["remainder"]
+        self._pool_lengths = state["pool_lengths"]
+        self._processed = state["processed"]
+        self.pooled = state["pooled"]
+        self.buf_kv = state["buf_kv"]
+        self.buf_gate = state["buf_gate"]
+        if hasattr(self, "overlap_kv"):
+            self.overlap_kv = state["overlap_kv"]
+            self.overlap_gate = state["overlap_gate"]
 
     def _can_undo(self, n):
         undo = getattr(self, "_undo", None)

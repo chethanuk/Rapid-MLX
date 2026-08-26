@@ -54,6 +54,29 @@ def test_pooling_cache_multitoken_preflight_is_atomic_without_undo() -> None:
     assert pooling.remainder == 1
 
 
+def test_trim_transaction_restores_earlier_cache_when_later_trim_fails() -> None:
+    from vllm_mlx.cache_rollback import trim_all
+
+    class CursorCache:
+        def __init__(self, offset, *, fail=False):
+            self.offset = offset
+            self.fail = fail
+
+        def can_trim(self, n):
+            return n <= self.offset
+
+        def trim(self, n):
+            self.offset -= n
+            return 0 if self.fail else n
+
+    first = CursorCache(7)
+    later = CursorCache(9, fail=True)
+
+    assert not trim_all([first, later], 2)
+    assert first.offset == 7
+    assert later.offset == 9
+
+
 def test_rotating_cache_rolls_back_after_rotation() -> None:
     from mlx_lm.models.cache import RotatingKVCache
 

@@ -1,5 +1,6 @@
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -838,6 +839,50 @@ def test_quantized_aux_repair_rolls_back_commit_failure(tmp_path, monkeypatch):
         converter.repair_quantized_aux_names(output)
 
     assert {path.name: path.read_bytes() for path in output.iterdir()} == before
+
+
+def test_converter_rejects_plain_source_symlink_escape(tmp_path):
+    source = tmp_path / "model"
+    source.mkdir()
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"not model data")
+    (source / "model.safetensors").symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="escapes model cache root"):
+        converter._safe_source_shard(source, Path("model.safetensors"))
+
+
+def test_converter_allows_standard_hf_snapshot_blob_symlink(tmp_path):
+    model_root = tmp_path / "models--org--repo"
+    snapshot = model_root / "snapshots" / "revision"
+    blobs = model_root / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir()
+    blob = blobs / "abc123"
+    blob.write_bytes(b"model data")
+    (snapshot / "model.safetensors").symlink_to(blob)
+
+    assert converter._safe_source_shard(snapshot, Path("model.safetensors")) == blob
+
+
+def test_converter_failure_never_publishes_partial_output(tmp_path, monkeypatch):
+    final = tmp_path / "published"
+
+    def fail_after_partial_write(_source, staging, **_kwargs):
+        (staging / "partial.safetensors").write_bytes(b"partial")
+        raise OSError("injected conversion failure")
+
+    monkeypatch.setattr(converter, "_convert_into", fail_after_partial_write)
+    with pytest.raises(OSError, match="injected conversion failure"):
+        converter.convert(
+            tmp_path / "source",
+            final,
+            max_shard_bytes=1024,
+            min_free_bytes=0,
+        )
+
+    assert not final.exists()
+    assert list(tmp_path.glob(".published.staging-*")) == []
 
 
 def test_quantization_contract_uses_shape_exact_ple_groups_and_q8_routing():

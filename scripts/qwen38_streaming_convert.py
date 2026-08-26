@@ -135,8 +135,18 @@ def _safe_source_shard(snapshot: Path, relative: Path) -> Path:
     if not candidate.is_file():
         raise RuntimeError(f"missing source shard: {relative}")
     resolved = candidate.resolve()
-    model_cache_root = snapshot.parent.parent.resolve()
-    if resolved != model_cache_root and not resolved.is_relative_to(model_cache_root):
+    snapshot_root = snapshot.resolve()
+    allowed_roots = [snapshot_root]
+    # Standard HF cache layout: <repo>/snapshots/<revision> contains symlinks
+    # into the same repo's sibling blobs directory. A plain local checkpoint
+    # has no such exception and is confined to its own source directory.
+    if snapshot.parent.name == "snapshots":
+        blobs = snapshot.parent.parent / "blobs"
+        if blobs.is_dir():
+            allowed_roots.append(blobs.resolve())
+    if not any(
+        resolved == root or resolved.is_relative_to(root) for root in allowed_roots
+    ):
         raise RuntimeError(f"source shard escapes model cache root: {relative}")
     return resolved
 
@@ -381,7 +391,7 @@ class _ShardWriter:
 # ---------------------------------------------------------------------------
 # Core converter
 # ---------------------------------------------------------------------------
-def convert(
+def _convert_into(
     source: Path,
     output: Path,
     *,
@@ -391,20 +401,8 @@ def convert(
 ) -> dict:
     source = source.resolve()
     output = output.expanduser().resolve()
-    if str(source).startswith(GUARD_EXPERT_SSD) or str(output).startswith(
-        GUARD_EXPERT_SSD
-    ):
-        raise RuntimeError("Extreme SSD is outside this task")
-    if output.exists():
-        raise RuntimeError(f"output already exists: {output}")
-    out_root = output.parent
-    if out_root.exists():
-        avail = shutil.disk_usage(out_root).free
-        if avail < min_free_bytes:
-            raise RuntimeError(
-                f"insufficient free space at {out_root}: {avail / 1024**3:.1f} "
-                f"GiB < {min_free_bytes / 1024**3:.0f} GiB"
-            )
+    if not output.is_dir() or any(output.iterdir()):
+        raise RuntimeError("internal conversion staging directory is not empty")
 
     index_path = source / "model.safetensors.index.json"
     if not index_path.is_file():
@@ -414,7 +412,6 @@ def convert(
     if not weight_map:
         raise RuntimeError("index has empty weight_map")
 
-    output.mkdir(parents=True)
     started = time.monotonic()
 
     shard_layouts: dict[str, tuple[int, dict]] = {}
@@ -509,6 +506,50 @@ def convert(
         "aux_copied": aux,
         "status": "ok",
     }
+
+
+def convert(
+    source: Path,
+    output: Path,
+    *,
+    max_shard_bytes: int,
+    min_free_bytes: int = 140 * 1024**3,
+    max_rss_bytes: int = int(220.0 * 1024**3),
+) -> dict:
+    """Convert into a private sibling tree, publishing only a complete result."""
+    source = source.expanduser().resolve()
+    output = output.expanduser().resolve()
+    if str(source).startswith(GUARD_EXPERT_SSD) or str(output).startswith(
+        GUARD_EXPERT_SSD
+    ):
+        raise RuntimeError("Extreme SSD is outside this task")
+    if output.exists():
+        raise RuntimeError(f"output already exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    available = shutil.disk_usage(output.parent).free
+    if available < min_free_bytes:
+        raise RuntimeError(
+            f"insufficient free space at {output.parent}: {available / 1024**3:.1f} "
+            f"GiB < {min_free_bytes / 1024**3:.0f} GiB"
+        )
+
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent)
+    )
+    try:
+        ledger = _convert_into(
+            source,
+            staging,
+            max_shard_bytes=max_shard_bytes,
+            min_free_bytes=min_free_bytes,
+            max_rss_bytes=max_rss_bytes,
+        )
+        os.replace(staging, output)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    ledger["output"] = str(output)
+    return ledger
 
 
 def _renamed_quantized_aux_key(name: str) -> str:
