@@ -391,6 +391,41 @@ struct DictationTests {
     }
 
     @MainActor
+    @Test("completed chat-model switch re-prepares enabled dictation before Ready")
+    func chatModelSwitchRepreparesEnabledDictation() async {
+        var warmupContinuation: CheckedContinuation<Bool, Never>?
+        var prewarmCount = 0
+        var hotkeyStartCount = 0
+        let controller = readinessController(
+            phase: .idle,
+            prewarm: {
+                prewarmCount += 1
+                return await withCheckedContinuation { warmupContinuation = $0 }
+            },
+            hotkeyStart: {
+                hotkeyStartCount += 1
+                return true
+            }
+        )
+
+        controller.serverStateDidChange(.starting(alias: "lfm2.5-1b-4bit"))
+        #expect(controller.phase == .preparingModel)
+        #expect(prewarmCount == 0)
+        #expect(hotkeyStartCount == 0)
+
+        controller.serverStateDidChange(.ready(alias: "lfm2.5-1b-4bit"))
+        while warmupContinuation == nil { await Task.yield() }
+        #expect(controller.phase == .preparingModel)
+        #expect(prewarmCount == 1)
+        #expect(hotkeyStartCount == 0)
+
+        warmupContinuation?.resume(returning: true)
+        for _ in 0..<20 where controller.phase != .idle { await Task.yield() }
+        #expect(controller.phase == .idle)
+        #expect(hotkeyStartCount == 1)
+    }
+
+    @MainActor
     @Test("launch bootstrap arms before deferred model preparation")
     func launchBootstrapArmsWithoutWaitingForPrimaryHealth() async {
         var prewarmCount = 0

@@ -300,6 +300,10 @@ FAKE_IMAGE_REPO = "fake-org/fake-image-repo"
 # ``/v1/models/load`` path instead of the legacy stop/start fallback when the
 # GUI asks for a second model while the sidecar is already running (#1838).
 SERVED_ALIAS = ""
+# Lazy audio engines are process-owned in production. The fixture mirrors
+# that lifecycle: a successful transcription materializes the STT lane, while
+# a sidecar replacement starts a fresh process with no resident audio lanes.
+RESIDENT_AUDIO_LANES = {}
 
 # The engine's own, actionable rejection reason. Kept out of the snapshot so a
 # stock persona never changes residency shape; a flow opts in with
@@ -600,6 +604,7 @@ class Handler(BaseHTTPRequestHandler):
                 "loads_total": 0,
                 "evictions_total": 0,
                 "models": [],
+                "audio_lanes": [],
             }
         return {
             "memory_limit_bytes": 34359738368,
@@ -621,6 +626,18 @@ class Handler(BaseHTTPRequestHandler):
                 "measured_bytes": None,
                 "idle_seconds": 0.0,
             }],
+            "audio_lanes": [
+                {
+                    "lane": lane,
+                    "model": model,
+                    "state": "resident",
+                    "active_requests": 0,
+                    "loaded_at": 1.0,
+                    "idle_seconds": 0.0,
+                    "last_error": None,
+                }
+                for lane, model in sorted(RESIDENT_AUDIO_LANES.items())
+            ],
         }
 
     def _models_load(self):
@@ -843,6 +860,7 @@ class Handler(BaseHTTPRequestHandler):
             delay_ms = int(_setting("FAKE_AUDIO_TRANSCRIPTION_DELAY_MS", "0") or "0")
             if delay_ms > 0:
                 time.sleep(delay_ms / 1000)
+            RESIDENT_AUDIO_LANES["stt"] = "fake/whisper-small"
             self._json(200, {
                 "text": "Golden transcription result.",
                 "language": "en",

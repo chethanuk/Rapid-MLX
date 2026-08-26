@@ -42,6 +42,43 @@ struct VoiceCoLoadTests {
         #expect(server.servingAlias == "qwen3.6-27b-4bit")
         #expect(server.voiceCoLoadsOnPrimary == true)
         #expect(server.isVoiceLaneReady(for: "whisper-small") == true)
+        #expect(server.isVoiceLaneResident(
+            for: "whisper-small",
+            modelPath: "mlx-community/whisper-small-mlx"
+        ) == false, "a mounted route is not resident speech weights")
+    }
+
+    @Test("audio residency truth survives an in-process chat-model switch")
+    func residentVoiceLaneUsesExactCatalogPath() {
+        let snapshot = ModelResidencySnapshot(
+            memoryLimitBytes: 1,
+            memoryUsedBytes: 1,
+            memoryAvailableBytes: 0,
+            idleTTLSeconds: 1,
+            loadsTotal: 1,
+            evictionsTotal: 0,
+            models: [],
+            audioLanes: [ResidentAudioLaneStatus(
+                lane: "stt",
+                model: "mlx-community/whisper-small-mlx",
+                state: "resident"
+            )]
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: "lfm2.5-1b-4bit"),
+            residency: snapshot,
+            activeBearer: "test-bearer"
+        )
+
+        #expect(server.isVoiceLaneResident(
+            for: "whisper-small",
+            modelPath: "mlx-community/whisper-small-mlx"
+        ))
+        #expect(!server.isVoiceLaneResident(
+            for: "whisper-small",
+            modelPath: "mlx-community/other-whisper"
+        ))
+        #expect(server.servingAlias == "lfm2.5-1b-4bit")
     }
 
     @Test("mid-start is not co-loaded (no live serving alias yet)")

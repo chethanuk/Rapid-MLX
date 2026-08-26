@@ -350,6 +350,16 @@ final class ServerManager {
         servingAlias == alias || voiceCoLoadsOnPrimary
     }
 
+    /// Whether the selected voice engine is actually resident, rather than
+    /// merely routable through a chat process that mounted ``/v1/audio/*``.
+    /// Exact catalog provenance keeps this capability check independent of
+    /// alias naming conventions.
+    func isVoiceLaneResident(for alias: String, modelPath: String?) -> Bool {
+        if servingAlias == alias { return true }
+        guard voiceCoLoadsOnPrimary, let modelPath else { return false }
+        return residency.containsResidentAudioLane(modelPath: modelPath)
+    }
+
     /// Bring up a server for a voice (STT/TTS) request, reusing the primary
     /// chat LLM/VLM process when one is already up so voice and text/vision
     /// run side-by-side instead of voice replacing the chat model.

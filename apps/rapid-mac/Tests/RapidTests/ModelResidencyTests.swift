@@ -56,6 +56,59 @@ struct ModelResidencyTests {
                 cacheMemoryMB: 4096
             )
         ))
+        #expect(snapshot.audioLanes.isEmpty, "older snapshots remain compatible")
+    }
+
+    @Test("Audio-lane residency decodes and matches only the exact catalog model path")
+    func decodesAudioLaneTruth() throws {
+        let data = Data(
+            #"""
+            {
+              "memory_limit_bytes": 34359738368,
+              "memory_used_bytes": 10737418240,
+              "memory_available_bytes": 23622320128,
+              "idle_ttl_seconds": 1800,
+              "loads_total": 0,
+              "evictions_total": 0,
+              "models": [],
+              "audio_lanes": [
+                {
+                  "lane": "stt",
+                  "model": "mlx-community/whisper-small-mlx",
+                  "state": "resident",
+                  "active_requests": 0,
+                  "loaded_at": 123.0,
+                  "idle_seconds": 4.0,
+                  "last_error": null
+                },
+                {
+                  "lane": "tts",
+                  "model": null,
+                  "state": "registered",
+                  "active_requests": 0,
+                  "loaded_at": null,
+                  "idle_seconds": 0.0,
+                  "last_error": null
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        let snapshot = try JSONDecoder().decode(ModelResidencySnapshot.self, from: data)
+
+        #expect(snapshot.audioLanes == [
+            ResidentAudioLaneStatus(
+                lane: "stt",
+                model: "mlx-community/whisper-small-mlx",
+                state: "resident"
+            ),
+            ResidentAudioLaneStatus(lane: "tts", model: nil, state: "registered")
+        ])
+        #expect(snapshot.containsResidentAudioLane(
+            modelPath: "mlx-community/whisper-small-mlx"
+        ))
+        #expect(!snapshot.containsResidentAudioLane(modelPath: "whisper-small"))
     }
 
     @Test("Resident rows prefer the catalog alias over the HF path")
