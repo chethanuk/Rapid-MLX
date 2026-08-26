@@ -63,7 +63,13 @@ actor DesktopActivationReporter {
         let event = buildEvent(kind)
         let accepted = await sendEvent(event)
         inFlight.remove(kind)
-        guard accepted else { return }
+        // ``TelemetryClient.sendBatch`` deliberately reports opted-out as a
+        // cleanup-success to its crash-marker caller. Re-check here before
+        // claiming an activation marker so a Settings opt-out racing this send
+        // can never retire a milestone that did not actually leave the Mac.
+        // If consent changed after a real accepted send, leaving the marker
+        // retryable permits only a harmless DISTINCT-client deduplicated replay.
+        guard accepted, isEnabled() else { return }
 
         _ = claimMarker(at: marker)
         resolvedThisProcess.insert(kind)

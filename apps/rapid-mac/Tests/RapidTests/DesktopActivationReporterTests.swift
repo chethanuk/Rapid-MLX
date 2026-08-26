@@ -129,6 +129,34 @@ struct DesktopActivationReporterTests {
             )
         )
     }
+
+    @Test("Consent revoked during send never burns the once marker")
+    func revokeDuringSendDoesNotClaim() async {
+        let directory = temporaryDirectory("revoked")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let probe = ActivationReporterProbe()
+        let reporter = DesktopActivationReporter(
+            isEnabled: { probe.isEnabled },
+            buildEvent: { event($0) },
+            sendEvent: { event in
+                await probe.didSend(event)
+                probe.isEnabled = false
+                return true
+            },
+            markerDirectory: directory
+        )
+
+        await reporter.report(.firstChatReply)
+
+        #expect(await probe.sentCount == 1)
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: directory
+                    .appendingPathComponent("activation_seen_desktop_first_chat_reply")
+                    .path
+            )
+        )
+    }
 }
 
 private final class ActivationReporterProbe: @unchecked Sendable {
@@ -136,6 +164,7 @@ private final class ActivationReporterProbe: @unchecked Sendable {
     private var builds = 0
     private var sent: [TelemetryEvent] = []
     private var results: [Bool]
+    private var enabled = true
 
     init(results: [Bool] = []) {
         self.results = results
@@ -147,6 +176,11 @@ private final class ActivationReporterProbe: @unchecked Sendable {
 
     var sentCount: Int {
         get async { lock.withLock { sent.count } }
+    }
+
+    var isEnabled: Bool {
+        get { lock.withLock { enabled } }
+        set { lock.withLock { enabled = newValue } }
     }
 
     func didBuild() {
