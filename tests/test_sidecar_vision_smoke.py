@@ -14,9 +14,8 @@ _SPEC.loader.exec_module(_MODULE)
 
 
 def test_sensible_completion_accepts_known_fixture_descriptions() -> None:
-    assert _MODULE._completion_is_sensible("A spotted cheetah cub runs forward.")
-    assert _MODULE._completion_is_sensible("The image shows a playful feline mascot.")
-    assert _MODULE._completion_is_sensible("A cheetah is sitting, not running.")
+    assert _MODULE._completion_is_sensible("SPOTTED_CAT")
+    assert _MODULE._completion_is_sensible(" spotted_cat. ")
 
 
 def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
@@ -24,13 +23,10 @@ def test_sensible_completion_rejects_empty_error_or_unrelated_output() -> None:
     assert not _MODULE._completion_is_sensible("")
     assert not _MODULE._completion_is_sensible("Internal server error")
     assert not _MODULE._completion_is_sensible("A blue square is visible.")
-    assert not _MODULE._completion_is_sensible("I cannot identify the animal.")
-    assert not _MODULE._completion_is_sensible("I cannot identify the cat.")
-    assert not _MODULE._completion_is_sensible(
-        "The animal might be a cat, but I am unsure."
-    )
+    assert not _MODULE._completion_is_sensible("OTHER")
     assert not _MODULE._completion_is_sensible("This is not a cheetah.")
-    assert not _MODULE._completion_is_sensible("I am not sure this is a leopard.")
+    assert not _MODULE._completion_is_sensible("A dog is chasing a cat.")
+    assert not _MODULE._completion_is_sensible("A cheetah is sitting, not running.")
 
 
 def test_release_workflow_runs_content_addressed_real_image_gate() -> None:
@@ -99,7 +95,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         assert content[0]["type"] == "text"
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
         body = json.dumps({
-            "choices": [{"message": {"content": "A spotted cheetah cub runs forward."}}]
+            "choices": [{"message": {"content": "SPOTTED_CAT"}}]
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -144,6 +140,45 @@ def test_main_executes_socket_activated_http_image_journey(
         ],
     )
     assert _MODULE.main() == 0
+
+
+def test_main_cleans_log_when_process_creation_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = tmp_path / "sidecar"
+    executable = sidecar / "bin" / "rapid-mlx"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    model = tmp_path / "model"
+    model.mkdir()
+    image = tmp_path / "fixture.png"
+    image.write_bytes(b"fixture")
+    original_named_temporary_file = _MODULE.tempfile.NamedTemporaryFile
+
+    def local_temporary_file(**kwargs):
+        return original_named_temporary_file(dir=tmp_path, **kwargs)
+
+    def fail_to_start(*args, **kwargs):
+        raise OSError("exec failed")
+
+    monkeypatch.setattr(_MODULE.tempfile, "NamedTemporaryFile", local_temporary_file)
+    monkeypatch.setattr(_MODULE.subprocess, "Popen", fail_to_start)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            str(_SCRIPT),
+            "--sidecar-root",
+            str(sidecar),
+            "--model",
+            str(model),
+            "--image",
+            str(image),
+        ],
+    )
+    with pytest.raises(OSError, match="exec failed"):
+        _MODULE.main()
+    assert list(tmp_path.glob("rapid-sidecar-vision-*.log")) == []
 
 
 class _FakeProcess:

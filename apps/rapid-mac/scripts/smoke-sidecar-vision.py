@@ -24,32 +24,10 @@ def _bound_local_listener() -> socket.socket:
 
 
 def _completion_is_sensible(text: object) -> bool:
-    """Reject empty/error output and require recognition of the known fixture."""
+    """Accept only the deterministic answer requested for the known fixture."""
     if not isinstance(text, str):
         return False
-    tokens = [word.strip(".,!?;:()[]{}\"'").lower() for word in text.split()]
-    words = set(tokens)
-    fixture_labels = {"cheetah", "leopard", "cat", "feline"}
-    uncertainty = {"cannot", "can't", "unable", "unclear", "unknown", "unsure"}
-    if len(words) < 3 or not words & fixture_labels or words & uncertainty:
-        return False
-    if any(
-        left == "not" and right == "sure" for left, right in zip(tokens, tokens[1:])
-    ):
-        return False
-    for index, token in enumerate(tokens):
-        if token not in fixture_labels:
-            continue
-        prior = tokens[max(0, index - 2) : index]
-        if prior and prior[-1] in {"not", "no"}:
-            return False
-        if (
-            len(prior) == 2
-            and prior[0] in {"not", "no"}
-            and prior[1] in {"a", "an", "the"}
-        ):
-            return False
-    return True
+    return text.strip().rstrip(".!?").casefold() == "spotted_cat"
 
 
 def _request_json(url: str, payload: dict | None, timeout: float) -> dict:
@@ -138,32 +116,35 @@ def main() -> int:
 
     listener = _bound_local_listener()
     base_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    process: subprocess.Popen | None = None
     with tempfile.NamedTemporaryFile(
         prefix="rapid-sidecar-vision-", suffix=".log", delete=False
     ) as log:
         log_path = Path(log.name)
-        try:
-            process = subprocess.Popen(
-                [
-                    str(executable),
-                    "serve",
-                    str(model),
-                    "--mllm",
-                    "--listen-fd",
-                    str(listener.fileno()),
-                ],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                pass_fds=(listener.fileno(),),
-                env={**os.environ, "PYTHONNOUSERSITE": "1"},
-            )
-        finally:
-            # Popen duplicates pass_fds into the child before it returns. Close
-            # the parent's copy only after that atomic handoff.
-            listener.close()
 
     try:
+        with log_path.open("ab") as log:
+            try:
+                process = subprocess.Popen(
+                    [
+                        str(executable),
+                        "serve",
+                        str(model),
+                        "--mllm",
+                        "--listen-fd",
+                        str(listener.fileno()),
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    pass_fds=(listener.fileno(),),
+                    env={**os.environ, "PYTHONNOUSERSITE": "1"},
+                )
+            finally:
+                # Popen duplicates pass_fds into the child before it returns.
+                # Close the parent's copy only after that atomic handoff.
+                listener.close()
+
         _wait_until_ready(base_url, process, args.startup_timeout)
         image = base64.b64encode(args.image.read_bytes()).decode("ascii")
         payload = {
@@ -174,7 +155,11 @@ def main() -> int:
                     "content": [
                         {
                             "type": "text",
-                            "text": "Describe the main animal in this image in one short sentence.",
+                            "text": (
+                                "Reply with exactly SPOTTED_CAT if the main animal "
+                                "in this image is a spotted wild cat such as a "
+                                "cheetah or leopard; otherwise reply OTHER."
+                            ),
                         },
                         {
                             "type": "image_url",
@@ -184,7 +169,7 @@ def main() -> int:
                 }
             ],
             "temperature": 0,
-            "max_tokens": 64,
+            "max_tokens": 16,
             "stream": False,
         }
         body = _request_json(
@@ -193,16 +178,18 @@ def main() -> int:
         content = body.get("choices", [{}])[0].get("message", {}).get("content")
         if not _completion_is_sensible(content):
             raise RuntimeError(
-                f"vision smoke returned an implausible description: {content!r}"
+                f"vision smoke returned an incorrect fixture verdict: {content!r}"
             )
-        print(f"vision smoke: HTTP 200; description={content!r}")
+        print("vision smoke: HTTP 200; fixture verdict=SPOTTED_CAT")
         return 0
     except Exception:
         print(f"vision smoke server log: {log_path}")
         print(log_path.read_text(errors="replace"))
         raise
     finally:
-        _stop_process(process)
+        listener.close()
+        if process is not None:
+            _stop_process(process)
         log_path.unlink(missing_ok=True)
 
 
