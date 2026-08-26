@@ -72,9 +72,9 @@ def test_ax_escape_posts_a_real_key_to_the_target_process():
     assert "down.postToPid(pid)" in key
     assert "up.postToPid(pid)" in key
 
-    fresh_install = HARNESS.read_text().split("flow_fresh_install() {", 1)[1].split(
-        "\n}", 1
-    )[0]
+    fresh_install = (
+        HARNESS.read_text().split("flow_fresh_install() {", 1)[1].split("\n}", 1)[0]
+    )
     assert '"$AX_DRIVER" key "$APP_PID" escape' in fresh_install
     assert "Escape did not dismiss the telemetry invitation" in fresh_install
     assert "dismissed telemetry invitation returned after relaunch" in fresh_install
