@@ -2495,6 +2495,28 @@ class TestCheckpointMetadataFallback:
         assert config.is_hybrid_explicit is True
         assert config.supports_spec_decode is False
 
+        monkeypatch.setattr(
+            auto_config_mod,
+            "read_model_metadata",
+            lambda name: self._metadata(
+                {
+                    "model_type": "qwen4_exp",
+                    "text_config": {
+                        "model_type": "qwen4_exp",
+                        "layer_types": ["linear_attention", "qwen_sparse_attention"],
+                    },
+                },
+                self._XML_TOOLS,
+            ),
+        )
+        flash = detect_model_config("/tmp/models/Qwen3.8-Flash-Next/snapshot")
+        assert flash is not None
+        assert flash.is_hybrid is True
+        assert flash.is_moe is True
+        assert flash.experimental is True
+        assert "experimental" in format_profile_summary("local-flash-next", flash)
+        assert "⚠ experimental" in format_profile_table("local-flash-next", flash)
+
     def test_incomplete_template_is_not_advertised_as_native_tools(self, monkeypatch):
         # The template PARSES successfully (``{% endif %}`` is present), but the
         # XML tool contract is genuinely INCOMPLETE: it opens

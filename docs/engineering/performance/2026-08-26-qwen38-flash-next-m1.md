@@ -1,8 +1,9 @@
 # Qwen3.8-Flash-Next text-lane M1
 
-Status: experimental text lane. The immutable release artifact is being
-published as `rapid-mlx/Qwen3.8-Flash-Next-4bit`; this PR must not land before
-that repository resolves. MTP and vision remain separate milestones.
+Status: experimental text lane. The immutable release artifact is published as
+`rapid-mlx/Qwen3.8-Flash-Next-4bit` at revision
+`dcf657e4acda2aae72da99cde65b6c491cd96998`. MTP and vision remain separate
+milestones.
 
 ## Architecture and conversion contract
 
@@ -23,11 +24,12 @@ The converted q4 artifact uses:
 `scripts/qwen38_streaming_convert.py` streams source shards, emits MLX sibling
 `weight` / `scales` / `biases` keys, preserves the fused MoE gate-up/down
 contract, and writes a complete index plus SHA-256 manifest. The verified
-release artifact contains 28 shards / 97.51 GiB (104,695,602,743 bytes). Strict
-loading reports zero missing and zero unexpected parameters. Its model card
-records source revision `f5d08274`, the Qwen Apache-2.0 license, this
-mixed-group quantization contract, and the generated `SHA256SUMS.txt` whole-tree
-manifest.
+release artifact contains 28 shards / 97.51 GiB. The immutable repository is
+104,695,605,424 bytes including metadata; all 34 entries in `SHA256SUMS.txt`
+(manifest hash prefix `826f00b2`) match the remote revision. Strict loading
+reports zero missing and zero unexpected parameters. Its model card records
+source revision `f5d08274`, the Qwen Apache-2.0 license, this mixed-group
+quantization contract, and the generated whole-tree manifest.
 
 ## Reference and numerical gate
 
@@ -86,7 +88,7 @@ for weather, stock price, meeting scheduling, and local-document search.
 Both an explicitly served local checkpoint and the
 `qwen3.8-flash-next-4bit` alias advertise the `experimental` capability. The
 alias resolves to the immutable release artifact and declares a 128 GB minimum
-memory floor; the exact 104,695,602,743-byte download footprint is part of the
+memory floor; the exact 104,695,605,424-byte repository footprint is part of the
 model-size manifest. The measured peak means 128 GB remains a tight operator
 tier, while 192 GB is recommended for evaluation headroom. M1 is CLI/API only;
 Desktop catalog exposure remains a later product milestone.

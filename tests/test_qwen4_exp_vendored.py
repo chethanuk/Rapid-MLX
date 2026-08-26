@@ -1,6 +1,7 @@
 import json
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -86,6 +87,59 @@ def test_config_rejects_partial_indexer_contract():
         _args(indexer_budget=None)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"num_hidden_layers": 1}, "one entry per decoder layer"),
+        ({"layer_types": ["linear_attention", "unknown"]}, "Unsupported"),
+        ({"hc_count": 1}, "four-stream HC dimensions"),
+        (
+            {"linear_num_key_heads": 3, "linear_num_value_heads": 2},
+            "divisible by key heads",
+        ),
+        ({"output_gate_type": "silu"}, "sigmoid GDN gate"),
+        ({"indexer_budget": 0}, "indexer values must be positive"),
+        ({"indexer_kv_heads": 2}, "one indexer KV head"),
+        ({"indexer_budget": 7}, "divisible by indexer_compress_ratio"),
+        (
+            {"rope_parameters": {"partial_rotary_factor": 2.0}},
+            "rotary dimensions must fit",
+        ),
+        ({"num_experts_per_tok": 5}, "within num_experts"),
+        ({"ple_layer_ids": [1], "ple_embed_dim": 15}, "divide evenly"),
+        ({"ple_layer_ids": [3], "ple_embed_dim": 16}, "one-indexed"),
+        (
+            {"ple_layer_ids": [2], "ple_embed_dim": 16},
+            "only valid on linear-attention",
+        ),
+        (
+            {"ple_layer_ids": [1], "ple_embed_dim": 16, "eos_token_id": None},
+            "requires eos_token_id",
+        ),
+        (
+            {"ple_layer_ids": [1], "ple_embed_dim": 16, "eos_token_id": []},
+            "must not be empty",
+        ),
+    ],
+)
+def test_config_rejects_invalid_architecture_contracts(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _args(**overrides)
+
+
+def test_config_synthesizes_layer_schedule_and_accepts_flat_model_args():
+    args = _args(layer_types=None, full_attention_interval=2)
+    assert args.layer_types == ["linear_attention", "qwen_sparse_attention"]
+    flat = asdict(args)
+    flat["model_type"] = "qwen4_exp"
+    parsed = ModelArgs.from_dict(flat)
+    assert parsed.text_config["hidden_size"] == args.hidden_size
+    nested = ModelArgs.from_dict(
+        {"model_type": "qwen4_exp", "text_config": asdict(_args())}
+    )
+    assert nested.text_config["hidden_size"] == args.hidden_size
+
+
 def test_qwen4_rope_uses_reference_half_split_pairing():
     values = np.array([[[[0.25, -0.5, 0.75, 1.0]]]], dtype=np.float32)
     output = apply_qwen4_exp_rope(
@@ -108,6 +162,37 @@ def test_qwen4_rope_uses_reference_half_split_pairing():
     np.testing.assert_allclose(np.asarray(output), expected, rtol=1e-5, atol=1e-5)
 
 
+def test_rotary_fallback_guards_and_one_dimensional_positions():
+    x = mx.ones((1, 2, 1, 4))
+    assert (
+        qwen4_exp.apply_rotary_positions(x, mx.array([0, 1]), rotary_dim=0, base=10_000)
+        is x
+    )
+    with pytest.raises(ValueError, match="must be even"):
+        qwen4_exp.apply_rotary_positions(x, mx.array([0, 1]), rotary_dim=3, base=10_000)
+    output = qwen4_exp.apply_rotary_positions(
+        x, mx.array([0, 1]), rotary_dim=4, base=10_000
+    )
+    assert output.shape == x.shape
+
+
+def test_qwen4_rope_kernel_contract_and_fallback(monkeypatch):
+    with pytest.raises(ValueError, match="requires 2-D position IDs"):
+        qwen4_exp._qwen4_exp_rope_kernel.__wrapped__(4, 1)
+
+    monkeypatch.setattr(qwen4_exp.mx.metal, "is_available", lambda: False)
+    assert qwen4_exp._qwen4_exp_rope_kernel.__wrapped__(4, 2) is None
+
+    monkeypatch.setattr(qwen4_exp, "_qwen4_exp_rope_kernel", lambda *_args: None)
+    output = apply_qwen4_exp_rope(
+        mx.ones((1, 1, 2, 4)),
+        mx.array([[0, 1]], dtype=mx.int64),
+        rotary_dim=4,
+        base=10_000,
+    )
+    assert output.shape == (1, 1, 2, 4)
+
+
 def test_zero_centered_grouped_rms_norm_matches_numpy():
     norm = ZeroCenteredRMSNorm(8, group_size=4, eps=1e-6)
     norm.weight = mx.array(np.linspace(-0.2, 0.2, 8, dtype=np.float32))
@@ -119,6 +204,11 @@ def test_zero_centered_grouped_rms_norm_matches_numpy():
     np.testing.assert_allclose(
         np.array(out), expected.reshape(x_np.shape), rtol=2e-5, atol=2e-5
     )
+
+
+def test_zero_centered_rms_norm_rejects_partial_group():
+    with pytest.raises(ValueError, match="divide the feature width"):
+        ZeroCenteredRMSNorm(7, group_size=4)
 
 
 def test_gated_residual_matches_reference_equations():
@@ -157,6 +247,15 @@ def test_gated_residual_matches_reference_equations():
     )
 
 
+def test_gated_residual_shape_guard_and_read_only_variant():
+    args = _args()
+    layer = GatedResidual(args, use_combine=False)
+    mixed = layer(mx.zeros((1, 2, args.hc_count * args.hidden_size)))
+    assert mixed.shape == (1, 2, args.hidden_size)
+    with pytest.raises(ValueError, match="HC expected"):
+        layer(mx.zeros((1, 2, args.hidden_size)))
+
+
 def test_gdn_ratio_three_state_shapes_and_cached_decode():
     args = _args()
     layer = GatedDeltaNet(args)
@@ -175,6 +274,19 @@ def test_gdn_ratio_three_state_shapes_and_cached_decode():
     assert cache[1].shape == (1, 3, 4, 4)
 
 
+def test_gdn_honors_mask_and_per_row_valid_lengths():
+    layer = GatedDeltaNet(_args())
+    cache = ArraysCache(size=2)
+    cache.prepare(lengths=[1])
+    output = layer(
+        mx.zeros((1, 2, 8)),
+        mask=mx.array([[True, False]]),
+        cache=cache,
+    )
+    mx.eval(output, cache.state)
+    assert output.shape == (1, 2, 8)
+
+
 def test_sharded_embedding_preserves_global_row_identity():
     embedding = ShardedEmbedding(num_embeddings=16, dims=4, parts=4)
     for shard_id, shard in enumerate(embedding.shards):
@@ -186,6 +298,16 @@ def test_sharded_embedding_preserves_global_row_identity():
         np.array([[0, 3, 4, 9, 15]], dtype=np.float32)[..., None], 4, axis=-1
     )
     np.testing.assert_array_equal(np.array(output), expected)
+
+
+def test_sharded_embedding_guards_and_empty_input():
+    with pytest.raises(ValueError, match="divide evenly"):
+        ShardedEmbedding(num_embeddings=15, dims=4, parts=4)
+    embedding = ShardedEmbedding(num_embeddings=16, dims=4, parts=4)
+    output = embedding(mx.array([], dtype=mx.int32).reshape(1, 0))
+    assert output.shape == (1, 0, 4)
+    assert qwen4_exp._is_prime(1) is False
+    assert qwen4_exp._is_prime(2) is True
 
 
 def test_ngram_multipliers_match_released_reference_constants():
@@ -551,6 +673,17 @@ def test_scheduler_mid_prefill_restores_qsa_cachelist():
         np.array(restored_qsa.state[1]), np.array(qsa.state[1])
     )
 
+    malformed = scheduler._reconstruct_cache_from_states(
+        [
+            {
+                "state": original.state,
+                "meta_state": ("missing-nested-metadata",),
+                "class_ref": CacheList,
+            }
+        ]
+    )
+    assert malformed is None
+
 
 def test_qsa_sparse_scores_use_one_reference_batched_matmul(monkeypatch):
     args = _args(
@@ -580,6 +713,36 @@ def test_qsa_sparse_scores_use_one_reference_batched_matmul(monkeypatch):
             (args.indexer_head_dim, 3),
         )
     ]
+
+
+def test_qsa_indexer_fail_closed_internal_invariants():
+    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    indexer = QSAIndexer(args)
+    indexer.num_kv_heads = 2
+    indexer.index_qk_proj = qwen4_exp.nn.Linear(
+        args.hidden_size,
+        indexer.num_heads * indexer.head_dim + 2 * indexer.head_dim,
+        bias=False,
+    )
+    with pytest.raises(ValueError, match="one indexer KV head"):
+        indexer(
+            mx.zeros((1, 2, args.hidden_size)),
+            QSAIndexCache(compress_ratio=2),
+            physical_kv_length=2,
+        )
+
+    inconsistent = QSAIndexer(args)
+    inconsistent.block_topk = 1
+    inconsistent_cache = QSAIndexCache(compress_ratio=2)
+    inconsistent_cache._offsets = [4]
+    inconsistent_cache._compressed_counts = [1]
+    inconsistent_cache.raw_ring = mx.zeros((1, 2, args.indexer_head_dim))
+    with pytest.raises(RuntimeError, match="selection was not materialized"):
+        inconsistent(
+            mx.zeros((1, 1, args.hidden_size)),
+            inconsistent_cache,
+            physical_kv_length=5,
+        )
 
 
 def test_qsa_cache_uses_standard_batch_lifecycle_without_rebuilding_history():
@@ -947,3 +1110,185 @@ def test_quantization_contract_uses_shape_exact_ple_groups_and_q8_routing():
         "language_model.model.layers.1.mlp.shared_expert_gate", object()
     ) == {"group_size": 64, "bits": 8}
     assert predicate("language_model.model.layers.1.self_attn.q_proj", object()) is True
+
+
+def test_qsa_cache_fail_closed_guards_and_diagnostics():
+    with pytest.raises(ValueError, match="compression ratio must be positive"):
+        QSAIndexCache(compress_ratio=0)
+
+    cache = QSAIndexCache(compress_ratio=2)
+    cache.update(mx.ones((1, 1, 3)), lambda pooled, _position: pooled)
+    with pytest.raises(ValueError, match="shape changed"):
+        cache.update(mx.ones((1, 1, 4)), lambda pooled, _position: pooled)
+    with pytest.raises(ValueError, match="out of range"):
+        cache.keys_for_blocks(0, 1)
+    assert cache.keys_for_blocks(0, 0).shape == (0, 0)
+    assert cache.valid_lengths(2) == [2]
+    assert cache.can_trim(-1) is False
+    assert cache.can_trim(0) is True
+    checkpoint = cache.trim_checkpoint()
+    cache.restore_trim_checkpoint(checkpoint)
+    assert cache.size() == 1
+    assert cache.empty() is False
+    assert cache.nbytes > 0
+
+    batched = QSAIndexCache.merge([cache, cache.extract(0)])
+    with pytest.raises(AttributeError, match="per-row compressed counts"):
+        _ = batched._compressed_count
+    batched.prepare(lengths=[1, 1])
+    batched.filter(mx.array([1], dtype=mx.int32))
+    assert batched.size() == 1
+
+    inconsistent = QSAIndexCache(compress_ratio=2)
+    inconsistent._compressed_counts = [1]
+    with pytest.raises(ValueError, match="compressed cache is empty"):
+        inconsistent.keys_for_blocks(0, 1)
+
+
+def test_qsa_cache_rejects_invalid_batch_and_merge_contracts():
+    cache = QSAIndexCache(compress_ratio=2, left_padding=[0])
+    with pytest.raises(ValueError, match="batch metadata"):
+        cache._ensure_batch(2)
+
+    committed = QSAIndexCache(compress_ratio=2)
+    committed.update(mx.ones((1, 1, 2)), lambda pooled, _position: pooled)
+    with pytest.raises(ValueError, match="outside cache lifecycle"):
+        committed._ensure_batch(2)
+
+    with pytest.raises(ValueError, match="empty QSA cache list"):
+        QSAIndexCache.merge([])
+    with pytest.raises(ValueError, match="share compression ratio"):
+        QSAIndexCache.merge(
+            [QSAIndexCache(compress_ratio=2), QSAIndexCache(compress_ratio=4)]
+        )
+
+
+def test_model_wrapper_properties_sanitize_and_tied_logits():
+    args = _ple_args(tie_word_embeddings=True)
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
+    assert model.model is model.language_model.model
+    assert model.layers is model.language_model.layers
+    assert model.cast_predicate("layers.0.A_log") is False
+    assert model.cast_predicate("layers.0.weight") is True
+
+    mapped = model.sanitize(
+        {
+            "model.visual.weight": mx.ones((1,)),
+            "vision_tower.weight": mx.ones((1,)),
+            "mtp.weight": mx.ones((1,)),
+            "model.language_model.embed_tokens.weight": mx.ones((2, 2)),
+            "model.norm.weight": mx.ones((2,)),
+            "language_model.model.keep.weight": mx.ones((2,)),
+            "language_model.model.layers.0.mlp.experts.gate_up_proj.unknown": mx.ones(
+                (1, 2, 2)
+            ),
+        }
+    )
+    assert all("visual" not in key and "mtp" not in key for key in mapped)
+    assert any(key.endswith("gate_up_proj.unknown") for key in mapped)
+
+    embeddings = mx.zeros((1, 2, args.hidden_size))
+    logits = model(mx.array([[1, 2]]), input_embeddings=embeddings)
+    assert logits.shape == (1, 2, args.vocab_size)
+
+
+def test_experimental_capability_uses_live_residency_truth(monkeypatch):
+    from vllm_mlx.routes import models as models_route
+
+    entry = SimpleNamespace(
+        experimental=True,
+        matches=lambda model_id: model_id == "served-flash",
+    )
+    registry = SimpleNamespace(get_entry=lambda _model_id: entry)
+    monkeypatch.setattr(
+        models_route,
+        "get_config",
+        lambda: SimpleNamespace(
+            model_registry=registry,
+            model_name=None,
+            model_alias=None,
+            engine=None,
+        ),
+    )
+    assert models_route._served_experimental("served-flash") is True
+    assert models_route._served_experimental("other") is False
+
+    registry.get_entry = lambda _model_id: (_ for _ in ()).throw(KeyError("gone"))
+    assert models_route._served_experimental("served-flash") is False
+
+    monkeypatch.setattr(
+        models_route,
+        "get_config",
+        lambda: SimpleNamespace(
+            model_registry=None,
+            model_name="served-flash",
+            model_alias=None,
+            engine=SimpleNamespace(experimental=True),
+            embedding_model_locked=False,
+        ),
+    )
+    assert models_route._served_experimental("served-flash") is True
+    assert models_route._served_experimental("other") is False
+    assert (
+        models_route._detect_capabilities(
+            "served-flash",
+            profile_modality="text",
+            is_text_only=True,
+            profile_tool_parser=None,
+            experimental=True,
+        )[-1]
+        == "experimental"
+    )
+
+
+def test_qwen4_registration_probes_native_and_fails_closed(monkeypatch, caplog):
+    import builtins
+    import importlib.util
+    import sys
+
+    import vllm_mlx.models as model_package
+    from vllm_mlx.utils import tokenizer
+
+    module_name = "mlx_lm.models.qwen4_exp"
+    monkeypatch.setattr(
+        tokenizer, "_VENDORED_MODEL_TYPES", set(tokenizer._VENDORED_MODEL_TYPES)
+    )
+    tokenizer._register_vendored_archs()
+
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: object() if name == module_name else original_find_spec(name),
+    )
+    tokenizer._register_vendored_archs()
+    assert "qwen4_exp" in tokenizer._VENDORED_MODEL_TYPES
+
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    def rejecting_probe(name):
+        if name == module_name:
+            raise ValueError("injected missing parent")
+        return original_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", rejecting_probe)
+    tokenizer._register_vendored_archs()
+    assert module_name in sys.modules
+
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.delitem(sys.modules, "vllm_mlx.models.qwen4_exp", raising=False)
+    monkeypatch.delattr(model_package, "qwen4_exp", raising=False)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    original_import = builtins.__import__
+
+    def rejecting_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 2 and "qwen4_exp" in fromlist:
+            raise ImportError("injected vendored import failure")
+        return original_import(name, globals, locals, fromlist, level)
+
+    tokenizer._VENDORED_MODEL_TYPES.discard("qwen4_exp")
+    monkeypatch.setattr(builtins, "__import__", rejecting_import)
+    tokenizer._register_vendored_archs()
+    assert "qwen4_exp" not in tokenizer._VENDORED_MODEL_TYPES
+    assert "failed to register" in caplog.text
