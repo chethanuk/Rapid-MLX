@@ -813,6 +813,11 @@ async def create_anthropic_message(
                     prepared_messages=messages,
                     prepared_images=images,
                     prepared_videos=videos,
+                    caller_agent=(
+                        request.headers.get("user-agent")
+                        if request is not None
+                        else None
+                    ),
                 ),
                 request,
                 engine=engine,
@@ -1158,6 +1163,32 @@ async def create_anthropic_message(
             # haven't been rebuilt against the new ``GenerationOutput``
             # field (None → legacy ``stop`` → ``end_turn`` mapping).
             matched_stop=getattr(output, "matched_stop", None),
+        )
+
+        # Opt-in telemetry (caller attribution, task C): record a bucketed
+        # ``request`` event for this completed non-streaming /v1/messages
+        # completion. ``caller_agent`` comes from the inbound User-Agent
+        # (bucketed to an allowlist in ``redact`` — never stored raw); every
+        # perf number is bucketed. ``emit.request`` is sampled +
+        # ``is_enabled()``-gated + ``@_safe``, so this is a cheap no-op when
+        # telemetry is off / not sampled and can never affect the response.
+        # TTFT == total latency here (a non-streaming response is delivered
+        # in one shot); the streaming path reports true TTFT.
+        from vllm_mlx.telemetry import emit as _telemetry_emit
+
+        _telemetry_emit.request(
+            endpoint="/v1/messages",
+            model_alias=anthropic_request.model,
+            stream=False,
+            tool_call_used=bool(tool_calls),
+            prompt_tokens=output.prompt_tokens,
+            completion_tokens=output.completion_tokens,
+            ttft_ms=elapsed * 1000.0,
+            tps=tokens_per_sec,
+            status=200,
+            caller_agent=(
+                request.headers.get("user-agent") if request is not None else None
+            ),
         )
         return Response(
             content=anthropic_response.model_dump_json(exclude_none=True),
@@ -1548,6 +1579,7 @@ async def _stream_anthropic_messages(
     prepared_messages: list | None = None,
     prepared_images: list | None = None,
     prepared_videos: list | None = None,
+    caller_agent: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream Anthropic Messages API SSE events.
 
@@ -1584,9 +1616,16 @@ async def _stream_anthropic_messages(
             Pre-r5 the streaming helper discarded these to ``[]``
             when ``prepared_messages`` was supplied, silently
             dropping every multimodal stream's media inputs.
+        caller_agent: inbound HTTP ``User-Agent`` from the route request,
+            passed straight to ``emit.request`` (bucketed to an allowlist
+            in ``redact`` — never stored raw). Task C caller attribution.
     """
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     start_time = time.perf_counter()
+    # First non-empty text-token timestamp so the task-C streaming emit can
+    # report true TTFT (mirrors the chat/completions lanes). None until the
+    # first content delta is seen.
+    _first_token_ts: float | None = None
 
     if prepared_messages is not None:
         # Caller (the route entry-point) already extracted +
@@ -2133,6 +2172,9 @@ async def _stream_anthropic_messages(
 
     async for output in engine.stream_chat(messages=messages, **chat_kwargs):
         delta_text = output.new_text
+
+        if _first_token_ts is None and (delta_text or ""):
+            _first_token_ts = time.perf_counter()
 
         if hasattr(output, "prompt_tokens") and output.prompt_tokens:
             prompt_tokens = output.prompt_tokens
@@ -3105,6 +3147,30 @@ async def _stream_anthropic_messages(
     tokens_per_sec = completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
         f"Anthropic messages (stream): prompt={prompt_tokens} + completion={completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)"
+    )
+
+    # Opt-in telemetry (caller attribution, task C): record a bucketed
+    # ``request`` event for this completed /v1/messages stream. Fired only
+    # after the generator drains normally (all tokens flushed). ``caller_agent``
+    # is the inbound User-Agent bucketed to an allowlist in ``redact`` (never
+    # stored raw); ``ttft_ms`` is true first-token latency. ``emit.request``
+    # is sampled + ``is_enabled()``-gated + ``@_safe``, so this is a cheap
+    # no-op when telemetry is off / not sampled.
+    from vllm_mlx.telemetry import emit as _telemetry_emit
+
+    _telemetry_emit.request(
+        endpoint="/v1/messages",
+        model_alias=anthropic_request.model,
+        stream=True,
+        tool_call_used=bool(tool_calls),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        ttft_ms=0.0
+        if _first_token_ts is None
+        else (_first_token_ts - start_time) * 1000.0,
+        tps=tokens_per_sec,
+        status=200,
+        caller_agent=caller_agent,
     )
 
     yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
