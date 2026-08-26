@@ -247,7 +247,17 @@ class TestChatValidation:
 
 
 def _build_embed_app(patch_cfg, monkeypatch, embed_return):
+    import sys
+    from types import ModuleType
+
     from vllm_mlx.routes import embeddings as emb_route
+
+    embedding_stub = ModuleType("vllm_mlx.embedding")
+    embedding_stub.EMBEDDINGS_EXTRA_INSTALL_HINT = ""
+    embedding_stub.EmbeddingInputTooLongError = type(
+        "EmbeddingInputTooLongError", (ValueError,), {}
+    )
+    monkeypatch.setitem(sys.modules, "vllm_mlx.embedding", embedding_stub)
 
     app = FastAPI()
     app.include_router(emb_route.router)
@@ -740,9 +750,9 @@ class TestMLLMBatchGeneratorFailsLoud:
     def _source(self):
         from pathlib import Path
 
-        import vllm_mlx.mllm_batch_generator as mod
+        import vllm_mlx
 
-        return Path(mod.__file__).read_text()
+        return Path(vllm_mlx.__file__).with_name("mllm_batch_generator.py").read_text()
 
     def test_image_branch_raises_explicit_client_error(self):
         src = self._source()
@@ -774,9 +784,9 @@ class TestMLLMBatchGeneratorFailsLoud:
         C2 fix silently regresses to "client hangs"."""
         from pathlib import Path
 
-        import vllm_mlx.mllm_scheduler as sched_mod
+        import vllm_mlx
 
-        src = Path(sched_mod.__file__).read_text()
+        src = Path(vllm_mlx.__file__).with_name("mllm_scheduler.py").read_text()
         # Find the next() call and assert the surrounding catch.
         idx = src.find("self.batch_generator.next()")
         assert idx != -1, "MLLMScheduler no longer calls batch_generator.next()"
