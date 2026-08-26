@@ -3069,7 +3069,9 @@ def serve_command(args):
         # without this the server would boot and only fail mid-request.
         # Judge runnability with the SAME ``_cache_entry_is_runnable``
         # predicate (which family-scopes the Whisper ``weights.npz`` probe).
-        if _offline_hub_mode_active() and not _cache_entry_is_runnable(audio_entry.hf_id):
+        if _offline_hub_mode_active() and not _cache_entry_is_runnable(
+            audio_entry.hf_id
+        ):
             _refuse_offline_uncached(audio_entry.hf_id)
         _serve_audio_mode(args, audio_entry)
         return
@@ -11778,9 +11780,8 @@ def main():
     # the offline+uncached refusal applies (codex #2357-P1). --port on a
     # top-level serve means "bind here", not "attach", so only the
     # client-capable commands are exempted.
-    _attached_remote = (
-        getattr(args, "command", None) in {"chat", "run", "bench"}
-        and (getattr(args, "base_url", None) or getattr(args, "port", None) is not None)
+    _attached_remote = getattr(args, "command", None) in {"chat", "run", "bench"} and (
+        getattr(args, "base_url", None) or getattr(args, "port", None) is not None
     )
     if (
         getattr(args, "command", None) in _GATED_COMMANDS
@@ -11832,9 +11833,7 @@ def main():
                     _is_wane_exempt = (
                         _rp_entry is not None
                         and _rp_entry.modality == "video-gen"
-                        and os.path.isdir(
-                            os.environ.get("RAPID_MLX_WAN_MODEL_DIR", "")
-                        )
+                        and os.path.isdir(os.environ.get("RAPID_MLX_WAN_MODEL_DIR", ""))
                     )
                 if (
                     _offline_hub_mode_active()

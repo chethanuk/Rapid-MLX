@@ -2054,7 +2054,9 @@ def test_chat_switch_confirm_cancel_keeps_old_server(monkeypatch, capsys):
     monkeypatch.setattr(gate, "is_repo_cached", lambda _repo: False)
     # The switch's uncached-model confirm is declined -> SystemExit.
     monkeypatch.setattr(
-        gate, "confirm_or_abort", lambda *_a, **_kw: (_ for _ in ()).throw(SystemExit(0))
+        gate,
+        "confirm_or_abort",
+        lambda *_a, **_kw: (_ for _ in ()).throw(SystemExit(0)),
     )
     monkeypatch.setattr(
         "vllm_mlx.model_aliases.resolve_model",

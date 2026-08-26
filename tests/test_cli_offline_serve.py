@@ -50,6 +50,7 @@ def _make_serve_args(model: str) -> Namespace:
         watchdog_ppid=None,
     )
 
+
 def _uncached_probe(monkeypatch):
     """Force the runnability predicate to report "not cached runnable",
     so the model falls through to the offline refusal / download path."""
@@ -202,7 +203,9 @@ def test_gate_refuses_offline_uncached_before_notices(monkeypatch, capsys):
     # (nor is the spinner'd size estimate / confirm path, which live below the
     # offline short-circuit in main()). Guard both to catch a regression.
     with (
-        patch.object(sys, "argv", ["rapid-mlx", "serve", "badorg/offline-missing-model"]),
+        patch.object(
+            sys, "argv", ["rapid-mlx", "serve", "badorg/offline-missing-model"]
+        ),
         patch.object(
             cli, "serve_command", side_effect=AssertionError("must not dispatch")
         ),
@@ -279,9 +282,7 @@ def test_gate_does_not_refuse_when_wan_local_dir_set(monkeypatch, capsys, tmp_pa
     # NOT fire; serve_command must still not be reached (gate self-skips or
     # confirm handles it), so we patch it to a sentinel just in case.
     monkeypatch.setattr(gate, "estimate_repo_size_bytes", lambda name: 1)
-    monkeypatch.setattr(
-        gate, "confirm_or_abort", lambda *a, **k: confirmed.append(a)
-    )
+    monkeypatch.setattr(gate, "confirm_or_abort", lambda *a, **k: confirmed.append(a))
     dispatched = []
     with (
         patch.object(
