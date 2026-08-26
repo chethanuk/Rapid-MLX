@@ -1644,6 +1644,58 @@ def _try_mirror_prefetch(
     )
 
 
+def _env_flag_active(raw: str | None) -> bool:
+    """True when an HF/transformers offline-style env flag is enabled.
+
+    Bounded local truth-value predicate reproducing huggingface_hub's
+    ``_is_true`` semantics exactly (only ``1``/``ON``/``YES``/``TRUE`` count;
+    ``0``/``false``/empty leave it off) without depending on the library's
+    private ``constants._is_true`` helper, whose return type is untyped.
+    """
+    return raw is not None and str(raw).lower() in {"1", "on", "yes", "true"}
+
+
+def _offline_hub_mode_active() -> bool:
+    """True when the HF/transformers offline switches pin hub access local-only.
+
+    Reads both offline switches live (so tests monkeypatching them stay
+    truthful) and treats each **independently** before OR-ing: folding them
+    with ``os.environ.get(...) or os.environ.get(...)`` into one string lets a
+    ``HF_HUB_OFFLINE=0`` mask ``TRANSFORMERS_OFFLINE=1`` (or vice-versa), which
+    the download layer does not do.
+    """
+    return _env_flag_active(os.environ.get("HF_HUB_OFFLINE")) or _env_flag_active(
+        os.environ.get("TRANSFORMERS_OFFLINE")
+    )
+
+
+def _offline_uncached_error(model_name: str) -> str:
+    """Render the offline + uncached refusal body (one actionable message).
+
+    Reused verbatim by the ``main()`` confirmation gate (so the refusal fires
+    BEFORE any "About to download" notice) and by ``_ensure_model_downloaded``
+    (the belt-and-suspenders defense). A lane override is never recommended:
+    no ``--mllm``/``--no-mllm`` flag can supply a checkpoint that is simply
+    absent from the cache.
+    """
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    return (
+        f"\n  Error: {model_name} is not cached and the network is "
+        "unavailable (offline mode is enabled).\n"
+        f"  After connectivity is restored, disable offline mode "
+        f"(unset HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE) and run "
+        f"`rapid-mlx pull {model_name}`, then serve again.\n"
+        f"  Expected cache location: {HF_HUB_CACHE}\n"
+    )
+
+
+def _refuse_offline_uncached(model_name: str) -> None:
+    """Print the offline + uncached refusal and exit(1)."""
+    print(_offline_uncached_error(model_name), file=sys.stderr)
+    sys.exit(1)
+
+
 def _ensure_model_downloaded(
     model_name: str, *, force_disk_check: bool = False
 ) -> None:
@@ -1662,33 +1714,39 @@ def _ensure_model_downloaded(
     """
     if os.path.exists(model_name):
         return
-    # Reuse the same weight-file-presence probe as ``is_repo_cached``:
-    # the older ``try_to_load_from_cache('config.json')`` check
-    # short-circuits on a partial cache (metadata downloaded, weight
-    # shards still in flight), letting the spawned ``serve`` quietly
-    # finish the download inside its logfile. Codex round-3 BLOCKING #2.
-    try:
-        from vllm_mlx._download_gate import is_repo_cached, mflux_missing_weights
+    # Reuse the cache inventory's single runnability probe core
+    # (``_cache_runnability``, the same source ``models --cached`` uses) so
+    # what counts as "already cached" is identical everywhere and spans every
+    # modality: text ``model*.safetensors`` (``is_repo_cached``), mflux
+    # component weights, component-split video, and family-scoped Whisper
+    # ``weights.npz``. A text-only ``is_repo_cached`` check would wrongly read
+    # a fully-downloaded mflux / split-video model as uncached and re-download
+    # on every start — a slow start at best, a hung one (SYN_SENT against a
+    # poisoned address) on a hostile DNS path (codex round-3 BLOCKING #2).
+    #
+    # Keep the tri-state result here, not the boolean wrapper: only a
+    # definitively-runnable result short-circuits the download, and only a
+    # definitively-not-runnable result triggers the offline refusal. A probe
+    # fault (``None``) must neither skip the download (never assume usable
+    # weights we couldn't verify) nor refuse offline (never assert uncached we
+    # couldn't establish) — it falls through to the normal online path.
+    cachedness = _cache_runnability(model_name)
+    if cachedness is True:
+        return
 
-        if is_repo_cached(model_name):
-            return
-        # ``is_repo_cached`` probes for root ``model*.safetensors``, which an
-        # mflux checkpoint never has — its weights live under ``transformer/``,
-        # ``text_encoder/`` and ``vae/``. So a fully-downloaded image model
-        # always failed that probe and fell through to the disk-space gate and
-        # the mirror below, i.e. every single start of an image model needed
-        # the network. On a hostile DNS path that is not a slow start but a
-        # hung one: the socket sits in SYN_SENT against a poisoned address
-        # while the UI shows "Starting" forever. Verified-complete component
-        # weights are just as cached as a verified-complete root checkpoint.
-        if mflux_missing_weights(model_name) == []:
-            return
-    except Exception:
-        # Probe failed (filesystem permission error, unexpected layout) —
-        # fall through to the heavy snapshot_download path; HF will
-        # short-circuit on its own cache check if the repo really is
-        # fully present.
-        pass
+    # Offline + uncached refusal (#2357): reaching this point means the model is
+    # NOT cached (the probes above returned on every cached/complete shape) and
+    # it is not a local path. Refuse ONLY when uncachedness is actually
+    # established (``is False``) — a probe fault is inconclusive and must not
+    # be refused. If the hub is pinned to offline mode, a download is
+    # impossible, so refuse NOW with one actionable message instead of falling
+    # through to the network attempts that each fail and let the serve
+    # subprocess re-download — which duplicates "First-time download" /
+    # "Pre-download skipped" and eventually ends in misleading --mllm/--no-mllm
+    # lane advice when the checkpoint is simply absent. This mirrors the
+    # TimeoutError / disk-space exits: refuse before server initialization.
+    if _offline_hub_mode_active() and cachedness is False:
+        _refuse_offline_uncached(model_name)
 
     # Disk-space gate + mirror pull. Both the disk probe (HF ``model_info``)
     # and the mirror's own metadata + ``/api/models`` catalog round-trips run
@@ -3022,6 +3080,19 @@ def serve_command(args):
         # routes still accept both forms because the registry's
         # reverse HF-id index covers full ids too.
         args.model = audio_entry.hf_id
+        # Offline + uncached audio (#2357): refuse BEFORE the audio-mode
+        # fork. The main() B2 gate only fires for ids containing '/', so a
+        # short audio alias (``serve whisper``) never reaches it — and
+        # ``_serve_audio_mode`` loads weights lazily on first request, so
+        # without this the server would boot and only fail mid-request.
+        # Judge runnability with the SAME probe core (which family-scopes the
+        # Whisper ``weights.npz`` probe). The offline-refusal decision uses the
+        # tri-state ``is False`` so a probe fault (``None``) does not refuse.
+        if (
+            _offline_hub_mode_active()
+            and _cache_runnability(audio_entry.hf_id) is False
+        ):
+            _refuse_offline_uncached(audio_entry.hf_id)
         _serve_audio_mode(args, audio_entry)
         return
 
@@ -5647,21 +5718,24 @@ def _scan_external_model_dirs(
     return out
 
 
-def _cache_entry_is_runnable(repo: str) -> bool:
-    """Whether a cache directory contains a complete runnable snapshot.
+def _cache_runnability(repo: str) -> bool | None:
+    """Tri-state cache runnability: ``True`` runnable, ``False`` definitively
+    not, ``None`` = inconclusive (a probe fault masked a real verdict).
 
-    A Hugging Face repo directory appears as soon as metadata starts
-    downloading.  Treating directory presence as "cached" made interrupted
-    downloads (config/tokenizer only, no weights) look ready in ``ls`` and in
-    the desktop model picker. Reuse the serve download gate's authoritative
-    completeness checks for both text and component-split video layouts.
+    This is the probe-level core. A probe fault — cache-dir permission,
+    malformed index/header — does NOT tell us whether the checkpoint is
+    cached (it may well be). Callers must decide what ``None`` means:
 
-    ``resolve_unreferenced_cached_snapshot`` closes the #2351 gap: a complete,
-    unambiguous SINGLE snapshot with no ``refs/main`` (a commit-pinned
-    ``snapshot_download`` / manual pull) is loadable by the routing & loader
-    contract — the inventory must report it available, not ``(incomplete)``,
-    so ``models --cached`` and the serve gate agree with the loader. Multiple
-    snapshots are ambiguous and stay unresolved there.
+      * Skip-download / inventory callers (``_ensure_model_downloaded``,
+        ``models --cached``) treat ``None`` as **not runnable** (via
+        :func:`_cache_entry_is_runnable`, which collapses ``None`` to
+        ``False``) — they must never skip a download or show a checkmark on
+        a checkpoint whose cachedness could not be verified.
+      * Offline-refusal callers treat ``None`` as **do not refuse** (they
+        compare ``is False`` directly) — offline refuses only when
+        uncachedness is actually established, never on a probe fault.
+
+    Unexpected exceptions are genuine bugs and still propagate.
     """
     try:
         from vllm_mlx._download_gate import (
@@ -5682,8 +5756,38 @@ def _cache_entry_is_runnable(repo: str) -> bool:
             or _snapshot_is_complete_mflux_model(repo)
             or resolve_unreferenced_cached_snapshot(repo) is not None
         )
-    except Exception:
-        return False
+    except (OSError, KeyError, ValueError) as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not probe cachedness of %r: %s", repo, exc
+        )
+        return None
+
+
+def _cache_entry_is_runnable(repo: str) -> bool:
+    """Whether a cache directory contains a complete runnable snapshot.
+
+    A Hugging Face repo directory appears as soon as metadata starts
+    downloading.  Treating directory presence as "cached" made interrupted
+    downloads (config/tokenizer only, no weights) look ready in ``ls`` and in
+    the desktop model picker. Reuse the serve download gate's authoritative
+    completeness checks for both text and component-split video layouts.
+
+    ``resolve_unreferenced_cached_snapshot`` closes the #2351 gap: a complete,
+    unambiguous SINGLE snapshot with no ``refs/main`` (a commit-pinned
+    ``snapshot_download`` / manual pull) is loadable by the routing & loader
+    contract — the inventory must report it available, not ``(incomplete)``,
+    so ``models --cached`` and the serve gate agree with the loader. Multiple
+    snapshots are ambiguous and stay unresolved there.
+
+    A probe fault (see :func:`_cache_runnability`) collapses to ``False``
+    here: skip-download and inventory callers must not treat a checkpoint
+    whose cachedness could not be established as runnable. The offline-refusal
+    callers use the tri-state core directly (``is False``) so that a probe
+    fault does not make them refuse.
+    """
+    return _cache_runnability(repo) is True
 
 
 def _print_cached_models() -> None:
@@ -8208,6 +8312,20 @@ def chat_command(args):
                 )
 
                 if not is_repo_cached(resolved):
+                    # Offline + uncached (/model swap): refuse BEFORE the size
+                    # estimate + confirm, so the user sees the one actionable
+                    # offline reason instead of an "About to download" notice
+                    # or a confirm they can cancel without learning why
+                    # (#2357). Mirrors the main() serve gate; the Wan dir
+                    # override exemption is likewise scoped to video-gen.
+                    # Only print + return (stay in the REPL), not sys.exit —
+                    # a failed /model must never kill the chat session.
+                    if (
+                        _offline_hub_mode_active()
+                        and _cache_runnability(resolved) is False
+                    ):
+                        print(_offline_uncached_error(resolved), file=sys.stderr)
+                        return
                     try:
                         confirm_or_abort(
                             resolved,
@@ -8221,16 +8339,21 @@ def chat_command(args):
                         )
                         return
 
-        # 1. Pre-download the new model (this also runs the disk-space
-        #    gate). The current server keeps running while we do this so
-        #    a download failure leaves the user where they were.
+        # 1. Pre-download the new model (this also runs the disk-space gate
+        #    and the offline+uncached refusal). The current server keeps
+        #    running while we do this so a download failure leaves the user
+        #    where they were.
         try:
             _ensure_model_downloaded(resolved)
         except SystemExit:
-            # Disk gate aborted via sys.exit(1); old server is untouched.
+            # A fatal pre-download condition aborted via sys.exit(1) — disk
+            # gate, offline+uncached, or resolve timeout. Each path printed
+            # its own specific reason to stderr, so this summary deliberately
+            # does NOT re-attribute it as the disk gate (#2357). Old server
+            # is untouched.
             print(
                 f"  {RED}Model switch aborted{RESET} "
-                f"{DIM}(disk gate); previous server still running.{RESET}\n"
+                f"{DIM}(reason above); previous server still running.{RESET}\n"
             )
             return
         except RuntimeError as exc:
@@ -11705,6 +11828,15 @@ def main():
     _chat_spawn_child = os.environ.pop("RAPID_MLX_CHAT_SPAWN", "") == "1"
 
     _GATED_COMMANDS = {"chat", "run", "serve", "pull", "bench"}
+    # Attached client (chat/bench pointed at an existing server via
+    # --base-url/--port): the named model lives remotely and is NOT meant to
+    # be downloaded into the local HF cache, so neither the confirm gate nor
+    # the offline+uncached refusal applies (codex #2357-P1). --port on a
+    # top-level serve means "bind here", not "attach", so only the
+    # client-capable commands are exempted.
+    _attached_remote = getattr(args, "command", None) in {"chat", "run", "bench"} and (
+        getattr(args, "base_url", None) or getattr(args, "port", None) is not None
+    )
     if (
         getattr(args, "command", None) in _GATED_COMMANDS
         and hasattr(args, "model")
@@ -11712,6 +11844,7 @@ def main():
         and "/" in args.model  # only HF-style repo ids; local paths skip
         and not os.path.exists(args.model)
         and not _chat_spawn_child
+        and not _attached_remote
     ):
         # Cheap checks first: env override and non-TTY both short-circuit
         # without touching the HF API. ``confirm_or_abort`` re-checks
@@ -11728,6 +11861,40 @@ def main():
             )
 
             if not is_repo_cached(args.model):
+                # Offline + uncached (#2357): short-circuit BEFORE the size
+                # estimate + ``confirm_or_abort``. ``estimate_repo_size_bytes``
+                # makes a silent HF ``model_info`` round-trip that returns None
+                # under offline mode, which ``confirm_or_abort`` treats as
+                # "about to download … proceed" — so without this, the user
+                # would see a contradictory "About to download / Proceeding
+                # anyway" pair right before the refusal below. Refuse once here,
+                # identically to ``_ensure_model_downloaded``. Scope the refusal
+                # on the SAME runnability predicate (``_cache_entry_is_runnable``)
+                # rather than ``is_repo_cached`` alone: a fully-cached mflux or
+                # split-video checkpoint has no root ``model*.safetensors``, so a
+                # text-only check would wrongly refuse a model that IS cached
+                # (codex #2357-P1). Also skip when a lane-local source makes the
+                # model available offline even with an empty HF cache — Wan's
+                # ``RAPID_MLX_WAN_MODEL_DIR`` override (its own download path
+                # never goes through ``_ensure_model_downloaded``) (codex #2357-P1).
+                # The exemption is scoped to the video-gen lane so a stray env
+                # var can't exempt an unrelated text model from the refusal.
+                _is_wane_exempt = False
+                if os.environ.get("RAPID_MLX_WAN_MODEL_DIR"):
+                    from vllm_mlx.model_aliases import resolve_profile as _rp
+
+                    _rp_entry = _rp(args.model)
+                    _is_wane_exempt = (
+                        _rp_entry is not None
+                        and _rp_entry.modality == "video-gen"
+                        and os.path.isdir(os.environ.get("RAPID_MLX_WAN_MODEL_DIR", ""))
+                    )
+                if (
+                    _offline_hub_mode_active()
+                    and _cache_runnability(args.model) is False
+                    and not _is_wane_exempt
+                ):
+                    _refuse_offline_uncached(args.model)
                 # The size estimate is a silent HF ``model_info`` round-trip
                 # (up to 5s). Cover it with a "Resolving…" spinner so the
                 # first-run cold start doesn't read as a hang here — the same
