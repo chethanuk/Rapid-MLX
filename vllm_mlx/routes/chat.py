@@ -4962,6 +4962,11 @@ async def _create_chat_completion_impl(
         # the GPU once the client TCP-RST'd.
         request_id_holder: list[str | None] = [None]
         chat_kwargs["request_id_holder"] = request_id_holder
+        # One request identity crosses the public SSE and scheduler surfaces.
+        # The cancel endpoint receives only this client-visible id, so a
+        # separately generated scheduler UUID would make a live request
+        # impossible to address.
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         # Opt-in telemetry (Phase 2.2): the inbound User-Agent for the
         # streaming ``request`` event's ``caller_agent``. Passed RAW (not
         # bucketed) — ``emit.request`` funnels it through
@@ -4984,6 +4989,7 @@ async def _create_chat_completion_impl(
                         messages,
                         request,
                         json_schema,
+                        response_id=response_id,
                         strict_mode=strict_mode,
                         caller_agent=_caller_ua,
                         **chat_kwargs,
@@ -5021,6 +5027,8 @@ async def _create_chat_completion_impl(
                         messages,
                         request,
                         json_schema,
+                        response_id=response_id,
+                        request_id=response_id,
                         caller_agent=_caller_ua,
                         **chat_kwargs,
                     ),
@@ -5039,6 +5047,8 @@ async def _create_chat_completion_impl(
             engine,
             messages,
             request,
+            response_id=response_id,
+            request_id=response_id,
             caller_agent=_caller_ua,
             _client_disconnect_state=_client_disconnect_state,
             **chat_kwargs,
@@ -7549,6 +7559,7 @@ async def stream_chat_completion_guided(
     request: ChatCompletionRequest,
     json_schema: dict,
     *,
+    response_id: str | None = None,
     strict_mode: bool = False,
     caller_agent: str | None = None,
     **kwargs,
@@ -7577,7 +7588,8 @@ async def stream_chat_completion_guided(
         gc.disable()
 
     try:
-        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        if response_id is None:
+            response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         start_time = time.perf_counter()
 
         include_usage = bool(
@@ -7699,6 +7711,7 @@ async def stream_chat_completion_guided(
                 request,
                 response_id=response_id,
                 created=_sse_created,
+                request_id=response_id,
                 caller_agent=caller_agent,
                 **kwargs,
             ):
@@ -7850,6 +7863,7 @@ async def stream_chat_completion_strict_postgen(
     request: ChatCompletionRequest,
     json_schema: dict,
     *,
+    response_id: str | None = None,
     caller_agent: str | None = None,
     **kwargs,
 ) -> AsyncIterator[str]:
@@ -7888,7 +7902,8 @@ async def stream_chat_completion_strict_postgen(
     # the end shares the id with the upstream stream's content chunks
     # — clients group by id, so a fresh uuid here would surface as a
     # second un-associated completion.
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    if response_id is None:
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     created = int(time.time())
     model_name = _resolve_model_name(request.model)
 

@@ -2302,6 +2302,7 @@ class BatchedEngine(BaseEngine):
         stop: list[str] | None = None,
         images: list[str] | None = None,
         videos: list[str] | None = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         """
@@ -2315,6 +2316,9 @@ class BatchedEngine(BaseEngine):
             stop: Stop sequences
             images: Optional image URLs/paths (for MLLM)
             videos: Optional video URLs/paths (for MLLM)
+            request_id: Optional caller-provided request identity. Streaming
+                API routes use the public response id so cancellation and
+                scheduler admission address the same request.
             **kwargs: Additional model-specific parameters. C-01:
                 ``request_id_holder`` (``list[str | None]``) — when
                 provided, the engine writes the admitted scheduler
@@ -2367,6 +2371,7 @@ class BatchedEngine(BaseEngine):
             }
             try:
                 request_id = await self._mllm_scheduler.add_request_async(
+                    request_id=request_id,
                     prompt=prompt,
                     images=images,
                     videos=videos,
@@ -2467,6 +2472,7 @@ class BatchedEngine(BaseEngine):
                 "suppressed_tokens_logits_processor", None
             )
             request_id = await self._engine.add_request(
+                request_id=request_id,
                 prompt=prompt,
                 sampling_params=sampling_params,
                 prefix_boundary=prefix_boundary,
