@@ -1228,6 +1228,8 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
         QuantizedKVCache = None  # noqa: N806
 
     def has_deepseek_pooling(layer: Any) -> bool:
+        if type(layer).__module__ == "vllm_mlx.models.qwen4_exp_cache":
+            return type(layer).__name__ == "QSAIndexCache"
         if type(layer).__module__ == "vllm_mlx.models.deepseek_v4_cache":
             return type(layer).__name__ in {
                 "PoolingCache",
@@ -1342,8 +1344,8 @@ def _trim_cache_offset(cache: list[Any], trim_by: int) -> list[Any] | None:
                 trimmed.append(tc)
         else:
             if has_deepseek_pooling(layer_cache):
-                # DeepSeek pooling state must rewind with the local KV state;
-                # otherwise a divergent suffix crosses request boundaries.
+                # Vendored side-cache state must rewind with the local KV
+                # owner; otherwise a divergent suffix crosses requests.
                 tc = trim_wrapper_exact(layer_cache)
                 if tc is None:
                     return None

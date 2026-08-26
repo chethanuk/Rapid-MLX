@@ -254,13 +254,29 @@ class QSAIndexCache(ArraysCache):
         return cache
 
     def is_trimmable(self):
-        # A compressed block does not retain its source rows. Marking this
-        # trim-safe would corrupt partial-prefix rollback. M2 adds transactional
-        # undo for speculative tokens; exact cache clones remain supported.
-        return False
+        return all(self._can_trim_row(offset, 1) for offset in self._offsets)
 
-    def trim(self, _n):
-        return 0
+    def _can_trim_row(self, offset: int, n: int) -> bool:
+        if n < 0 or n > offset:
+            return False
+        if n == 0:
+            return True
+        remainder = offset % self.compress_ratio
+        available = remainder if remainder else min(self.compress_ratio, offset)
+        return n <= available
+
+    def trim(self, n):
+        # The raw ring retains exactly the current partial group, or the most
+        # recently completed group at a boundary. Rewind only within that
+        # recoverable window; the next update overwrites discarded rows and
+        # deterministically recomputes a removed compressed block.
+        if not all(self._can_trim_row(offset, n) for offset in self._offsets):
+            return 0
+        self._offsets = [offset - n for offset in self._offsets]
+        self._compressed_counts = [
+            offset // self.compress_ratio for offset in self._offsets
+        ]
+        return n
 
     def size(self):
         return max(self._offsets, default=0)

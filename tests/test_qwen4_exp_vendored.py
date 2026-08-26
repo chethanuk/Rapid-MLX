@@ -257,7 +257,7 @@ def test_qsa_cache_keeps_only_raw_ring_and_persistent_compressed_keys():
     np.testing.assert_array_equal(np.array(unchanged), np.array([[[2.0], [8.0]]]))
     np.testing.assert_array_equal(np.array(cache.raw_ring), np.array([[[9.0], [7.0]]]))
     assert cache.offset == 5
-    assert not cache.is_trimmable()
+    assert cache.is_trimmable()
 
     restored = QSAIndexCache.from_state(cache.state, cache.meta_state)
     assert restored.offset == 5
@@ -265,6 +265,40 @@ def test_qsa_cache_keeps_only_raw_ring_and_persistent_compressed_keys():
     np.testing.assert_array_equal(
         np.array(restored.compressed_keys), np.array([[[2.0], [8.0]]])
     )
+
+
+@pytest.mark.parametrize("length", [8, 9])
+def test_qsa_cache_rewinds_recoverable_group_and_recomputes_divergence(length):
+    def transform(group, start):
+        return group + start
+
+    original = QSAIndexCache(compress_ratio=4)
+    values = np.arange(1, length + 1, dtype=np.float32)
+    original.update(mx.array(values.reshape(1, -1, 1)), transform)
+    assert original.trim(1) == 1
+    original.update(mx.array([[[99.0]]]), transform)
+
+    cold = QSAIndexCache(compress_ratio=4)
+    expected_values = np.concatenate([values[:-1], np.array([99.0])])
+    cold.update(mx.array(expected_values.reshape(1, -1, 1)), transform)
+    mx.eval(original.state, cold.state)
+    assert original.offset == cold.offset == length
+    np.testing.assert_array_equal(
+        np.array(original.state[1]), np.array(cold.state[1])
+    )
+    np.testing.assert_array_equal(
+        np.array(original.raw_ring), np.array(cold.raw_ring)
+    )
+
+
+def test_qsa_cache_refuses_rewind_beyond_retained_raw_group():
+    cache = QSAIndexCache(compress_ratio=4)
+    cache.update(
+        mx.arange(9, dtype=mx.float32).reshape(1, 9, 1),
+        lambda group, start: group + start,
+    )
+    assert cache.trim(2) == 0
+    assert cache.offset == 9
 
 
 def test_qsa_attention_prefill_and_decode_keep_both_cache_owners_aligned():
