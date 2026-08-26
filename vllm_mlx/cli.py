@@ -8256,6 +8256,19 @@ def chat_command(args):
                 )
 
                 if not is_repo_cached(resolved):
+                    # Offline + uncached (/model swap): refuse BEFORE the size
+                    # estimate + confirm, so the user sees the one actionable
+                    # offline reason instead of an "About to download" notice
+                    # or a confirm they can cancel without learning why
+                    # (#2357). Mirrors the main() serve gate; the Wan dir
+                    # override exemption is likewise scoped to video-gen.
+                    # Only print + return (stay in the REPL), not sys.exit —
+                    # a failed /model must never kill the chat session.
+                    if _offline_hub_mode_active() and not _cache_entry_is_runnable(
+                        resolved
+                    ):
+                        print(_offline_uncached_error(resolved), file=sys.stderr)
+                        return
                     try:
                         confirm_or_abort(
                             resolved,
@@ -11797,11 +11810,24 @@ def main():
                 # model available offline even with an empty HF cache — Wan's
                 # ``RAPID_MLX_WAN_MODEL_DIR`` override (its own download path
                 # never goes through ``_ensure_model_downloaded``) (codex #2357-P1).
-                _wan_dir = os.environ.get("RAPID_MLX_WAN_MODEL_DIR")
+                # The exemption is scoped to the video-gen lane so a stray env
+                # var can't exempt an unrelated text model from the refusal.
+                _is_wane_exempt = False
+                if os.environ.get("RAPID_MLX_WAN_MODEL_DIR"):
+                    from vllm_mlx.model_aliases import resolve_profile as _rp
+
+                    _rp_entry = _rp(args.model)
+                    _is_wane_exempt = (
+                        _rp_entry is not None
+                        and _rp_entry.modality == "video-gen"
+                        and os.path.isdir(
+                            os.environ.get("RAPID_MLX_WAN_MODEL_DIR", "")
+                        )
+                    )
                 if (
                     _offline_hub_mode_active()
                     and not _cache_entry_is_runnable(args.model)
-                    and not (_wan_dir and os.path.isdir(_wan_dir))
+                    and not _is_wane_exempt
                 ):
                     _refuse_offline_uncached(args.model)
                 # The size estimate is a silent HF ``model_info`` round-trip

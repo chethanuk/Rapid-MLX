@@ -297,3 +297,35 @@ def test_gate_does_not_refuse_when_wan_local_dir_set(monkeypatch, capsys, tmp_pa
     assert "is not cached and the network is unavailable" not in out.err
     assert confirmed != []  # the refusal was skipped; the confirm path ran
     assert dispatched != []  # … and serve still dispatched the Wan model
+
+
+def test_gate_wan_dir_set_does_not_exempt_text_model(monkeypatch, capsys, tmp_path):
+    """A stray ``RAPID_MLX_WAN_MODEL_DIR`` must NOT exempt an unrelated text
+    model from the offline refusal — the exemption is scoped to the video-gen
+    lane (codex #2357-P2)."""
+    import vllm_mlx._download_gate as gate
+
+    monkeypatch.setattr(gate, "is_repo_cached", lambda name: False)
+    monkeypatch.setattr(cli, "_cache_entry_is_runnable", lambda name: False)
+    monkeypatch.setattr(cli.os.path, "exists", lambda p: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("RAPID_MLX_WAN_MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.delenv("RAPID_MLX_AUTO_PULL", raising=False)
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            ["rapid-mlx", "serve", "mlx-community/Qwen3.5-4B-4bit"],
+        ),
+        patch.object(
+            cli, "serve_command", side_effect=AssertionError("must not dispatch")
+        ),
+        pytest.raises(SystemExit) as exc,
+    ):
+        cli.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr()
+    assert "mlx-community/Qwen3.5-4B-4bit is not cached" in out.err
+    assert "network is unavailable (offline mode is enabled)" in out.err
