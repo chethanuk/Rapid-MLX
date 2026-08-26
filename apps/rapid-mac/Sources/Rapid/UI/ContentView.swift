@@ -145,6 +145,10 @@ struct ContentView: View {
             }
         }
         .onChange(of: server.state) { _, newState in
+            // A chat-model replacement can keep the process or respawn it.
+            // Dictation owns the same reconciliation entry point for both so
+            // an enabled STT lane is resident before its hotkey reads Ready.
+            dictation.serverStateDidChange(newState)
             // #223: clear the download-prompt CTA the moment the server
             // moves out of ``.idle``.
             if case .idle = newState {} else { autoStartPendingDownload = nil }
