@@ -242,6 +242,29 @@ jobs:
             --deadline-min 5 \
             --sleep-sec 5
 
+          # Approval can wait indefinitely. Re-read the engine tag namespace
+          # after every other live check and immediately before publication;
+          # absence is the expected recovery state, a same-SHA tag is an
+          # idempotent retry, and any other SHA fails closed.
+          ENGINE_TAG="v${VERSION}"
+          set +e
+          git ls-remote --exit-code --refs origin "refs/tags/${ENGINE_TAG}" \
+            > "$RUNNER_TEMP/recovery-engine-tag.txt"
+          TAG_QUERY_RC=$?
+          set -e
+          if [ "$TAG_QUERY_RC" -eq 0 ]; then
+            git fetch --force origin \
+              "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
+            ENGINE_SHA="$(git rev-parse --verify "refs/tags/${ENGINE_TAG}^{commit}")"
+            if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]; then
+              echo "::error::engine tag $ENGINE_TAG appeared during approval at $ENGINE_SHA, not approved SHA $RELEASE_SHA" >&2
+              exit 1
+            fi
+          elif [ "$TAG_QUERY_RC" -ne 2 ]; then
+            echo "::error::cannot re-read engine tag $ENGINE_TAG after approval" >&2
+            exit 1
+          fi
+
       - name: Recover the engine tag and Release at the Desktop candidate SHA
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}

@@ -43,9 +43,84 @@ lacks "$RECOVER" 'needs.verify-published-desktop.outputs.have_pat' "protected jo
 contains "$RECOVER" 'scripts/check_desktop_publish.py' "Desktop publication is re-verified after approval"
 contains "$RECOVER" 'grep -Fx "RELEASE_SHA=$RELEASE_SHA" evidence/recovery-identity.txt' "downloaded evidence is bound to the approved SHA"
 contains "$RECOVER" '--expected-open-ids "$EXPECTED_OPEN_IDS"' "blocker set drift fails closed"
+contains "$RECOVER" 'git ls-remote --exit-code --refs origin "refs/tags/${ENGINE_TAG}"' "engine tag is re-read after approval"
+contains "$RECOVER" 'if [ "$ENGINE_SHA" != "$RELEASE_SHA" ]' "post-approval engine tag mismatch fails closed"
 contains "$RECOVER" 'bash scripts/create_release.sh' "existing idempotent engine release helper is reused"
 lacks "$ALL" 'tag_desktop_app.sh' "recovery never creates or moves the Desktop tag"
 lacks "$ALL" 'rapid-mac-release.yml --ref' "recovery never dispatches another DMG build"
+
+# Execute the actual post-approval run block with controlled command doubles.
+# A textual ordering assertion alone cannot prove that `set -e` propagates each
+# live-check failure before the following publication step becomes reachable.
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/bin" "$TMP/evidence"
+sed -n '/- name: Re-verify blockers and immutable Desktop publication/,/- name: Recover the engine tag and Release at the Desktop candidate SHA/p' "$WORKFLOW" \
+  | sed '1,/run: |/d; $d; s/^          //' > "$TMP/reverify.sh"
+chmod +x "$TMP/reverify.sh"
+printf '%s\n' \
+  'VERSION=0.13.0' \
+  'RELEASE_SHA=0000000000000000000000000000000000000001' \
+  > "$TMP/evidence/recovery-identity.txt"
+
+cat > "$TMP/bin/python3" <<'SH'
+#!/usr/bin/env bash
+echo "python3 $*" >> "$CALLS"
+case "$1" in
+  *check_release_blockers.py) exit "${BLOCKERS_RC:-0}" ;;
+  *check_desktop_publish.py) exit "${DESKTOP_RC:-0}" ;;
+esac
+exit 0
+SH
+cat > "$TMP/bin/git" <<'SH'
+#!/usr/bin/env bash
+echo "git $*" >> "$CALLS"
+case "$1" in
+  ls-remote) exit "${TAG_QUERY_RC:-2}" ;;
+  fetch) exit "${TAG_FETCH_RC:-0}" ;;
+  rev-parse) printf '%s\n' "${ENGINE_SHA:-0000000000000000000000000000000000000001}" ;;
+esac
+exit 0
+SH
+chmod +x "$TMP/bin/python3" "$TMP/bin/git"
+
+run_transaction() {
+  : > "$TMP/calls"
+  rm -f "$TMP/published"
+  if (cd "$TMP" && env \
+      PATH="$TMP/bin:/usr/bin:/bin" \
+      CALLS="$TMP/calls" \
+      RUNNER_TEMP="$TMP" \
+      LIVE_HAVE_PAT="${LIVE_HAVE_PAT:-true}" \
+      VERSION=0.13.0 \
+      RELEASE_SHA=0000000000000000000000000000000000000001 \
+      EXPECTED_OPEN_IDS= \
+      REPO=raullenchai/Rapid-MLX \
+      BLOCKERS_RC="${BLOCKERS_RC:-0}" \
+      DESKTOP_RC="${DESKTOP_RC:-0}" \
+      TAG_QUERY_RC="${TAG_QUERY_RC:-2}" \
+      ENGINE_SHA="${ENGINE_SHA:-0000000000000000000000000000000000000001}" \
+      bash "$TMP/reverify.sh"); then
+    touch "$TMP/published"
+    return 0
+  fi
+  return 1
+}
+
+BLOCKERS_RC=1 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction || true
+[ ! -e "$TMP/published" ] && ok "live blocker failure makes publication unreachable" || bad "blocker failure reached publication"
+LIVE_HAVE_PAT=false BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction || true
+[ ! -e "$TMP/published" ] && ok "post-approval PAT loss makes publication unreachable" || bad "PAT loss reached publication"
+BLOCKERS_RC=0 DESKTOP_RC=1 TAG_QUERY_RC=2 run_transaction || true
+[ ! -e "$TMP/published" ] && ok "Desktop evidence failure makes publication unreachable" || bad "Desktop failure reached publication"
+BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=1 run_transaction || true
+[ ! -e "$TMP/published" ] && ok "engine-tag API failure makes publication unreachable" || bad "tag query failure reached publication"
+BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=0 ENGINE_SHA=ffffffffffffffffffffffffffffffffffffffff run_transaction || true
+[ ! -e "$TMP/published" ] && ok "post-approval engine-tag mismatch makes publication unreachable" || bad "tag mismatch reached publication"
+BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=0 ENGINE_SHA=0000000000000000000000000000000000000001 run_transaction
+[ -e "$TMP/published" ] && ok "same-SHA engine tag permits idempotent recovery" || bad "same-SHA tag blocked recovery"
+BLOCKERS_RC=0 DESKTOP_RC=0 TAG_QUERY_RC=2 run_transaction
+[ -e "$TMP/published" ] && ok "absent engine tag permits recovery publication" || bad "valid recovery did not reach publication"
 
 echo "passed: $PASS failed: $FAIL"
 [ "$FAIL" -eq 0 ]
