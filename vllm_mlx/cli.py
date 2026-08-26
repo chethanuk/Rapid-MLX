@@ -6455,7 +6455,7 @@ def _hf_bytes_bar_class():
             self._touched = True
             if n:
                 self._recorded.append(int(n))
-            super().update(n)
+            return super().update(n)
 
     return _HFBytesBar
 
