@@ -1280,14 +1280,14 @@ flow_fresh_install() {
     see_main "$OUT/compact.json"
     baseline onboarding-direction-d.compact "$OUT/compact.json"
     press "$OUT/compact.json" Quickstart.GetStarted "$OUT/get-started.json"
-    wait_selected Quickstart.Choice.lfm2.5-2.6b-4bit "$OUT/chooser-settled.json"
+    wait_selected Quickstart.Choice.lfm2.5-1b-4bit "$OUT/chooser-settled.json"
     baseline onboarding-direction-d.compact-chooser "$OUT/chooser-settled.json"
     press "$OUT/chooser-settled.json" Quickstart.Footer.Back "$OUT/chooser-back.json"
     wait_identifier Quickstart.Skip "$OUT/welcome-returned.json"
     press "$OUT/welcome-returned.json" Quickstart.Skip "$OUT/quickstart-skip.json"
     wait_identifier rapid.chat.compose "$OUT/steady.json"
     selected_model="$(element_field "$OUT/steady.json" ModelPickerBar.ModelMenu value)"
-    [[ "$selected_model" == *"lfm2.5-2.6b-4bit"* ]] \
+    [[ "$selected_model" == *"lfm2.5-1b-4bit"* ]] \
         || die "#2219: 8 GB onboarding selected '$selected_model' instead of the compact starter"
     for id in Sidebar.NewChat Sidebar.Launch rapid.chat.compose ChatView.SendOrStopButton ModelPickerBar.ModelMenu; do
         jq -e --arg id "$id" '.data.ui_elements[]? | select(.identifier == $id)' "$OUT/steady.json" >/dev/null \

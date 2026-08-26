@@ -260,7 +260,9 @@ final class QuickstartCoordinator {
         tier: .starter
     )
 
-    /// Smaller quality-floor starter for Macs below 16 GB RAM.
+    /// Smarter optional choice for Macs below 16 GB RAM. Clean 8 GB hardware
+    /// validation showed that loading it projects beyond the app's usable RAM
+    /// budget, so first run defaults to ``lowMemoryChoice`` instead.
     static let compactDefaultChoice = QuickstartModelChoice(
         alias: "lfm2.5-2.6b-4bit",
         displayName: "LFM2.5 · 2.6B",
@@ -323,16 +325,18 @@ final class QuickstartCoordinator {
 
     /// Hardware-aware first-run policy. The existing cache-aware policy is the
     /// eligibility SSOT for cached choices; onboarding adds only its explicit
-    /// 16 GB baseline and excludes the 1.2B manual fallback from automatic
-    /// selection.
+    /// 16 GB baseline. The 1.2B choice is automatic only when it is already
+    /// the sub-16 GB baseline; larger Macs keep it as an explicit fallback.
     static func defaultChoice(
         hardware: MacHardware,
         catalog: [ModelEntry]
     ) -> QuickstartModelChoice {
         let baseline = baselineChoice(hardware: hardware)
         let eligibleCatalog = catalog.filter { $0.kind == .chat }
-        let excluded = CacheAwareDefault.retiredAutomaticAliases
-            .union([lowMemoryChoice.alias])
+        var excluded = CacheAwareDefault.retiredAutomaticAliases
+        if baseline.alias != lowMemoryChoice.alias {
+            excluded.insert(lowMemoryChoice.alias)
+        }
         guard let alias = CacheAwareDefault.pick(
             catalog: eligibleCatalog,
             hardware: hardware,
@@ -356,7 +360,7 @@ final class QuickstartCoordinator {
     /// Cached preference is deliberately layered only by ``defaultChoice``.
     static func baselineChoice(hardware: MacHardware) -> QuickstartModelChoice {
         hardware.physicalRAMGB < 16
-            ? compactDefaultChoice
+            ? lowMemoryChoice
             : defaultChoice
     }
 

@@ -28,19 +28,20 @@ struct QuickstartStarterPolicyTests {
         )
     }
 
-    @Test("RAM threshold chooses 2.6B below 16 GB and Qwen 4B at 16 GB or above")
+    @Test("RAM threshold chooses 1.2B below 16 GB and Qwen 4B at 16 GB or above")
     func ramMatrix() {
         let catalog = [
+            entry("lfm2.5-1b-4bit"),
             entry("lfm2.5-2.6b-4bit"),
             entry("qwen3.5-4b-4bit"),
         ]
 
         #expect(QuickstartCoordinator.defaultChoice(
             hardware: hardware(8), catalog: catalog
-        ).alias == "lfm2.5-2.6b-4bit")
+        ).alias == "lfm2.5-1b-4bit")
         #expect(QuickstartCoordinator.defaultChoice(
             hardware: hardware(15.99), catalog: catalog
-        ).alias == "lfm2.5-2.6b-4bit")
+        ).alias == "lfm2.5-1b-4bit")
         #expect(QuickstartCoordinator.defaultChoice(
             hardware: hardware(16), catalog: catalog
         ).alias == "qwen3.5-4b-4bit")
@@ -49,7 +50,7 @@ struct QuickstartStarterPolicyTests {
         ).alias == "qwen3.5-4b-4bit")
         #expect(QuickstartCoordinator.baselineChoice(
             hardware: hardware(8)
-        ).alias == "lfm2.5-2.6b-4bit")
+        ).alias == "lfm2.5-1b-4bit")
         #expect(QuickstartCoordinator.baselineChoice(
             hardware: hardware(16)
         ).alias == "qwen3.5-4b-4bit")
@@ -60,7 +61,7 @@ struct QuickstartStarterPolicyTests {
         let coordinator = QuickstartCoordinator()
         coordinator.applyDefaultChoice(hardware: hardware(8), catalog: [])
 
-        #expect(coordinator.selection.alias == "lfm2.5-2.6b-4bit")
+        #expect(coordinator.selection.alias == "lfm2.5-1b-4bit")
     }
 
     @Test("An eligible cached chat model wins without a download")
@@ -78,6 +79,7 @@ struct QuickstartStarterPolicyTests {
     @Test("A cached standard starter stays visible when it wins below 16 GB")
     func cachedStandardStarterRemainsVisible() {
         let catalog = [
+            entry("lfm2.5-1b-4bit"),
             entry("lfm2.5-2.6b-4bit"),
             entry("qwen3.5-4b-4bit", cached: true),
         ]
@@ -99,6 +101,7 @@ struct QuickstartStarterPolicyTests {
     @Test("An 8 GB Mac does not promote a cached model that fails its fit contract")
     func cachedStandardStarterMustFit() {
         let catalog = [
+            entry("lfm2.5-1b-4bit"),
             entry("lfm2.5-2.6b-4bit"),
             entry("qwen3.5-4b-4bit", cached: true),
         ]
@@ -111,7 +114,7 @@ struct QuickstartStarterPolicyTests {
         #expect(QuickstartCoordinator.defaultChoice(
             hardware: machine,
             catalog: catalog
-        ).alias == "lfm2.5-2.6b-4bit")
+        ).alias == "lfm2.5-1b-4bit")
     }
 
     @Test("The chooser presents one hardware-fit starter, not two competing recommendations")
@@ -241,11 +244,12 @@ struct QuickstartStarterPolicyTests {
         let coordinator = QuickstartCoordinator()
         coordinator.applyDefaultChoice(hardware: hardware(15.99), catalog: [])
         coordinator.advanceToChooseModel()
-        #expect(coordinator.selection.alias == "lfm2.5-2.6b-4bit")
+        #expect(coordinator.selection.alias == "lfm2.5-1b-4bit")
 
         coordinator.settleDefaultChoice(
             hardware: hardware(15.99),
             catalog: [
+                entry("lfm2.5-1b-4bit"),
                 entry("lfm2.5-2.6b-4bit"),
                 entry("qwen3.5-4b-4bit", cached: true),
             ]
