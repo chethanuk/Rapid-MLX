@@ -1,10 +1,10 @@
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from scripts.check_release_notes import check_release_notes, main
+from scripts.strip_release_note_comments import strip_release_note_comments
 
 
 def _inputs(tmp_path: Path, version: str = "0.13.1") -> tuple[Path, Path]:
@@ -105,16 +105,20 @@ def test_multiline_comment_keeps_visible_close_suffix_without_private_body(
         "<!-- internal draft\nsecret roadmap\n--> Public note\n", encoding="utf-8"
     )
     check_release_notes("0.13.1", changelog, notes_dir)
-    normalizer = Path("scripts/strip_release_note_comments.awk")
-    result = subprocess.run(
-        ["awk", "-f", str(normalizer), str(notes)],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    result = strip_release_note_comments(notes.read_text(encoding="utf-8"))
     assert "Public note" in result
     assert "internal draft" not in result
     assert "secret roadmap" not in result
+
+
+def test_iterative_state_machine_handles_multiple_comments_and_visible_text() -> None:
+    markdown = "Before <!-- one --> middle <!-- two --> after.\n"
+    assert strip_release_note_comments(markdown) == "Before  middle  after.\n"
+
+
+def test_state_machine_preserves_comment_markers_in_code() -> None:
+    markdown = "```html\n<!-- example -->\n```\n\n    <!-- indented example -->\n"
+    assert strip_release_note_comments(markdown) == markdown
 
 
 @pytest.mark.parametrize("version", ["0.13", "0.13.1-rc0", "../0.13.1", "v0.13.1"])

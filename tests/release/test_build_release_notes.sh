@@ -85,7 +85,7 @@ cd "$SB"
 git init -q .
 git config user.email t@t; git config user.name t; git config commit.gpgsign false
 cp "$SCRIPT" "$SB/build.sh"
-cp "$REPO_ROOT/scripts/strip_release_note_comments.awk" "$SB/strip_release_note_comments.awk"
+cp "$REPO_ROOT/scripts/strip_release_note_comments.py" "$SB/strip_release_note_comments.py"
 
 commit() { printf '%s\n' "$2" > "$1"; git add -A; git commit -qm "$3"; }
 
@@ -170,7 +170,8 @@ contains "$BODY" "<summary>All changes</summary>" "highlights: <details> summary
 lacks "$BODY" "drafting note that must not ship" "highlights: HTML comments stripped"
 lacks "$BODY" "Scratch space for the next release's notes" "highlights: multi-line HTML comments stripped"
 lacks "$BODY" "version-bump PR" "highlights: multi-line HTML comment body stripped"
-contains "$BODY" "<!-- inline drafting note --> Visible inline release note." "highlights: inline comment with visible suffix is preserved"
+contains "$BODY" "Visible inline release note." "highlights: inline comment keeps visible suffix"
+lacks "$BODY" "inline drafting note" "highlights: inline private comment is stripped"
 contains "$BODY" "IMPORTANT RELEASE NOTE" "highlights: inline comment does not swallow following notes"
 contains "$BODY" "KEEP SOLO NOTE" "highlights: note after the first --> on an opener line is preserved"
 contains "$BODY" "KEEP MULTI NOTE" "highlights: note after the first --> closing a multi-line comment is preserved"
@@ -210,6 +211,12 @@ contains "$BODY" "(forced by @raullenchai). Reason: Studio offline." "forced: ac
 BODY=$(VERSION=1.3.0 RELEASE_SHA="$V130" FORCE=true ACTOR=raullenchai \
        SKIP_CONTRIBUTORS=1 bash build.sh 2>/dev/null)
 contains "$BODY" "Reason: <none given>." "forced: missing reason falls back"
+if VERSION=1.3.0 RELEASE_SHA="$V130" FORCE=true ACTOR=raullenchai \
+     REASON="$(printf 'line one\nforged: line two')" SKIP_CONTRIBUTORS=1 \
+     bash build.sh >reason.out 2>reason.err; then
+  fail "forced: multiline reason must fail closed"
+fi
+contains "$(cat reason.err)" "REASON must be a single line" "forced: multiline reason explains failure"
 
 # --- 2e. THE BASELINE FIX ---
 # Two bumps in flight on linear main: v1.4.0's release job is still sitting in

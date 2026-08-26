@@ -73,6 +73,12 @@ jobs:
         run: |
           # --- Manual workflow_dispatch (emergency force OR normal retry) --
           if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$REASON" in
+              *$'\r'*|*$'\n'*)
+                echo "❌ reason must be a single line; CR/LF would corrupt release evidence." >&2
+                exit 1
+                ;;
+            esac
             # force_version and retry_version are mutually exclusive routes.
             if [ -n "$FORCE_VERSION" ] && [ -n "$RETRY_VERSION" ]; then
               echo "❌ force_version and retry_version are mutually exclusive; provide at most one." >&2

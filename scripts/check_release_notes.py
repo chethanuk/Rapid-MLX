@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 from pathlib import Path
+
+from scripts.strip_release_note_comments import strip_release_note_comments
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?$")
 CHANGELOG_HEADING_RE = re.compile(r"^## \[([^]]+)\](?:\s|$)")
@@ -40,17 +41,9 @@ def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
     notes = notes_dir / f"v{version}.md"
     if not notes.is_file():
         raise ValueError(f"release notes are missing: {notes}")
-    normalizer = Path(__file__).with_name("strip_release_note_comments.awk")
 
     def visible(markdown: str) -> bool:
-        normalized = subprocess.run(
-            ["awk", "-f", str(normalizer)],
-            input=markdown,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        return bool(normalized.strip())
+        return bool(strip_release_note_comments(markdown).strip())
 
     section = "\n".join(changelog_lines[section_start:section_end])
     if not visible(section):

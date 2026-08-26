@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-release.yml"
 DESKTOP_RELEASABLE = ROOT / ".github/actions/desktop-releasable/action.yml"
@@ -43,11 +45,31 @@ def test_bump_detection_checks_out_version_parser_before_invoking_it():
 
 def test_bump_preflight_runs_automatically_and_checks_curated_notes():
     workflow = PREFLIGHT_WORKFLOW.read_text(encoding="utf-8")
-    assert "pull_request:" in workflow
+    parsed = yaml.load(workflow, Loader=yaml.BaseLoader)
+    assert parsed["on"]["pull_request"]["branches"] == ["main"]
+    detect = parsed["jobs"]["detect-bump-pr"]
+    pf1 = parsed["jobs"]["pf1-subject-regex"]
+    assert "if" not in detect
+    assert pf1["needs"] == "detect-bump-pr"
+    assert pf1["if"] == "needs.detect-bump-pr.outputs.is_bump == 'true'"
+    assert any(
+        step.get("run")
+        == 'python scripts/validate_release_subject.py --subject "$TITLE"'
+        for step in pf1["steps"]
+    )
     assert "scripts/check_release_notes.py" in workflow
     assert '--version "$TITLE_VER"' in workflow
     assert "--changelog apps/rapid-mac/CHANGELOG.md" in workflow
     assert "--notes-dir docs/release-notes" in workflow
+
+
+def test_operator_reason_is_rejected_before_line_oriented_evidence():
+    workflow = AUTO_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    detect = _step(workflow, "Detect version bump (or forced release)")
+    validation = detect.index('case "$REASON" in')
+    first_reason_log = detect.index("reason: ${REASON:-<none given>}")
+    assert "*$'\\r'*|*$'\\n'*)" in detect
+    assert validation < first_reason_log
 
 
 def test_post_merge_release_repeats_curated_notes_check_before_publish():
