@@ -858,10 +858,21 @@ async def lifespan(app: FastAPI):
     # embedded usage where uvicorn is owned elsewhere), fall back silently.
     from vllm_mlx.connect import endpoints_from_bind, render_banner
 
+    # The banner's "Model:" line is the copyable API identity the user
+    # pastes into an SDK request. Default to the catalog alias, but when
+    # ``--served-model-name`` overrides the served name (``_model_name``
+    # != ``_model_path``), surface the served identity instead so the
+    # banner does not hide the exact model string the API serves (issue
+    # #2353).
+    _banner_model = (
+        _cfg.model_name
+        if _cfg.model_name != _cfg.model_path
+        else (_cfg.model_alias or _cfg.model_name)
+    )
     _ep = endpoints_from_bind(
         _cfg.bind_host,
         _cfg.bind_port,
-        model=_cfg.model_alias or _cfg.model_name,
+        model=_banner_model,
         listen_fd=_cfg.bind_listen_fd,
     )
     if _ep.listen_fd is not None or (_cfg.bind_host and _cfg.bind_port):
