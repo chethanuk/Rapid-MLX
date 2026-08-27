@@ -6,8 +6,6 @@ These tests verify the PrefixCacheManager for KV cache reuse
 to speed up inference with repeated prompts.
 """
 
-import importlib
-import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,34 +15,6 @@ from vllm_mlx.prefix_cache import (
     PrefixCacheManager,
     PrefixCacheStats,
 )
-
-
-def _real_mlx_or_skip():
-    """Return a real ``mlx.core`` module or skip the calling test.
-
-    ``pytest.importorskip("mlx.core")`` is NOT a reliable real-MLX guard here:
-    the conftest ``scheduler_config_stub`` fixture installs a shim ``mlx`` /
-    ``mlx.core`` (with ``mlx.core.array = numpy.array``) into ``sys.modules``
-    to let scheduler-wiring tests run under no-MLX, and that shim satisfies
-    an ``importorskip``. The trim-guard tests below construct REAL
-    ``ChunkedKVCache`` / ``KVCache`` / ``RotatingKVCache`` objects whose tensor
-    ops would then resolve against the shim (MagicMocks / numpy) and crash
-    instead of skipping — a false-red on the no-MLX Linux gate.
-
-    A genuine Apple MLX runtime produces ``mlx.core.array`` tensors; the shim
-    only aliases ``numpy.array``. We use that to tell them apart and skip
-    whenever only the shim (or nothing) is present. On a real-MLX machine the
-    returned real ``mlx.core`` is used directly, so the assertions below are
-    unchanged.
-    """
-    if importlib.util.find_spec("mlx") is None:
-        pytest.skip("requires a real Apple MLX runtime (mlx is not installed)")
-    mx = importlib.import_module("mlx.core")
-    if type(mx.array([1, 2, 3])).__module__ != "mlx.core":
-        pytest.skip(
-            "requires a real Apple MLX runtime (only the scheduler mlx shim is present)"
-        )
-    return mx
 
 
 class TestPrefixCacheStats:
@@ -168,7 +138,7 @@ class TestPrefixCacheManager:
         stays trimmable; rotated RotatingKVCache is honestly non-trimmable.
         Without the trim-liar guard the first assertion is False (mutation-kill).
         """
-        mx = _real_mlx_or_skip()
+        mx = pytest.importorskip("mlx.core")
         from mlx_lm.models.cache import ChunkedKVCache, KVCache, RotatingKVCache
 
         ck = ChunkedKVCache(chunk_size=128)
@@ -194,7 +164,7 @@ class TestPrefixCacheManager:
         """A stored longer entry containing a front-dropped ChunkedKVCache must
         NOT be trim-reused on a shorter-query fetch — it falls through to a miss
         instead of returning a corrupt trimmed cache."""
-        mx = _real_mlx_or_skip()
+        mx = pytest.importorskip("mlx.core")
         from mlx_lm.models.cache import ChunkedKVCache, KVCache
 
         ck = ChunkedKVCache(chunk_size=128)
