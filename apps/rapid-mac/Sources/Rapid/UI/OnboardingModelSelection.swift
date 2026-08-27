@@ -288,11 +288,15 @@ enum OnboardingModelSelection {
     /// which over-states low-bit / MoE footprints (the 32 GB tier's
     /// `qwen3.8-27b-4bit` reads ~22 GB as an estimate but its measured 8K
     /// serve peak is 20.0 GB and fits). This mirrors every start path —
-    /// ``ContentView.runLaunchAutoStart``, ``ModelPickerBar.handleStartTap``,
-    /// ``CacheAwareDefault.bucketedFits`` — so `.tooBig` is only a veto when
-    /// the alias isn't THIS Mac's curated recommendation.
-    /// ``RAMBucketedDefault.isRecommendedPick`` carries the `<16 GB` floor
-    /// guard, so an 8 GB Mac's clamped-to-16 GB picks stay subject to the veto.
+    /// ``ContentView.runLaunchAutoStart``,
+    /// ``ModelPickerBar.handleStartTap``, and
+    /// ``RAMBucketedDefault/CacheAwareDefault.pick(catalog:hardware:bucketedDefault:excludedAliases:)``
+    /// — so `.tooBig` is only a veto when the alias isn't THIS Mac's curated
+    /// recommendation.
+    /// ``RAMBucketedDefault.isRecommendedPick`` only returns true for a tier
+    /// this Mac genuinely sits in (RAM ≥ the tier's floor), so a machine below
+    /// the minimum 8 GB floor is "recommended" for no tier and nothing is
+    /// exempt there — the `.tooBig` veto still applies.
     static func isAvailable(alias: String, hardware: MacHardware) -> Bool {
         if RAMBucketedDefault.isRecommendedPick(
             alias: alias, physicalRAMGB: hardware.physicalRAMGB

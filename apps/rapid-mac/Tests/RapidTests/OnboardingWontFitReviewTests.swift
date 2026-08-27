@@ -134,20 +134,23 @@ struct OnboardingWontFitReviewTests {
 
     /// Condition-2 guard: the `.tooBig && !isRecommendedPick` carve-out must
     /// not leak — a genuinely-too-big alias that ISN'T this Mac's curated pick
-    /// stays inaccessible, and a pick merely SHOWN below its tier's floor (the
-    /// sub-16 GB clamp) still respects the veto. Only the in-tier curated pick
-    /// is exempt.
+    /// stays inaccessible, and a machine below the minimum tier floor (8 GB)
+    /// is recommended for no tier, so the veto applies to everything it is
+    /// shown. Only an in-tier curated pick is exempt.
     @Test("The carve-out is narrow: only the in-tier curated pick is exempt")
     func carveOutIsNarrow() {
         // A 70B model is never a 32 GB tier pick → still refused on 32 GB.
         #expect(!OnboardingModelSelection.isAvailable(
             alias: Self.tooBigAlias, hardware: Self.hardware(ramGB: 32)))
-        // An 8 GB Mac only gets the 16 GB tier's picks SHOWN; it does not sit
-        // in that tier, so they remain subject to the veto (OOM hole guard).
         // bonsai-27b-2bit (~7.6 GB real, ~14.8 GB estimate) is a 24 GB tier
-        // pick, not an 8 GB pick → still refused on 8 GB.
+        // pick, not an 8 GB pick → on an 8 GB Mac it is not recommended and
+        // stays subject to the (real) veto.
         #expect(!OnboardingModelSelection.isAvailable(
             alias: "bonsai-27b-2bit", hardware: Self.hardware(ramGB: 8)))
+        // Below the minimum 8 GB floor a Mac sits in no tier, so even the
+        // smallest shown pick is not "recommended" and the veto applies.
+        #expect(!OnboardingModelSelection.isAvailable(
+            alias: "lfm2.5-2.6b-4bit", hardware: Self.hardware(ramGB: 6)))
     }
 
     // MARK: - 1. The fixture is actually incompatible
