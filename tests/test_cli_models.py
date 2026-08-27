@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -45,6 +46,51 @@ def _split_by_modality() -> tuple[dict, dict]:
     }
     text = {a: p for a, p in profiles.items() if a not in video and a not in image}
     return text, video, image
+
+
+def test_gemma4_load_fallback_prints_validated_runtime(monkeypatch, capsys):
+    """Execute the submit-load failure path that prints the recovery hint."""
+    import concurrent.futures
+
+    class FailedLoad:
+        def result(self):
+            raise ValueError("Model type gemma4_unified not supported")
+
+    class ImmediateExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, _function, *_args, **_kwargs):
+            return FailedLoad()
+
+        def shutdown(self, *, wait):
+            assert wait is False
+
+    monkeypatch.setattr(
+        "vllm_mlx.community_bench.hardware.is_apple_silicon", lambda: True
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_profile",
+        lambda _alias: SimpleNamespace(hf_path="org/gemma-4-test"),
+    )
+    monkeypatch.setattr(cli, "_check_disk_space", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_check_memory_capacity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_ensure_model_downloaded", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", ImmediateExecutor)
+
+    args = SimpleNamespace(
+        model="gemma-4-test",
+        notes=None,
+        force_disk_check=False,
+        sampled=False,
+        spec_decode="none",
+        run_group=None,
+        repo_root=None,
+    )
+    assert cli._run_submit_flow(args) == 2
+    out = capsys.readouterr().out
+    assert "rapid-mlx[vision]" in out
+    assert "pip install --no-deps 'mlx-vlm==0.6.16'" in out
 
 
 def test_models_command_lists_all_aliases():
