@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "models": {
+    "qwen": {
+      "repository": "mlx-community/Qwen3.5-9B-4bit",
+      "revision": "8b2b98c00a6b4d291155e4890773ca8f769aee53"
+    },
+    "gemma": {
+      "repository": "mlx-community/gemma-4-e2b-it-8bit",
+      "revision": "03dcf209f3f549b4075e7191e77cf69b3d48e1b2"
+    }
+  }
+}
