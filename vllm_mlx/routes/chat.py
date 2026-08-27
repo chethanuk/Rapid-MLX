@@ -5443,16 +5443,22 @@ async def _create_chat_completion_impl(
                 "tool_choice",
                 "logprobs",
                 "top_logprobs",
-                # Decode processors are request-local and stateful. Reusing
-                # the first attempt's matcher/cursor would constrain the
-                # repair as a continuation of the abandoned document rather
-                # than a fresh JSON value. The repair prompt plus post-check
-                # are the established unconstrained second-attempt contract.
+                # The schema matcher is request-local and stateful. Reusing
+                # its cursor would constrain the repair as a continuation of
+                # the abandoned document rather than a fresh JSON value. The
+                # repair prompt plus post-check are the established
+                # unconstrained second-attempt contract.
                 "grammar_logits_processor",
-                "reasoning_budget_logits_processor",
-                "suppressed_tokens_logits_processor",
             ):
                 repair_kwargs.pop(_k, None)
+            if engine.is_mllm and "grammar_logits_processor" in chat_kwargs:
+                # A whole-response schema grammar owns token zero on MLLM and
+                # explicitly rendered the first attempt with thinking off.
+                # Its reasoning processor (if one was prepared before that
+                # decision) is stateful and inapplicable to the fresh repair.
+                # Other engines keep their pre-existing reasoning budget, and
+                # token suppression remains intact on every lane.
+                repair_kwargs.pop("reasoning_budget_logits_processor", None)
             # H-06 #267b: re-check the context-length gate AGAINST the
             # POST-BUILD repair prompt. ``build_repair_messages`` builds a
             # strictly larger prompt than the initial request (prepended
