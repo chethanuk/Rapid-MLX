@@ -160,18 +160,14 @@ jobs:
             bash "$t"
           done
 
-      # Parser microbench — catches order-of-magnitude (>12x) regressions in
-      # tool-call extraction. Pure Python (parsers don't import mlx). The gate
-      # is a RELATIVE budget (parser μs/call vs a SAME-RUN calibration
-      # baseline, × REGRESSION_LIMIT), so shared-runner speed no longer flakes
-      # it (#2344): calibration and the parser bench run back-to-back on the
-      # same hardware, so uniform runner-speed changes cancel and the verdict is
-      # ε ≤ 12×. Interleaved rounds and a median reject isolated scheduler
-      # pauses without weakening sustained-regression detection.
-      # Running WITHOUT `--report` makes this an ENFORCED gate: the script
-      # exits nonzero when any parser exceeds its relative budget, reddening
-      # the PR, so a "still correct, 10x slower" perf regression can't merge —
-      # the exact failure this bench exists to catch.
+      # Parser microbench — reports order-of-magnitude (>12x) regressions in
+      # tool-call extraction. Pure Python (parsers don't import mlx). The
+      # relative budget scales parser μs/call by a same-run control workload;
+      # interleaved rounds and a median reduce uniform machine-speed noise and
+      # isolated scheduler pauses. Different operations do not necessarily
+      # scale together across hosted architectures, so this shared-runner lane
+      # is intentionally ADVISORY (#2344). The serial M3 release check runs the
+      # same script without `--report` and remains the enforced timing gate.
       #
       # PYTHONPATH=. so `from vllm_mlx.tool_parsers...` resolves
       # without installing the package — pytest auto-adds rootdir but
@@ -182,7 +178,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pip install pydantic transformers jsonschema openai-harmony
-          python scripts/microbench_parsers.py
+          python scripts/microbench_parsers.py --report
 
   mlx-bound-guard:
     # #1248 — a change to an mlx / mlx-lm / mlx-vlm version bound can re-open the

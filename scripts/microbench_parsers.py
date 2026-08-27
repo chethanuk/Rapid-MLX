@@ -51,20 +51,20 @@ from dataclasses import dataclass
 # parser change). Mature perf gates avoid absolute wall-clock on shared
 # hardware by comparing against a SAME-RUN baseline / relative budget.
 #
-# New design — a relative budget that cancels runner speed:
+# New design — a relative budget that normalizes runner speed:
 #
 #   parser_us_per_call  ≈  BASE_US[name] × runner_factor × ε
 #   effective_threshold  =  BASE_US[name] × REGRESSION_LIMIT × runner_factor
 #
 # where ``runner_factor`` is how much slower THIS runner is than the reference M3,
-# measured from the calibration workload in the same run. Because the
-# calibration and the parser benches run back-to-back on the same hardware,
-# ``runner_factor`` scales both sides and cancels, leaving the gate as exactly
-# ``ε ≤ REGRESSION_LIMIT`` — an order-of-magnitude regression check that
-# normalizes uniform runner-speed variance. Interleaved rounds plus a median
-# handle isolated scheduling pauses. (Note ``_CAL_REF_US_PER_ITER``
-# cancels too, so its precise value only affects the printed μs scale, not the
-# verdict.)
+# measured from the calibration workload in the same run. When calibration and
+# parser costs scale together, ``runner_factor`` scales both sides and cancels,
+# leaving ``ε ≤ REGRESSION_LIMIT``. Interleaved rounds plus a median handle
+# isolated scheduling pauses. Regex calibration cannot model every parser
+# operation across architectures, so hosted CI uses ``--report``; the enforced
+# verdict runs serially on the stable M3 release host. (Note
+# ``_CAL_REF_US_PER_ITER`` cancels when both workloads scale together, so its
+# precise value only affects the printed μs scale, not that verdict.)
 # ---------------------------------------------------------------------------
 
 # Intrinsic per-parser cost on the reference M3, μs/call (from the historical
@@ -249,7 +249,9 @@ def bench_one(
     ``threshold = BASE_US[name] × REGRESSION_LIMIT × runner_factor``. Because both
     the parser measurement and the calibration baseline scale with the same
     runner speed, the verdict reduces to ``ε ≤ REGRESSION_LIMIT`` — a
-    runner-speed-normalized order-of-magnitude regression check.
+    runner-speed-normalized order-of-magnitude regression check when the
+    control and parser costs scale together. Hosted CI therefore reports this
+    value without enforcing it; the stable M3 release lane enforces it.
 
     To be robust to load changing mid-run, calibration and the parser bench
     are INTERLEAVED: each round times the calibration then the parser
@@ -258,8 +260,8 @@ def bench_one(
     round, so every ε is high and the median still fails it; a single round
     where the runner descheduled during the parser segment (but not the
     adjacent calibration) inflates only that one ε, which the median ignores
-    — so the now-ENFORCED CI gate does not false-fail on one transient
-    shared-runner pause (Codex #2409). A transiently-idle parser adjacent to
+    — so the aggregate does not false-fail on one transient shared-runner
+    pause (Codex #2409). A transiently-idle parser adjacent to
     a busy calibration reads as FAST relative to that busy baseline (low ε),
     so it does not false-fail either.
 
@@ -354,8 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, fn in parsers.items():
         sample = SAMPLES.get(name, "")
         if not sample:
-            print(f"  [skip] {name}: no sample wired", file=sys.stderr)
-            continue
+            print(f"FAIL: {name}: no sample wired", file=sys.stderr)
+            return 1
         # bench_one interleaves calibration with the parser bench itself
         # (issue #2344 #2); no explicit upfront factor here.
         r = bench_one(name, fn, sample, args.iters)

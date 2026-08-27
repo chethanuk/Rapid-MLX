@@ -114,9 +114,9 @@ def test_regression_limit_sane(mb):
 # N/2 ops — and, critically, the SAME N on a 5×-slower runner takes ~5× the
 # wall-time. We pick N so the parser costs ``BASE_US * eps * runner_factor`` μs,
 # so its measured μs/call grows with ``runner_factor`` exactly like the
-# calibration baseline does. The verdict then reduces to ``eps <= LIMIT``
-# independent of runner speed — which is the property that kills the #2344
-# shared-runner flake.
+# calibration baseline does. These tests cover the ratio math only; a separate
+# contract below records that unrelated workloads may scale independently and
+# is why hosted CI runs this benchmark in advisory mode (#2344).
 _CAL_TEXT = (
     "<tool_call>get_weather city San Francisco "
     "<arg_key>city</arg_key><arg_value>San Francisco</arg_value></tool_call>"
@@ -168,10 +168,10 @@ def _bench_with_cal(mb, make, eps_mult, runner_factor, monkeypatch):
 
     The parser workload is CPU-bound and sized to cost ``BASE_US*ε*runner_factor`` μs
     (each μs of work is one calibration-op's worth), so it reproduces what a
-    real parser experiences on a ``runner_factor``× slower runner, and the mocked
-    calibration returns exactly that factor. The verdict must then depend
-    only on ``ε`` vs ``REGRESSION_LIMIT`` — proving runner-speed independence
-    (#2344).
+    parser experiences when both workloads scale together, and the mocked
+    calibration returns exactly that factor. The verdict must then depend only
+    on ``ε`` vs ``REGRESSION_LIMIT``. This does not claim that unlike operations
+    scale together across hosted architectures; that limitation is tested below.
     """
     base_us = mb.BASE_US["hermes"]
     limit = mb.REGRESSION_LIMIT
@@ -187,8 +187,7 @@ _CAL_MIN_ITERS_FOR_TEST = 50
 
 def test_slow_runner_scales_threshold_up(mb, monkeypatch):
     """A slower runner produces a proportionally higher effective threshold,
-    and a speed-proportional parser keeps the SAME verdict on both (the
-    relative gate does not flake on shared-runner speed, #2344)."""
+    and a parser scaled by the same factor keeps the same verdict."""
     make = _prop_parser()
     # A healthy parser, well under REGRESSION_LIMIT (eps=0.3×LIMIT), so
     # timing noise can't tip it over the boundary.
@@ -198,10 +197,9 @@ def test_slow_runner_scales_threshold_up(mb, monkeypatch):
     assert on_m3.passed and on_slow.passed
 
 
-def test_relative_budget_catches_regression_across_runner_speeds(mb, monkeypatch):
-    """The gate is a ratio: a parser at REGRESSION_LIMIT × its base fails at
-    EVERY runner speed (fast M3 and 5×-slower shared runner alike), and one
-    just under the limit passes at every speed (#2344)."""
+def test_relative_budget_math_when_workloads_scale_together(mb, monkeypatch):
+    """When subject and control costs scale together, the ratio preserves the
+    pass/fail verdict across runner factors."""
     make = _prop_parser()
     # Under the limit (ε=0.8×LIMIT): passes on 1x and 5x runners.
     assert _bench_with_cal(mb, make, 0.8, 1.0, monkeypatch).passed
@@ -211,12 +209,24 @@ def test_relative_budget_catches_regression_across_runner_speeds(mb, monkeypatch
     assert not _bench_with_cal(mb, make, 1.2, 5.0, monkeypatch).passed
 
 
+def test_independent_control_cost_can_change_verdict(mb):
+    """A control workload is not a universal hardware oracle: if its cost
+    changes independently from a fixed parser cost, the ratio can change the
+    verdict. This limitation is pinned so hosted CI stays report-only."""
+    base = mb.BASE_US["hermes"]
+    fixed_parser_us = base * mb.REGRESSION_LIMIT
+    low_factor_eps, _, _ = mb._median_verdict([(fixed_parser_us, 0.5)] * 5, base)
+    high_factor_eps, _, _ = mb._median_verdict([(fixed_parser_us, 2.0)] * 5, base)
+    assert low_factor_eps > mb.REGRESSION_LIMIT
+    assert high_factor_eps < mb.REGRESSION_LIMIT
+
+
 def test_median_verdict_ignores_a_single_spiked_round(mb):
     """The gate aggregate is the MEDIAN ε, not the max: one round where the
     runner descheduled during the parser segment (ε spikes to 10×) must NOT
     fail the gate, while a genuine regression (every round over the limit)
-    still does (Codex #2409). This is what lets the now-ENFORCED CI gate run
-    on a shared runner without flaking on a single pause."""
+    still does (Codex #2409). This keeps the report stable in hosted CI and the
+    hard gate stable on the serial M3 release host."""
     base = mb.BASE_US["hermes"]
     limit = mb.REGRESSION_LIMIT
     normal = (base * 0.5, 1.0)  # ε = 0.5 — healthy within the 12× budget
@@ -278,12 +288,22 @@ def test_report_mode_returns_zero_even_with_failures(mb):
     assert rc == 0
 
 
+def test_main_fails_when_no_parsers_load(mb, monkeypatch):
+    """An empty parser registry is a broken benchmark, not a green run."""
+    monkeypatch.setattr(mb, "_build_parsers", lambda: {})
+    assert mb.main(["--iters", "1", "--report"]) == 1
+
+
+def test_main_fails_when_loaded_parser_has_no_sample(mb, monkeypatch):
+    """A newly loaded parser cannot silently escape measurement."""
+    monkeypatch.setattr(mb, "_build_parsers", lambda: {"brand_new": lambda _t: None})
+    assert mb.main(["--iters", "1", "--report"]) == 1
+
+
 def test_enforced_gate_returns_nonzero_without_report(mb, monkeypatch):
     """The ENFORCED relative-budget gate (running WITHOUT ``--report``) must
-    exit nonzero when a parser exceeds its budget — this is the hard gate the
-    ci.yml microbench step now relies on (issue #2409 Codex: `--report` was
-    neutering the promised enforced gate). ``--report`` remains the explicit,
-    intentional opt-out for an info-only run."""
+    exit nonzero when a parser exceeds its budget. The stable M3 release check
+    uses this path; hosted CI uses the explicit report-only path."""
     import time
 
     def slow(_t):
@@ -295,3 +315,12 @@ def test_enforced_gate_returns_nonzero_without_report(mb, monkeypatch):
     assert mb.main(["--iters", "5"]) == 1
     # Explicit opt-out: --report still returns 0 even with the same failure.
     assert mb.main(["--iters", "5", "--report"]) == 0
+
+
+def test_hosted_ci_is_advisory_and_m3_release_check_is_enforced():
+    """Shared hosted timing must not block a PR, while the serial M3 release
+    check retains the non-reporting hard-gate invocation."""
+    ci = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    release = (_REPO_ROOT / "scripts" / "release_check_m3.sh").read_text()
+    assert "python scripts/microbench_parsers.py --report" in ci
+    assert '"$PY" scripts/microbench_parsers.py\n' in release
