@@ -270,6 +270,47 @@ struct ModelResidencyTests {
         #expect(server.pendingModelSwitch == nil)
     }
 
+    @Test(
+        "Automation opt-out bypasses the dialog and replaces a busy model",
+        .timeLimit(.minutes(1))
+    )
+    func automationOptOutReplacesBusyModelWithoutPrompt() async throws {
+        var client = ServerResidencyClient()
+        client.session = BusyResidencyProtocol.session()
+        let defaultsSuite = "AutomationBusySwitch.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        defaults.set(false, forKey: ModelSwitchConfirmationPreference.storageKey)
+
+        let server = ServerManager(
+            testingState: .ready(alias: "current-model"),
+            residency: .empty,
+            activeBearer: "test-bearer",
+            sessionDefaults: defaults
+        )
+        server._testSetResidencyClient(client)
+        server._testInstallChild(ProcessGroupChild.testStub())
+        server.memorySnapshotProvider = {
+            MemoryProbe.Snapshot(
+                totalBytes: UInt64(256) << 30,
+                usedBytes: UInt64(1) << 30
+            )
+        }
+
+        let switched = await server.ensureServing(
+            alias: "target-model",
+            hfPath: "test/target-model",
+            estimatedMemoryGB: 1,
+            replacementGroup: .assistant
+        )
+
+        #expect(!switched, "the missing test binary makes the replacement start fail")
+        #expect(server.pendingModelSwitch == nil)
+        #expect(server.pendingMemoryWarning == nil)
+        #expect(server.state == .missing)
+        #expect(server.servingAlias == nil)
+    }
+
     private func waitForPendingModelSwitch(
         on server: ServerManager
     ) async -> ServerManager.PendingModelSwitch {
