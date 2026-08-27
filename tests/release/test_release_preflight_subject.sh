@@ -34,8 +34,13 @@ contains "$BIND" 'scripts/release_version.py subject "$TITLE"' \
   "dispatch rejects a noncanonical bump title before privileged jobs"
 
 GUARD=$(sed -n '/Validate the complete bump PR contract/,/Pass — no stray version change/p' "$VERSION_GUARD")
-contains "$GUARD" 'git rev-list --count "$BASE_SHA..$HEAD_SHA"' \
-  "required guard enforces one bump commit"
+# The guard reads the authoritative commit count from the PR payload (GitHub's
+# `pull_request.commits`), NOT a local `git rev-list` that can vary with how the
+# source branch was fetched or whether base advanced — so no stale-count drift.
+contains "$GUARD" 'COMMIT_COUNT="${{ github.event.pull_request.commits }}"' \
+  "required guard enforces one bump commit (authoritative PR payload count)"
+contains "$GUARD" 'must contain exactly one commit' \
+  "required guard refuses a multi-commit bump PR"
 contains "$GUARD" 'scripts/check_release_notes.py' \
   "required guard synchronizes the two release-note inputs"
 contains "$GUARD" '--pr-body "$PR_BODY"' \
