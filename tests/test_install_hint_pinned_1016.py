@@ -16,6 +16,7 @@ edit can't silently regress back to the conflict-producing hint.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,6 +82,57 @@ def test_gemma4_load_fallback_hint_is_pinned():
         "cli.py still recommends the unpinned 'mlx-vlm>=0.6.1' which pulls "
         "a runtime that was not validated with this rapid-mlx release."
     )
+
+
+def test_gemma4_load_fallback_prints_validated_runtime(monkeypatch, capsys):
+    """Execute the submit-load failure path that prints the recovery hint."""
+    import concurrent.futures
+
+    import vllm_mlx.cli as cli_mod
+
+    class FailedLoad:
+        def result(self):
+            raise ValueError("Model type gemma4_unified not supported")
+
+    class ImmediateExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, _function, *_args, **_kwargs):
+            return FailedLoad()
+
+        def shutdown(self, *, wait):
+            assert wait is False
+
+    monkeypatch.setattr(
+        "vllm_mlx.community_bench.hardware.is_apple_silicon", lambda: True
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_profile",
+        lambda _alias: SimpleNamespace(hf_path="org/gemma-4-test"),
+    )
+    monkeypatch.setattr(cli_mod, "_check_disk_space", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli_mod, "_check_memory_capacity", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        cli_mod, "_ensure_model_downloaded", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", ImmediateExecutor)
+
+    args = SimpleNamespace(
+        model="gemma-4-test",
+        notes=None,
+        force_disk_check=False,
+        sampled=False,
+        spec_decode="none",
+        run_group=None,
+        repo_root=None,
+    )
+    assert cli_mod._run_submit_flow(args) == 2
+    out = capsys.readouterr().out
+    assert "rapid-mlx[vision]" in out
+    assert "pip install --no-deps 'mlx-vlm==0.6.16'" in out
 
 
 def test_diffusion_lane_import_error_hint_is_pinned(monkeypatch):
