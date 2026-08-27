@@ -112,8 +112,8 @@ def test_regression_limit_sane(mb):
 # scales linearly with its iteration count. Because the work is CPU-bound on
 # the same hardware, a parser asked to do N ops takes ~2× the wall-time of
 # N/2 ops — and, critically, the SAME N on a 5×-slower runner takes ~5× the
-# wall-time. We pick N so the parser costs ``BASE_US * eps * speedup`` μs, so
-# its measured μs/call grows with ``runner_speedup`` exactly like the
+# wall-time. We pick N so the parser costs ``BASE_US * eps * runner_factor`` μs,
+# so its measured μs/call grows with ``runner_factor`` exactly like the
 # calibration baseline does. The verdict then reduces to ``eps <= LIMIT``
 # independent of runner speed — which is the property that kills the #2344
 # shared-runner flake.
@@ -162,21 +162,21 @@ def _prop_parser():
     return _make
 
 
-def _bench_with_cal(mb, make, eps_mult, speedup, monkeypatch):
+def _bench_with_cal(mb, make, eps_mult, runner_factor, monkeypatch):
     """Exercise ``bench_one`` through the REAL calibration path by mocking the
     runner-speed measurement (we cannot make the shared test machine 5× slower).
 
-    The parser workload is CPU-bound and sized to cost ``BASE_US*ε*speedup`` μs
+    The parser workload is CPU-bound and sized to cost ``BASE_US*ε*runner_factor`` μs
     (each μs of work is one calibration-op's worth), so it reproduces what a
-    real parser experiences on a ``speedup``× slower runner, and the mocked
-    calibration returns exactly that ``speedup``. The verdict must then depend
+    real parser experiences on a ``runner_factor``× slower runner, and the mocked
+    calibration returns exactly that factor. The verdict must then depend
     only on ``ε`` vs ``REGRESSION_LIMIT`` — proving runner-speed independence
     (#2344).
     """
     base_us = mb.BASE_US["hermes"]
     limit = mb.REGRESSION_LIMIT
-    target = base_us * limit * eps_mult * speedup
-    monkeypatch.setattr(mb, "_measure_runner_speedup", lambda: float(speedup))
+    target = base_us * limit * eps_mult * runner_factor
+    monkeypatch.setattr(mb, "_measure_runner_factor", lambda: float(runner_factor))
     return mb.bench_one("hermes", make(target), "x", iters=_CAL_MIN_ITERS_FOR_TEST)
 
 
@@ -225,9 +225,9 @@ def test_median_verdict_ignores_a_single_spiked_round(mb):
     # this run; the MEDIAN ignores the single spike and still passes.
     spike = (base * 2.0 * limit, 1.0)  # ε = 2× 12 = 24 > 12 → max would fail
     # 1 spiked + 4 healthy rounds: the median (3rd-smallest of 5) is healthy.
-    eps, speedup, idx = mb._median_verdict([normal] * 4 + [spike], base)
+    eps, runner_factor, idx = mb._median_verdict([normal] * 4 + [spike], base)
     assert idx != 4  # reports a healthy (normal) round, not the spike
-    assert speedup == 1.0
+    assert runner_factor == 1.0
     assert eps < limit and eps == pytest.approx(0.5)
     # The SAME pairs under a *max* aggregate WOULD exceed the limit — proving
     # the test is meaningful (it would go red if production reverted to max).
@@ -239,23 +239,23 @@ def test_median_verdict_ignores_a_single_spiked_round(mb):
     assert epss > limit
 
 
-def test_speedup_override_passthrough(mb, monkeypatch):
-    """The explicit ``runner_speedup`` override path still works for tests that
+def test_runner_factor_override_passthrough(mb, monkeypatch):
+    """The explicit ``runner_factor`` override path still works for tests that
     hand a scalar (backward-compat with pre-interleave unit semantics)."""
     make = _prop_parser()
     base_us = mb.BASE_US["hermes"]
-    r = mb.bench_one("hermes", make(base_us * 5.0), "x", iters=20, runner_speedup=1.0)
+    r = mb.bench_one("hermes", make(base_us * 5.0), "x", iters=20, runner_factor=1.0)
     assert r.passed
     assert r.threshold_us == pytest.approx(mb.BASE_US["hermes"] * mb.REGRESSION_LIMIT)
 
 
 def test_calibration_returns_positive_finite(mb):
-    """``_measure_runner_speedup`` must return a positive, finite scalar."""
+    """``_measure_runner_factor`` must return a positive, finite scalar."""
     import math
 
-    speedup = mb._measure_runner_speedup()
-    assert math.isfinite(speedup)
-    assert speedup >= mb._RUNNER_SPEEDUP_FLOOR
+    runner_factor = mb._measure_runner_factor()
+    assert math.isfinite(runner_factor)
+    assert runner_factor >= mb._RUNNER_FACTOR_FLOOR
 
 
 # ---------- entry point ----------------------------------------------

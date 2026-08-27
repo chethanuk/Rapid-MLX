@@ -172,8 +172,9 @@ jobs:
       # is a RELATIVE budget (parser μs/call vs a SAME-RUN calibration
       # baseline, × REGRESSION_LIMIT), so shared-runner speed no longer flakes
       # it (#2344): calibration and the parser bench run back-to-back on the
-      # same hardware, so runner speed cancels and the verdict is ε ≤ 12× — an
-      # order-of-magnitude regression check immune to shared-hardware variance.
+      # same hardware, so uniform runner-speed changes cancel and the verdict is
+      # ε ≤ 12×. Interleaved rounds and a median reject isolated scheduler
+      # pauses without weakening sustained-regression detection.
       # Running WITHOUT `--report` makes this an ENFORCED gate: the script
       # exits nonzero when any parser exceeds its relative budget, reddening
       # the PR, so a "still correct, 10x slower" perf regression can't merge —
