@@ -9,11 +9,12 @@ but won't catch "still correct, 10x slower" — which has shipped twice
 historically (regex rebuilding in a hot path, AST walk where a string
 search worked).
 
-The bench is intentionally generous on absolute numbers — ubuntu-
-latest is shared hardware, perf varies by ±50% run to run. The point
-is to catch *order-of-magnitude* regressions, not fine-grained perf
-tracking. For real perf measurement use a M3 + a stable baseline; see
-`docs/development/releasing.md` §"Pre-release validation gauntlet".
+The bench uses a same-run machine factor and a generous relative budget
+because ubuntu-latest is shared hardware and performance varies between
+runs. The point is to catch *order-of-magnitude* regressions, not
+fine-grained perf tracking. For real perf measurement use a M3 + a
+stable baseline; see `docs/development/releasing.md` §"Pre-release
+validation gauntlet".
 
 Per parser:
 
@@ -52,15 +53,16 @@ from dataclasses import dataclass
 #
 # New design — a relative budget that cancels runner speed:
 #
-#   parser_us_per_call  ≈  BASE_US[name] × speedup × ε
-#   effective_threshold  =  BASE_US[name] × REGRESSION_LIMIT × speedup
+#   parser_us_per_call  ≈  BASE_US[name] × runner_factor × ε
+#   effective_threshold  =  BASE_US[name] × REGRESSION_LIMIT × runner_factor
 #
-# where ``speedup`` is how much slower THIS runner is than the reference M3,
+# where ``runner_factor`` is how much slower THIS runner is than the reference M3,
 # measured from the calibration workload in the same run. Because the
 # calibration and the parser benches run back-to-back on the same hardware,
-# ``speedup`` scales both sides and cancels, leaving the gate as exactly
-# ``ε ≤ REGRESSION_LIMIT`` — an order-of-magnitude regression check that is
-# (near-)immune to shared-runner speed variance. (Note ``_CAL_REF_US_PER_ITER``
+# ``runner_factor`` scales both sides and cancels, leaving the gate as exactly
+# ``ε ≤ REGRESSION_LIMIT`` — an order-of-magnitude regression check that
+# normalizes uniform runner-speed variance. Interleaved rounds plus a median
+# handle isolated scheduling pauses. (Note ``_CAL_REF_US_PER_ITER``
 # cancels too, so its precise value only affects the printed μs scale, not the
 # verdict.)
 # ---------------------------------------------------------------------------
@@ -102,7 +104,7 @@ _CAL_REF_US_PER_ITER: float = 0.48
 
 # Floor so a suspiciously-fast calibration can't compress the effective
 # threshold below the reference machine's own budget (guards the signal).
-_RUNNER_SPEEDUP_FLOOR: float = 0.5
+_RUNNER_FACTOR_FLOOR: float = 0.5
 
 # Realistic sample inputs for each parser. Each represents a single
 # tool call the parser should successfully extract — not edge cases,
@@ -141,11 +143,11 @@ class BenchResult:
     us_per_call: float
     iters: int
     threshold_us: float
-    # Runner speedup (vs the M3 reference) measured on the VERDICT round — the
+    # Runner slowdown factor (vs the M3 reference) on the VERDICT round — the
     # pair whose numbers are reported, so the printed threshold always matches
-    # the printed speedup (Codex #2409 NIT: the old display-only global
+    # the printed factor (Codex #2409 NIT: the old display-only global
     # calibrate-then-print could disagree with the actual verdict).
-    speedup: float
+    runner_factor: float
     passed: bool
 
 
@@ -193,30 +195,30 @@ def _run_calibration() -> float:
     return (dt / _CAL_ITERS) * 1_000_000
 
 
-def _measure_runner_speedup() -> float:
+def _measure_runner_factor() -> float:
     """How much slower this runner is than the reference M3, right now.
 
     Times the calibration workload a few times and takes the MIN so a
     transient slow stretch during calibration can't over-relax the gate
     (issue #2344: the whole point is to normalize the runner's *typical*
     speed this run). Returns the ratio (≈ 1 on an M3, larger on slower
-    shared runners), floored at ``_RUNNER_SPEEDUP_FLOOR`` (0.5) so a
+    shared runners), floored at ``_RUNNER_FACTOR_FLOOR`` (0.5) so a
     suspiciously fast measurement can't compress the effective threshold
     below the reference budget. ``bench_one`` calls this fresh for EACH
     round (right before each parser segment) so a runner that becomes busy
     mid-run still normalizes the parser it is about to time (issue #2344 #2).
     """
     per_op = min(_run_calibration() for _ in range(_CAL_REPS))
-    speedup = per_op / _CAL_REF_US_PER_ITER
-    return max(speedup, _RUNNER_SPEEDUP_FLOOR)
+    runner_factor = per_op / _CAL_REF_US_PER_ITER
+    return max(runner_factor, _RUNNER_FACTOR_FLOOR)
 
 
 def _median_verdict(
     pairs: list[tuple[float, float]], base_us: float
 ) -> tuple[float, float, int]:
-    """Robust (MEDIAN) ε across interleaved ``(parser_us, speedup)`` rounds.
+    """Robust (MEDIAN) ε across interleaved ``(parser_us, runner_factor)`` rounds.
 
-    Returns ``(eps, verdict_speedup, verdict_index)``. Median, not max
+    Returns ``(eps, verdict_factor, verdict_index)``. Median, not max
     (Codex #2409): ``max`` lets ONE round where the runner descheduled during
     the parser segment (but not the adjacent calibration — the back-to-back
     interleave) dominate an already-noisy ratio and false-fail the now-
@@ -227,7 +229,7 @@ def _median_verdict(
     report the pair that PRODUCED the verdict (printed numbers always agree
     with pass/fail).
     """
-    per_round_eps = [us / (base_us * speedup) for us, speedup in pairs]
+    per_round_eps = [us / (base_us * runner_factor) for us, runner_factor in pairs]
     idx = sorted(range(len(pairs)), key=lambda i: per_round_eps[i])[len(pairs) // 2]
     return per_round_eps[idx], pairs[idx][1], idx
 
@@ -238,17 +240,16 @@ def bench_one(
     sample: str,
     iters: int,
     *,
-    runner_speedup: float | None = None,
+    runner_factor: float | None = None,
 ) -> BenchResult:
     """Run ``fn(sample)`` ``iters`` times, return timing + verdict.
 
     Relative-budget gate (issue #2344): the parser's M3 base scaled by the
-    same-run runner speedup and the regression limit,
-    ``threshold = BASE_US[name] × REGRESSION_LIMIT × speedup``. Because both
+    same-run runner factor and the regression limit,
+    ``threshold = BASE_US[name] × REGRESSION_LIMIT × runner_factor``. Because both
     the parser measurement and the calibration baseline scale with the same
     runner speed, the verdict reduces to ``ε ≤ REGRESSION_LIMIT`` — a
-    runner-speed-INDEPENDENT order-of-magnitude regression check that does
-    not flake on shared-hosted-runner variance.
+    runner-speed-normalized order-of-magnitude regression check.
 
     To be robust to load changing mid-run, calibration and the parser bench
     are INTERLEAVED: each round times the calibration then the parser
@@ -262,8 +263,8 @@ def bench_one(
     a busy calibration reads as FAST relative to that busy baseline (low ε),
     so it does not false-fail either.
 
-    ``runner_speedup`` overrides the calibration when provided (unit tests);
-    when ``None`` (production), each round's speedup is measured live.
+    ``runner_factor`` overrides the calibration when provided (unit tests);
+    when ``None`` (production), each round's factor is measured live.
     """
     # Every parser the bench knows about must carry an explicit ``BASE_US``
     # entry; silently defaulting an unknown name to a magic 5.0 would mask a
@@ -290,24 +291,22 @@ def bench_one(
     pairs: list[tuple[float, float]] = []
     t_total0 = time.perf_counter()
     for i in range(rounds):
-        speedup = (
-            _measure_runner_speedup() if runner_speedup is None else runner_speedup
-        )
+        factor = _measure_runner_factor() if runner_factor is None else runner_factor
         n = per_round[i]
         t0 = time.perf_counter()
         for _ in range(n):
             fn(sample)
         dt = time.perf_counter() - t0
         us = (dt / n) * 1_000_000
-        pairs.append((us, speedup))
+        pairs.append((us, factor))
     total_ms = (time.perf_counter() - t_total0) * 1000
     iters_executed = sum(per_round)
     # Verdict = MEDIAN ε across all paired rounds (robust aggregate), not the
     # max — see ``_median_verdict`` (Codex #2409). The reported us_per_call and
     # threshold come from the SAME pair that produced the verdict (the
     # median-ε round), so the printed numbers always agree with pass/fail.
-    eps, verdict_speedup, median_idx = _median_verdict(pairs, base_us)
-    threshold_us = base_us * REGRESSION_LIMIT * verdict_speedup
+    eps, verdict_factor, median_idx = _median_verdict(pairs, base_us)
+    threshold_us = base_us * REGRESSION_LIMIT * verdict_factor
     us_per_call = pairs[median_idx][0]
     return BenchResult(
         name=name,
@@ -315,7 +314,7 @@ def bench_one(
         us_per_call=us_per_call,
         iters=iters_executed,
         threshold_us=threshold_us,
-        speedup=verdict_speedup,
+        runner_factor=verdict_factor,
         passed=eps <= REGRESSION_LIMIT,
     )
 
@@ -341,13 +340,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # NOTE (Codex #2409 NIT): no display-only upfront calibration. Each
-    # verdict carries the speedup of its own verdict round (see BenchResult),
-    # so the printed speedup ALWAYS describes the reported threshold. Pre-
-    # measuring a global "runner speedup" solely to print a headline cost
+    # verdict carries the factor of its own verdict round (see BenchResult),
+    # so the printed factor ALWAYS describes the reported threshold. Pre-
+    # measuring a global runner factor solely to print a headline cost
     # ~100k extra regex ops AND could disagree with the actual verdict.
     print(f"Parser microbench × {args.iters} iters/parser")
     print(
-        f"{'parser':<12}{'us/call':>12}{'speedup':>10}{'threshold':>14}{'verdict':>10}"
+        f"{'parser':<12}{'us/call':>12}{'runner':>10}{'threshold':>14}{'verdict':>10}"
     )
     print("-" * 58)
 
@@ -358,12 +357,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [skip] {name}: no sample wired", file=sys.stderr)
             continue
         # bench_one interleaves calibration with the parser bench itself
-        # (issue #2344 #2); no explicit upfront speedup here.
+        # (issue #2344 #2); no explicit upfront factor here.
         r = bench_one(name, fn, sample, args.iters)
         results.append(r)
         verdict = "OK" if r.passed else "FAIL"
         print(
-            f"{r.name:<12}{r.us_per_call:>12.2f}{r.speedup:>10.2f}"
+            f"{r.name:<12}{r.us_per_call:>12.2f}{r.runner_factor:>10.2f}"
             f"{r.threshold_us:>14.2f}{verdict:>10}"
         )
 
