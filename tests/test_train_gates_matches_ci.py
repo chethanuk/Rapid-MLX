@@ -40,12 +40,33 @@ CI_PARSED = yaml.safe_load(CI)
 MAC_CI_PARSED = yaml.safe_load(MAC_CI)
 
 
-def _extract_path_tokens(run_text: str) -> list[str]:
-    """Extract the literal `tests/test_*.py[::...]` tokens CI passes on its own
-    (independent re-derivation, NOT via the shared parser, so the parser cannot
-    mask a drift against a bug of its own)."""
-    tokens: list[str] = []
+def _split_blocks(run_text: str) -> list[list[str]]:
+    """Independent split of a step's run text into per-pytest-process blocks.
+
+    This re-derives the split WITHOUT using the shared parser (so the parser
+    cannot mask a drift against a bug of its own). A block starts at a line
+    whose stripped form is ``pytest``.
+    """
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
     for line in run_text.splitlines():
+        stripped = line.strip()
+        if stripped == "pytest" or stripped.startswith("pytest \\"):
+            current = []
+            blocks.append(current)
+            continue
+        if current is not None:
+            current.append(line)
+    return blocks
+
+
+def _extract_path_tokens(block: list[str]) -> list[str]:
+    """Extract the literal `tests/test_*.py[::...]` tokens one pytest block
+    passes on its own (independent re-derivation, NOT via the shared parser)."""
+    tokens: list[str] = []
+    for line in block:
+        if line.strip().startswith("#"):
+            continue
         # Skip the --deselect= entries (they carry the same shape but are
         # excluded args, not executed paths).
         if "--deselect=" in line:
@@ -58,53 +79,106 @@ def _extract_path_tokens(run_text: str) -> list[str]:
     return tokens
 
 
-def _run_text(job_name: str, step_name: str, ci: dict) -> str:
+def _run_step(job_name: str, step_name: str, ci: dict) -> dict:
     job = ci["jobs"][job_name]
     matches = [s for s in job["steps"] if s.get("name") == step_name]
     assert matches, f"step {step_name!r} not found in job {job_name}"
-    return matches[0]["run"]
+    return matches[0]
+
+
+def _run_text(job_name: str, step_name: str, ci: dict) -> str:
+    return _run_step(job_name, step_name, ci)["run"]
 
 
 # ---------------------------------------------------------------------------
-# Linux no-MLX roster
+# Linux no-MLX roster (TWO separate pytest processes in ci.yml)
 # ---------------------------------------------------------------------------
+def test_linux_parser_returns_two_invocations() -> None:
+    # ci.yml's "Run unit tests" step runs TWO separate pytest processes: the
+    # broad no-MLX roster, and a SECOND process for the engine-lifecycle tests
+    # (their tests/_headless_mlx.py MagicMock `mlx` shim pollutes sys.modules
+    # and must not leak into the broad roster). The parser must preserve that
+    # split so the local Gate 1 runs each in its own process. This is the guard
+    # that B3 (the original wrong diagnosis added `_real_mlx_or_skip` instead)
+    # enforces: a CI edit collapsing/adding a pytest block trips this count.
+    parsed = parse_linux_pytest_args()
+    assert isinstance(parsed, list)
+    run_text = _run_text("test-matrix", "Run unit tests (no MLX required)", CI_PARSED)
+    blocks = _split_blocks(run_text)
+    assert len(parsed) == len(blocks) == 2, (
+        "the local gate must reproduce ci.yml's per-process pytest split; "
+        f"parser produced {len(parsed)} invocation(s), ci.yml has {len(blocks)}"
+    )
+
+
 def test_linux_parser_matches_workflow_roster() -> None:
     parsed = parse_linux_pytest_args()
     run_text = _run_text("test-matrix", "Run unit tests (no MLX required)", CI_PARSED)
-    workflow_paths = _extract_path_tokens(run_text)
-    assert workflow_paths, "workflow carries no Linux test paths"
-    assert parsed["paths"] == workflow_paths, (
-        "Linux pytest roster drifted: the parser extracts\n"
-        f"{parsed['paths']}\nbut ci.yml carries\n{workflow_paths}\n"
-        "Update the parser (or the workflow) so they agree."
-    )
+    blocks = _split_blocks(run_text)
+    for invocation, block in zip(parsed, blocks):
+        workflow_paths = _extract_path_tokens(block)
+        assert workflow_paths, "workflow carries no Linux test paths"
+        assert invocation["paths"] == workflow_paths, (
+            "Linux pytest roster drifted: the parser extracts\n"
+            f"{invocation['paths']}\nbut ci.yml carries\n{workflow_paths}\n"
+            "Update the parser (or the workflow) so they agree."
+        )
+
+
+def test_linux_parser_second_process_engine_lifecycle() -> None:
+    # The second pytest process is exactly the engine-lifecycle seam set, with
+    # --cov-append so its coverage unions into the same data file as the first
+    # process (mirroring ci.yml's combined Linux coverage).
+    parsed = parse_linux_pytest_args()
+    second = parsed[1]
+    assert second["paths"] == [
+        "tests/test_engine_lifecycle.py",
+        "tests/test_mllm_process_loop_errors.py",
+        "tests/test_disconnect_guard_aborts_scheduler.py",
+        "tests/test_rst_mid_sse_zombie_kv.py",
+    ]
+    assert second["deselect"] == []
+    assert second["marker"] is None  # the second process has no -k filter
+    assert second["cov_declaration"]["cov_append"] is True
+    # The first process is the broad roster and must NOT use --cov-append (it
+    # seeds the coverage file).
+    assert parsed[0]["cov_declaration"]["cov_append"] is False
 
 
 def test_linux_parser_extracts_deselect_and_k_filter() -> None:
     parsed = parse_linux_pytest_args()
     run_text = _run_text("test-matrix", "Run unit tests (no MLX required)", CI_PARSED)
-    # Every --deselect= arg in the workflow must be captured, and only those.
+    main_invocation = parsed[0]
+
+    # Every --deselect= arg in the FIRST (main) block must be captured, and only
+    # those. (The engine-lifecycle block has none.)
+    main_block = _split_blocks(run_text)[0]
     expected_deselect = [
         line.strip().split("--deselect=", 1)[1].split(" \\")[0].split()[0]
-        for line in run_text.splitlines()
+        for line in main_block
         if "--deselect=" in line
     ]
-    assert parsed["deselect"] == expected_deselect
+    assert main_invocation["deselect"] == expected_deselect
     assert "--deselect=" in run_text  # sanity: the workflow does deselect
 
-    # The -k filter must be captured verbatim.
-    assert parsed["marker"], "Linux -k filter is empty; workflow must carry one"
-    assert parsed["marker"] in run_text
+    # The -k filter must be captured verbatim on the main block.
+    assert main_invocation["marker"], (
+        "Linux -k filter is empty; workflow must carry one"
+    )
+    assert main_invocation["marker"] in run_text
 
 
 def test_linux_roster_asserts_no_mlx_import() -> None:
     # The Linux roster lives in the "no MLX required" step; this is the contract
     # that Gate 1 enforces. Guard the guard: every path the parser hands to
-    # Gate 1 must resolve to a real file.
+    # Gate 1 across BOTH pytest processes must resolve to a real file.
     parsed = parse_linux_pytest_args()
-    for path in parsed["paths"]:
-        file_part = path.split("::", 1)[0]
-        assert (CI_WORKFLOW.parents[2] / file_part).is_file(), f"{file_part} missing"
+    for invocation in parsed:
+        for path in invocation["paths"]:
+            file_part = path.split("::", 1)[0]
+            assert (CI_WORKFLOW.parents[2] / file_part).is_file(), (
+                f"{file_part} missing"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +186,9 @@ def test_linux_roster_asserts_no_mlx_import() -> None:
 # ---------------------------------------------------------------------------
 def test_apple_parser_matches_workflow_roster() -> None:
     parsed = parse_apple_pytest_args()
-    run_text = _run_text("test-apple-silicon", "Run MLX-dependent tests", CI_PARSED)
-    workflow_paths = _extract_path_tokens(run_text)
+    step = _run_step("test-apple-silicon", "Run MLX-dependent tests", CI_PARSED)
+    run_text = step["run"]
+    workflow_paths = _extract_path_tokens(_split_blocks(run_text)[0])
     assert workflow_paths, "workflow carries no Apple test paths"
     assert parsed["paths"] == workflow_paths, (
         "Apple pytest roster drifted: the parser extracts\n"
@@ -124,12 +199,26 @@ def test_apple_parser_matches_workflow_roster() -> None:
         assert (CI_WORKFLOW.parents[2] / file_part).is_file(), f"{file_part} missing"
 
 
+def test_apple_parser_extracts_m_and_k_filters() -> None:
+    # Gate 4 must follow ci.yml's Apple -m / -k flags, not hardcode them.
+    parsed = parse_apple_pytest_args()
+    run_text = _run_text("test-apple-silicon", "Run MLX-dependent tests", CI_PARSED)
+    assert parsed["m"], "Apple -m marker expression is empty"
+    assert parsed["k"], "Apple -k filter is empty"
+    assert parsed["m"] in run_text
+    assert parsed["k"] in run_text
+    assert parsed["m"] == "not slow"  # current hosted value, guarded verbatim
+    assert parsed["k"] == "not Integration"  # current hosted value
+
+
 def test_apple_roster_has_no_overlap_with_linux_surface() -> None:
     # A test that lands in BOTH rosters is a red flag: an mlx-importing test in
     # the Linux (no-MLX) roster would crash CI, and a no-MLX test wasted on the
     # Apple gate hides Linux-only coverage. (test_mllm_cache.py legitimately
     # appears in both, exercising no-MLX paths on Linux and mlx paths on Apple.)
-    linux = set(parse_linux_pytest_args()["paths"])
+    linux = {
+        path for invocation in parse_linux_pytest_args() for path in invocation["paths"]
+    }
     apple = set(parse_apple_pytest_args()["paths"])
     overlap = linux & apple
     # Documented intentional overlaps: test_mllm_cache.py exercises no-MLX
@@ -206,7 +295,9 @@ def test_train_gates_script_parses_workflows() -> None:
 
     payload = json.loads(proc.stdout)
     assert set(payload) == {"linux", "apple", "mypy", "diff_cover", "swift_test"}
-    assert payload["linux"]["paths"]
+    assert isinstance(payload["linux"], list) and len(payload["linux"]) == 2
+    assert payload["linux"][0]["paths"]
+    assert payload["linux"][1]["paths"]
     assert payload["apple"]["paths"]
 
 

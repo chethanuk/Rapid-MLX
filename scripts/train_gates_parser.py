@@ -11,10 +11,14 @@ changes such that the parser can no longer find a gate, the drift test fails.
 
 Gate surface parsed here (see ``scripts/train_gates.sh`` for the full gate
 list):
-  * Linux no-MLX pytest roster + --deselect + -k filter (ci.yml test-matrix,
-    "Run unit tests (no MLX required)" step)
-  * Apple-MLX pytest roster (ci.yml test-apple-silicon, "Run MLX-dependent
-    tests" step)
+  * Linux no-MLX pytest blocks (ci.yml test-matrix, "Run unit tests (no MLX
+    required)" step) — a LIST of invocations, one per distinct ``pytest``
+    process in the step, because ci.yml deliberately runs the broad roster and
+    the engine-lifecycle tests in TWO separate processes (the latter install a
+    MagicMock ``mlx`` shim into ``sys.modules`` at import and must not pollute
+    the broad roster).
+  * Apple-MLX pytest roster + ``-m``/``-k`` filters (ci.yml test-apple-silicon,
+    "Run MLX-dependent tests" step)
   * mypy budget invocation (ci.yml type-check job)
   * diff-cover invocation (ci.yml changed-lines-coverage job)
 """
@@ -45,6 +49,8 @@ _DESELECT = re.compile(r"--deselect=([^ \t\\]+)")
 
 _K_FILTER = re.compile(r'-k\s+"([^"]+)"')
 
+_M_FILTER = re.compile(r'-m\s+"([^"]+)"')
+
 
 def _load_workflow() -> dict[str, Any]:
     if yaml is None:
@@ -52,24 +58,57 @@ def _load_workflow() -> dict[str, Any]:
     return yaml.safe_load(CI_WORKFLOW.read_text())
 
 
-def parse_linux_pytest_args() -> dict[str, Any]:
-    """Parse the Linux no-MLX pytest block from ci.yml.
+def _split_pytest_blocks(run_text: str) -> list[list[str]]:
+    """Split a ci.yml step's ``run`` text into ONE item per ``pytest`` process.
 
-    Returns ``{paths, deselect, marker}``:
-      * ``paths``  - ordered list of ``tests/test_*.py[::...]`` tokens
-      * ``deselect`` - list of ``tests/...`` paths passed via ``--deselect=``
-      * ``marker`` - the ``-k "..."`` filter string (or None)
+    A new block starts at a line whose stripped form is ``pytest`` (optionally
+    followed by a trailing backslash). Following non-pytest lines (paths, flags,
+    comments) are collected into the block until the next ``pytest`` line. This
+    mirrors the fact that ci.yml runs each ``pytest <args>`` block in its own
+    separate process (the engine-lifecycle tests MUST be isolated: their
+    ``tests/_headless_mlx.py`` seam installs MagicMock ``mlx`` modules into
+    ``sys.modules`` at import, which would leak into the broad roster if they
+    shared a process).
     """
-    workflow = _load_workflow()
-    job = workflow["jobs"]["test-matrix"]
-    step = _find_step_by_name(job, "Run unit tests (no MLX required)")
-    run_text = step["run"]
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in run_text.splitlines():
+        stripped = line.strip()
+        if stripped == "pytest" or stripped.startswith("pytest \\"):
+            current = []
+            blocks.append(current)
+            continue
+        if current is not None:
+            current.append(line)
+    return blocks
 
+
+def _parse_block(block: list[str]) -> dict[str, Any]:
+    """Parse ONE pytest block (a list of lines) into an invocation dict.
+
+    Returns ``{paths, deselect, marker, cov_declaration}`` where
+    ``cov_declaration`` captures the ``--cov-append`` / ``--cov-report=xml``
+    flags the block declares (the script mirrors them so the per-process
+    coverage union equals the hosted combined coverage).
+    """
     paths: list[str] = []
     deselect: list[str] = []
     marker: str | None = None
+    cov_append = False
+    cov_report_xml = False
 
-    for line in run_text.splitlines():
+    for line in block:
+        if line.strip().startswith("#"):
+            # A comment line mentioning `tests/x.py` must never become a phantom
+            # path/deselect/marker — skip it entirely.
+            continue
+
+        # cov flags can appear on any line of the block.
+        if "--cov-append" in line:
+            cov_append = True
+        if "--cov-report=xml" in line:
+            cov_report_xml = True
+
         path_match = _TEST_PATH.search(line)
         if path_match and "--deselect=" not in line:
             paths.append(path_match.group(0))
@@ -82,26 +121,77 @@ def parse_linux_pytest_args() -> dict[str, Any]:
         if k_match:
             marker = k_match.group(1)
 
-    if not paths:
+    return {
+        "paths": paths,
+        "deselect": deselect,
+        "marker": marker,
+        "cov_declaration": {
+            "cov_append": cov_append,
+            "cov_report_xml": cov_report_xml,
+        },
+    }
+
+
+def parse_linux_pytest_args() -> list[dict[str, Any]]:
+    """Parse the Linux no-MLX pytest blocks from ci.yml.
+
+    Returns a LIST of invocation dicts, one per distinct ``pytest`` process in
+    the "Run unit tests (no MLX required)" step (currently 2), each
+    ``{paths, deselect, marker, cov_declaration}`` in ci.yml's run order.
+    """
+    workflow = _load_workflow()
+    job = workflow["jobs"]["test-matrix"]
+    step = _find_step_by_name(job, "Run unit tests (no MLX required)")
+    run_text = step["run"]
+
+    invocations: list[dict[str, Any]] = []
+    for block in _split_pytest_blocks(run_text):
+        invocation = _parse_block(block)
+        if not invocation["paths"]:
+            raise ValueError(
+                "found a pytest block in ci.yml with no test paths; the "
+                "test-matrix 'Run unit tests' step layout may have changed"
+            )
+        invocations.append(invocation)
+
+    if not invocations:
         raise ValueError(
-            "could not find the Linux no-MLX pytest roster in ci.yml; "
+            "could not find any Linux no-MLX pytest block in ci.yml; "
             "the test-matrix 'Run unit tests' step layout may have changed"
         )
-    return {"paths": paths, "deselect": deselect, "marker": marker}
+    return invocations
 
 
 def parse_apple_pytest_args() -> dict[str, Any]:
-    """Parse the Apple-MLX pytest block from ci.yml."""
+    """Parse the Apple-MLX pytest block from ci.yml.
+
+    Returns ``{paths, m, k}``: the roster plus the ``-m "..."`` marker
+    expression and ``-k "..."`` filter verbatim from the workflow (so if ci.yml
+    changes the Apple filter, the local Gate 4 follows instead of hardcoding
+    them).
+    """
     workflow = _load_workflow()
     job = workflow["jobs"]["test-apple-silicon"]
     step = _find_step_by_name(job, "Run MLX-dependent tests")
     run_text = step["run"]
 
     paths: list[str] = []
+    m_filter: str | None = None
+    k_filter: str | None = None
     for line in run_text.splitlines():
+        if line.strip().startswith("#"):
+            continue
         path_match = _TEST_PATH.search(line)
         if path_match and "--deselect=" not in line:
             paths.append(path_match.group(0))
+
+        m_match = _M_FILTER.search(line)
+        if m_match:
+            m_filter = m_match.group(1)
+
+        k_match = _K_FILTER.search(line)
+        if k_match:
+            k_filter = k_match.group(1)
 
     if not paths:
         raise ValueError(
@@ -109,7 +199,7 @@ def parse_apple_pytest_args() -> dict[str, Any]:
             "the test-apple-silicon 'Run MLX-dependent tests' step may have "
             "changed"
         )
-    return {"paths": paths}
+    return {"paths": paths, "m": m_filter, "k": k_filter}
 
 
 def parse_mypy_invocation() -> dict[str, Any]:

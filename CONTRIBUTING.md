@@ -138,7 +138,7 @@ The 5 gates (and their hosted CI equivalents):
 | 2 | Pinned mypy error budget (`config/mypy-requirements.txt` → `check_mypy_error_budget.py`) | `ci.yml` `type-check` |
 | 3 | Coverage union + `diff-cover --fail-under 100` against `<base-sha>` | `ci.yml` `changed-lines-coverage` |
 | 4 | Apple-MLX pytest (the parsed Apple test roster, in an mlx-capable venv) | `ci.yml` `test-apple-silicon` |
-| 5 | Desktop `swift test --no-parallel` (only if `apps/` changed vs base) | `rapid-mac-ci.yml` `build` |
+| 5 | Desktop `swift test --no-parallel` (only if `apps/` changed vs base; PASS-BY-N/A if `apps/` is unchanged) | `rapid-mac-ci.yml` `build` job's `swift test` step only |
 
 The gate definitions are **not hardcoded** in the script: they are parsed at
 runtime from `.github/workflows/ci.yml` and `.github/workflows/rapid-mac-ci.yml`
@@ -153,7 +153,13 @@ Environment knobs (all optional): `TRAIN_GATES_PYTHON` (an interpreter with
 `pyyaml` + `coverage` + `diff-cover` + `pytest`); `TRAIN_GATES_APPLE_VENV` /
 `TRAIN_GATES_ALLOW_APPLE_INSTALL=1` / `TRAIN_GATES_SKIP_APPLE=1` for the Apple
 gate; `TRAIN_GATES_SKIP_SWIFT=1` for the Desktop gate. `GATES OK` requires all
-5 gates to pass — a skip is not a pass.
+5 gates to pass. A **skip is not a pass** — skipping only happens for a genuine
+environment constraint (missing `swift` toolchain, missing `apps/` dir, or an
+explicit `TRAIN_GATES_SKIP_*` flag) and leaves the train un-frozen. A **PASS,
+marked `(N/A)`**, does count toward the 5 — this is used when Gate 5 finds
+`apps/` unchanged vs the base, so the Desktop `swift test` step has nothing to
+run: the outcome is deterministic (not an environment shortfall), so it
+satisfies the "all five must pass" contract.
 
 ## Ways to Contribute
 
