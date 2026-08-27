@@ -30,12 +30,13 @@ can actually understand.
 - **Assistant changes are explicit, safe transactions.** API clients can choose
   whether a busy text or vision model switch should reject, wait, or abort
   active assistant work. Desktop rejects a busy switch safely, and auxiliary
-  speech models remain resident. The replacement API accepts
-  `memory_policy=keep_then_commit` or `evict_first_if_needed`; the default
-  projection-gated policy evicts the replaced model only when both cannot fit
-  and the projected replacement fits, otherwise returning a typed 507 with
-  `replacement_projection` before eviction. Use `keep_then_commit` to require
-  a rollback-safe load. ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
+  speech models remain resident. The `/v1/models/load` API defaults
+  `memory_policy` to `evict_first_if_needed`: it keeps the rollback-safe load
+  when old and new fit together, evicts the replaced assistant first only when
+  keeping both breaches the limit but the replacement alone fits, and otherwise
+  returns a typed 507 with `replacement_projection` before destructive mutation.
+  Set `memory_policy=keep_then_commit` to require rollback-safe loading.
+  ([#2369](https://github.com/raullenchai/Rapid-MLX/pull/2369))
 - **Large multi-variant repositories can download one serving format.** The CLI
   accepts `--bits` or `--format`, so users do not need to fetch every
   quantization in a repository. ([#2145](https://github.com/raullenchai/Rapid-MLX/issues/2145),
@@ -55,13 +56,16 @@ can actually understand.
   validation now requires image-dependent answers from two cached vision
   families before the sidecar can ship. ([#2384](https://github.com/raullenchai/Rapid-MLX/pull/2384),
   [#2380](https://github.com/raullenchai/Rapid-MLX/issues/2380))
-- **Vision-capable Qwen checkpoints choose the working lane by default.** With
-  mlx-vlm 0.6.16 or newer (included in the Desktop sidecar), Qwen3.5, Qwen3.6,
-  and supported Qwen3.8 vision-capable checkpoints serve on the vision lane so
-  photos work directly in chat. The experimental Flash-Next checkpoint remains
-  text-only in this release. Use `--no-mllm` in the CLI or the per-model
-  Performance override in Desktop to force text-only serving; MTP and
-  speculative decoding automatically retain the text lane.
+- **Vision-capable Qwen checkpoints choose the working lane automatically.**
+  Vision-capable Qwen3.5, Qwen3.6, and supported Qwen3.8 checkpoints use the
+  vision lane automatically when mlx-vlm 0.6.16 or newer is installed and the
+  checkpoint meets its measured vision-memory recommendation. If automatic
+  admission cannot use that lane, serving falls back to text with a
+  machine-readable reason. The experimental Flash-Next checkpoint is explicitly
+  text-only in this release. CLI users can force text serving with `--no-mllm`,
+  and Desktop exposes the same per-model Performance choice. Requests that
+  enable MTP or another speculative decoder select the text lane, where that
+  decoder is supported.
 - **API validation fails early with actionable fields.** Requests accept scalar
   or array `stop`, reject invalid timeouts and non-boolean residency controls,
   and identify the exact invalid load field. ([#2367](https://github.com/raullenchai/Rapid-MLX/pull/2367),
@@ -112,10 +116,12 @@ can actually understand.
 - **Speech to Text arms itself after model lifecycle changes.** When speech
   input is enabled, it becomes ready without an extra manual start button.
   ([#2448](https://github.com/raullenchai/Rapid-MLX/pull/2448))
-- **Structured text requests terminate normally on the vision lane.** JSON
-  schema and title-generation requests now carry their output constraints and
-  complete with a terminal stop while photo requests continue using the same
-  multimodal server. ([#2471](https://github.com/raullenchai/Rapid-MLX/pull/2471))
+- **Structured text requests terminate normally on the vision lane.**
+  JSON-schema responses and bounded-thinking or title-generation requests now
+  terminate normally on the vision lane: their request-local output processors
+  and complete configured EOS set reach the multimodal scheduler, while photo
+  requests continue using the same server.
+  ([#2471](https://github.com/raullenchai/Rapid-MLX/pull/2471))
 - **Serving lanes honor the requested workload.** Experimental
   Qwen3.8-Flash-Next remains on its supported text lane, MTP and other
   speculative decoding requests choose the text lane, and text-diffusion
