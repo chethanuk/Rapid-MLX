@@ -291,7 +291,8 @@ jobs:
       - name: Preflight immutable sidecar smoke snapshots
         id: sidecar-pins
         run: |
-          python3 apps/rapid-mac/scripts/check-sidecar-smoke-cache.py \
+          /opt/homebrew/opt/python@3.12/bin/python3.12 \
+            apps/rapid-mac/scripts/check-sidecar-smoke-cache.py \
             --manifest apps/rapid-mac/scripts/sidecar-smoke-models.json \
             --github-output "$GITHUB_OUTPUT"
 

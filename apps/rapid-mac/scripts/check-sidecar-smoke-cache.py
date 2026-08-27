@@ -15,7 +15,7 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _KEY = re.compile(r"[a-z][a-z0-9_]*")
@@ -38,7 +38,7 @@ def default_cache_root() -> Path:
     return cache_home / "huggingface" / "hub"
 
 
-def load_pins(path: Path) -> dict[str, tuple[str, str]]:
+def load_pins(path: Path) -> dict[str, tuple[str, str, tuple[str, ...]]]:
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -49,17 +49,35 @@ def load_pins(path: Path) -> dict[str, tuple[str, str]]:
     if not isinstance(models, dict) or set(models) != {"qwen", "gemma"}:
         raise PreflightError("sidecar pin manifest must define exactly qwen and gemma")
 
-    result: dict[str, tuple[str, str]] = {}
+    result: dict[str, tuple[str, str, tuple[str, ...]]] = {}
     for key, entry in models.items():
         if not _KEY.fullmatch(key) or not isinstance(entry, dict):
             raise PreflightError(f"invalid sidecar pin entry {key!r}")
         repository = entry.get("repository")
         revision = entry.get("revision")
+        files = entry.get("files")
         if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
             raise PreflightError(f"{key}.repository must be an owner/name ID")
         if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
             raise PreflightError(f"{key}.revision must be a full lowercase commit SHA")
-        result[key] = (repository, revision)
+        if (
+            not isinstance(files, list)
+            or not files
+            or not all(isinstance(file, str) for file in files)
+            or len(files) != len(set(files))
+        ):
+            raise PreflightError(f"{key}.files must be a non-empty unique string list")
+        for file in files:
+            file_path = PurePosixPath(file)
+            if (
+                file_path.is_absolute()
+                or not file_path.parts
+                or any(part in {"", ".", ".."} for part in file_path.parts)
+                or "\\" in file
+                or "\n" in file
+            ):
+                raise PreflightError(f"{key}.files contains an unsafe path {file!r}")
+        result[key] = (repository, revision, tuple(files))
     return result
 
 
@@ -70,28 +88,31 @@ def snapshot_path(cache_root: Path, repository: str, revision: str) -> Path:
 
 
 def missing_pins(
-    pins: dict[str, tuple[str, str]], cache_root: Path
-) -> list[tuple[str, str]]:
-    missing: list[tuple[str, str]] = []
-    for repository, revision in pins.values():
+    pins: dict[str, tuple[str, str, tuple[str, ...]]], cache_root: Path
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    missing: list[tuple[str, str, tuple[str, ...]]] = []
+    for repository, revision, files in pins.values():
         snapshot = snapshot_path(cache_root, repository, revision)
-        try:
-            # Cached snapshots contain symlinks into blobs. Following them here
-            # catches empty snapshots and snapshots whose blobs were evicted,
-            # without opening or loading any model files.
-            populated = snapshot.is_dir() and any(
-                candidate.is_file() for candidate in snapshot.rglob("*")
-            )
-        except OSError:
-            populated = False
-        if not populated:
-            missing.append((repository, revision))
+        missing_files: list[str] = []
+        for file in files:
+            try:
+                # is_file follows the cache's blob symlinks. It catches both
+                # absent entries and evicted blobs without opening model data.
+                present = snapshot.is_dir() and (snapshot / file).is_file()
+            except OSError:
+                present = False
+            if not present:
+                missing_files.append(file)
+        if missing_files:
+            missing.append((repository, revision, tuple(missing_files)))
     return missing
 
 
-def write_outputs(path: Path, pins: dict[str, tuple[str, str]]) -> None:
+def write_outputs(
+    path: Path, pins: dict[str, tuple[str, str, tuple[str, ...]]]
+) -> None:
     lines: list[str] = []
-    for key, (repository, revision) in pins.items():
+    for key, (repository, revision, _) in pins.items():
         lines.extend((f"{key}_model={repository}", f"{key}_revision={revision}"))
     with path.open("a") as output:
         output.write("\n".join(lines) + "\n")
@@ -118,8 +139,10 @@ def main(argv: list[str] | None = None) -> int:
             f"missing from {cache_root}",
             file=sys.stderr,
         )
-        for repository, revision in missing:
+        for repository, revision, missing_files in missing:
             print(f"  - {repository}@{revision}", file=sys.stderr)
+            for file in missing_files:
+                print(f"      missing: {file}", file=sys.stderr)
             print(
                 '    restore: python3 -c "from huggingface_hub import '
                 f"snapshot_download; snapshot_download('{repository}', "
