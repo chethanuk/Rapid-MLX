@@ -39,12 +39,20 @@ def test_candidate_tester_dmg_is_additive_and_dispatch_only() -> None:
     assert 'cmp -s "$SOURCE" "$TARGET"' in stage["run"]
     assert "candidate_identity" in candidate["with"]["name"]
 
+    # The exact pre-tag promotion path added by #2451 never enters this build
+    # job, so it cannot acquire a tester-only identity or renamed artifact.
+    assert "inputs.promote_run_id == ''" in build["if"]
+    assert "inputs.promote_sha == ''" in build["if"]
+    promotion_names = {step.get("name") for step in jobs["promote-candidate"]["steps"]}
+    assert "Stage candidate-labelled tester DMG" not in promotion_names
+    assert "Upload candidate-labelled tester DMG" not in promotion_names
+
 
 def test_build_script_validates_and_embeds_separate_candidate_key() -> None:
     text = BUILD.read_text()
 
     assert "^candidate-[0-9a-f]{8}$" in text
     assert "plutil -insert RapidCandidateIdentity" in text
-    candidate_block = text[text.index('if [[ -n "${RAPID_CANDIDATE_IDENTITY') :]
-    assert "CFBundleVersion" not in candidate_block.split("fi", 1)[0]
-    assert "CFBundleShortVersionString" not in candidate_block.split("fi", 1)[0]
+    for version_key in ("CFBundleVersion", "CFBundleShortVersionString"):
+        assert f"plutil -insert {version_key}" not in text
+        assert f"plutil -replace {version_key}" not in text
