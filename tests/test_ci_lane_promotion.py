@@ -8,7 +8,9 @@ engine-only or Desktop-only PR into an all-product run.
 
 import json
 import os
+import shlex
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -28,6 +30,45 @@ def _step_run(workflow: Path, job: str, step_name: str) -> str:
 
 def _job(workflow: Path, job: str) -> dict[str, object]:
     return yaml.safe_load(workflow.read_text())["jobs"][job]
+
+
+def _pytest_invocations(workflow: Path) -> list[tuple[str, list[str]]]:
+    """Return explicit test nodes from each workflow ``pytest`` command."""
+    jobs = yaml.safe_load(workflow.read_text())["jobs"]
+    invocations: list[tuple[str, list[str]]] = []
+    for job_name, job in jobs.items():
+        for step in job.get("steps", []):
+            run = str(step.get("run", "")).replace("\\\n", " ")
+            for line in run.splitlines():
+                command = line.strip()
+                if not command.startswith("pytest "):
+                    continue
+                tokens = shlex.split(command)
+                explicit_nodes = [
+                    token
+                    for token in tokens[1:]
+                    if token.startswith("tests/") and ".py" in token
+                ]
+                invocations.append(
+                    (f"{workflow.name}:{job_name}:{step.get('name')}", explicit_nodes)
+                )
+    return invocations
+
+
+def test_workflow_pytest_invocations_do_not_repeat_explicit_test_nodes():
+    invocations = [
+        invocation
+        for workflow in (ENGINE_WORKFLOW, DESKTOP_WORKFLOW)
+        for invocation in _pytest_invocations(workflow)
+    ]
+    assert invocations, "no workflow pytest invocations parsed — contract is stale"
+
+    duplicates: list[str] = []
+    for location, nodes in invocations:
+        repeated = sorted(node for node, count in Counter(nodes).items() if count > 1)
+        duplicates.extend(f"{location}: {node}" for node in repeated)
+
+    assert not duplicates, "duplicate explicit pytest nodes:\n" + "\n".join(duplicates)
 
 
 def _workflow_strings(workflow: Path) -> dict[str, object]:
