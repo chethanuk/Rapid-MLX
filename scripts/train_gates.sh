@@ -158,10 +158,10 @@ SKIPPED=()
 FAILED=()
 
 note()  { printf '    %s\n' "$*"; }
-passed(){ PASSED+=("$1"); printf 'GATE %s: PASS — %s\n' "$1" "${2:-}"; }
-passed_na(){ PASSED+=("$1"); printf 'GATE %s: PASS (N/A) — %s\n' "$1" "${2:-}"; }
+passed(){ PASSED+=("$1"); if [[ $# -ge 2 ]]; then printf 'GATE %s: PASS — %s\n' "$1" "$2"; else printf 'GATE %s: PASS\n' "$1"; fi; }
+passed_na(){ PASSED+=("$1"); if [[ $# -ge 2 ]]; then printf 'GATE %s: PASS (N/A) — %s\n' "$1" "$2"; else printf 'GATE %s: PASS (N/A)\n' "$1"; fi; }
 skip()  { SKIPPED+=("$1"); printf 'GATE %s: SKIPPED — %s\n' "$1" "${2:-}"; }
-fail()  { FAILED+=("$1"); printf 'GATE %s: FAILURE — %s\n' "$1" "${2:-}"; }
+fail()  { FAILED+=("$1"); if [[ $# -ge 2 ]]; then printf 'GATE %s: FAILURE — %s\n' "$1" "$2"; else printf 'GATE %s: FAILURE\n' "$1"; fi; }
 
 # ---------------------------------------------------------------------------
 # Gate 1 — Linux no-MLX pytest (fresh venv, no mlx), one process per ci.yml
