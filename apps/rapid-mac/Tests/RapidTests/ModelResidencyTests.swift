@@ -402,6 +402,50 @@ struct ModelResidencyTests {
         #expect(!ModelSizing.requiresMemoryConfirmation(safety))
     }
 
+    @Test("Cached picker replacement over physical RAM waits for confirmation before loading")
+    func cachedOverCapacityReplacementWaitsForConfirmation() async throws {
+        let gib = UInt64(1) << 30
+        let currentAlias = "qwen3.5-4b-4bit"
+        let targetAlias = "qwen3.5-35b-8bit"
+        let currentResidency = residency(
+            alias: currentAlias,
+            measuredGB: 4,
+            modality: "text"
+        )
+        let server = ServerManager(
+            testingState: .ready(alias: currentAlias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            residency: currentResidency
+        )
+        server._testInstallChild(ProcessGroupChild.testStub())
+        defer { server._testClearChild() }
+        server.memorySnapshotProvider = {
+            MemoryProbe.Snapshot(totalBytes: 18 * gib, usedBytes: 8 * gib)
+        }
+
+        let load = Task {
+            await server.ensureServing(
+                alias: targetAlias,
+                hfPath: nil,
+                estimatedMemoryGB: 44,
+                replacementGroup: .assistant
+            )
+        }
+        for _ in 0 ..< 300 where server.pendingMemoryWarning == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingMemoryWarning)
+
+        #expect(warning.alias == targetAlias)
+        #expect(warning.severity == .unsafe)
+        #expect(warning.plannedReleaseGB == 4)
+        #expect(server.state == .ready(alias: currentAlias))
+        server.cancelPendingMemoryLoad(warning)
+        #expect(await load.value == false)
+        #expect(server.state == .ready(alias: currentAlias))
+        #expect(!server.isModelResident(targetAlias))
+    }
+
     @Test("Replacing a smaller chat model with 27B still warns")
     func smallerToLargerReplacementStillWarns() throws {
         let admission = try #require(ServerManager.memoryAdmissionForTransition(

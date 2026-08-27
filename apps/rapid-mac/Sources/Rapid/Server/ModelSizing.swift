@@ -265,6 +265,10 @@ enum ModelSizing {
         /// Resident model memory the selected lifecycle plan will release
         /// before loading this target.
         var plannedReleaseGB: Double = 0
+        /// True while that resident memory is still included in live host
+        /// samples. A replacement warning is presented before teardown so
+        /// Cancel can leave the current model untouched.
+        var plannedReleaseIsPending: Bool = false
 
         init(
             id: UUID = UUID(),
@@ -275,7 +279,8 @@ enum ModelSizing {
             footprintGB: Double,
             freeGB: Double,
             totalGB: Double = 0,
-            plannedReleaseGB: Double = 0
+            plannedReleaseGB: Double = 0,
+            plannedReleaseIsPending: Bool = false
         ) {
             self.id = id
             self.alias = alias
@@ -286,6 +291,7 @@ enum ModelSizing {
             self.freeGB = freeGB
             self.totalGB = totalGB
             self.plannedReleaseGB = plannedReleaseGB
+            self.plannedReleaseIsPending = plannedReleaseIsPending
         }
 
         static func == (lhs: Self, rhs: Self) -> Bool {
@@ -297,6 +303,7 @@ enum ModelSizing {
                 && lhs.freeGB == rhs.freeGB
                 && lhs.totalGB == rhs.totalGB
                 && lhs.plannedReleaseGB == rhs.plannedReleaseGB
+                && lhs.plannedReleaseIsPending == rhs.plannedReleaseIsPending
         }
 
         var title: String {
