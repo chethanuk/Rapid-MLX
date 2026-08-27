@@ -639,6 +639,20 @@ async def test_mllm_output_schema_fails_closed_when_schema_is_unusable(monkeypat
     assert chat_kwargs == {}
 
 
+@pytest.mark.asyncio
+async def test_output_schema_ignores_engines_without_mllm_capability():
+    from vllm_mlx.routes import anthropic as anthropic_route
+
+    request = SimpleNamespace(response_format=object(), tools=[])
+    chat_kwargs = {}
+
+    await anthropic_route._attach_mllm_schema_processor(
+        SimpleNamespace(tokenizer="tok"), request, chat_kwargs
+    )
+
+    assert chat_kwargs == {}
+
+
 def test_mllm_streaming_schema_disables_reasoning_classification(
     monkeypatch, anthropic_client
 ):
