@@ -2120,15 +2120,15 @@ class BatchedEngine(BaseEngine):
                 for k in ("repetition_penalty", "presence_penalty", "frequency_penalty")
                 if k in kwargs
             }
-            _mllm_logits_processors = [
-                processor
-                for processor in (
-                    kwargs.pop("grammar_logits_processor", None),
-                    kwargs.pop("reasoning_budget_logits_processor", None),
-                    kwargs.pop("suppressed_tokens_logits_processor", None),
-                )
-                if processor is not None
-            ]
+            _mllm_logits_processors = []
+            for processor_key in (
+                "grammar_logits_processor",
+                "reasoning_budget_logits_processor",
+                "suppressed_tokens_logits_processor",
+            ):
+                processor = kwargs.pop(processor_key, None)
+                if processor is not None:
+                    _mllm_logits_processors.append(processor)
             try:
                 output = await self._mllm_scheduler.generate(
                     prompt=prompt,
