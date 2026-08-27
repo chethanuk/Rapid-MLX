@@ -134,23 +134,27 @@ struct OnboardingWontFitReviewTests {
 
     /// Condition-2 guard: the `.tooBig && !isRecommendedPick` carve-out must
     /// not leak — a genuinely-too-big alias that ISN'T this Mac's curated pick
-    /// stays inaccessible, and a machine below the minimum tier floor (8 GB)
-    /// is recommended for no tier, so the veto applies to everything it is
-    /// shown. Only an in-tier curated pick is exempt.
+    /// stays inaccessible, and below the lowest tier's floor a Mac sits in no
+    /// tier, so the curated picks it is shown are not exempt either. Only an
+    /// in-tier curated pick is exempt. The floor is read from the pinned
+    /// ``RAMBucketedDefault.tiers`` rather than restated here.
     @Test("The carve-out is narrow: only the in-tier curated pick is exempt")
     func carveOutIsNarrow() {
         // A 70B model is never a 32 GB tier pick → still refused on 32 GB.
         #expect(!OnboardingModelSelection.isAvailable(
             alias: Self.tooBigAlias, hardware: Self.hardware(ramGB: 32)))
         // bonsai-27b-2bit (~7.6 GB real, ~14.8 GB estimate) is a 24 GB tier
-        // pick, not an 8 GB pick → on an 8 GB Mac it is not recommended and
-        // stays subject to the (real) veto.
+        // pick, not a lowest-tier pick → on a lowest-tier Mac it is not
+        // recommended and stays subject to the (real) veto.
+        let lowestTier = RAMBucketedDefault.tiers[0]
         #expect(!OnboardingModelSelection.isAvailable(
-            alias: "bonsai-27b-2bit", hardware: Self.hardware(ramGB: 8)))
-        // Below the minimum 8 GB floor a Mac sits in no tier, so even the
-        // smallest shown pick is not "recommended" and the veto applies.
+            alias: "bonsai-27b-2bit",
+            hardware: Self.hardware(ramGB: lowestTier.floorGB)))
+        // Below the lowest tier's floor a Mac sits in no tier, so even that
+        // tier's own smart pick is not "recommended" and the veto applies.
         #expect(!OnboardingModelSelection.isAvailable(
-            alias: "lfm2.5-2.6b-4bit", hardware: Self.hardware(ramGB: 6)))
+            alias: lowestTier.primary.alias,
+            hardware: Self.hardware(ramGB: lowestTier.floorGB - 2)))
     }
 
     // MARK: - 1. The fixture is actually incompatible
