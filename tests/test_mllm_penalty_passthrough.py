@@ -268,3 +268,8 @@ async def test_engine_stream_generate_mllm_forwards_penalty_kwargs():
     assert captured["presence_penalty"] == 0.3
     assert captured["frequency_penalty"] == 0.4
     assert captured["logits_processors"] == [grammar, budget, suppression]
+
+    captured.clear()
+    async for _ in engine.stream_generate(prompt="hi", max_tokens=8):
+        pass
+    assert captured["logits_processors"] == []
