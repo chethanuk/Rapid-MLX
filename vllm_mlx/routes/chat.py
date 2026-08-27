@@ -4853,6 +4853,26 @@ async def _create_chat_completion_impl(
     if response_format and not request.tools:
         json_schema = extract_json_schema_for_guided(response_format)
         if json_schema:
+            # MLLM continuous batching owns its decode loop, so the legacy
+            # model-owning ``GuidedGenerator`` cannot be used without routing
+            # the request away from the vision-capable lane. Build the same
+            # llguidance grammar as a request-local logits processor instead.
+            _mllm_schema_processor = None
+            if engine.is_mllm:
+                from ..api.guided import build_json_schema_logits_processor
+
+                _mllm_schema_processor = await asyncio.to_thread(
+                    build_json_schema_logits_processor,
+                    engine.tokenizer,
+                    json_schema,
+                )
+                if _mllm_schema_processor is not None:
+                    chat_kwargs["grammar_logits_processor"] = _mllm_schema_processor
+                    # The schema grammar owns the complete assistant payload
+                    # from token zero, so it cannot admit a reasoning preamble.
+                    # Keep prompt rendering and output classification aligned.
+                    chat_kwargs["enable_thinking"] = False
+
             # ``supports_guided_generation`` and ``generate_with_schema``
             # are on the BaseEngine contract — defaults are False /
             # NotImplementedError, so engines without guided decoding
@@ -4867,7 +4887,7 @@ async def _create_chat_completion_impl(
                 # so operators see uniform traffic shape across the
                 # guided / postgen-validation / disabled arms.
                 incr_strict_request()
-                if not use_guided:
+                if not use_guided and _mllm_schema_processor is None:
                     # R12-4: pre-R12-4 this branch raised 400
                     # ``guided_extra_required``. That broke
                     # pydantic-ai end-to-end (Astrid r3) — every
@@ -4907,7 +4927,7 @@ async def _create_chat_completion_impl(
                         "Using guided generation for JSON schema "
                         "enforcement (strict=true)"
                     )
-            elif use_guided:
+            elif use_guided or _mllm_schema_processor is not None:
                 logger.info("Using guided generation for JSON schema enforcement")
             else:
                 # Surface the silent-degradation case: client asked for

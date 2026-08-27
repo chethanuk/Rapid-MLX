@@ -745,6 +745,41 @@ def test_step_homogeneous_requests_call_shared_sampler_once(monkeypatch):
     assert sampled.shape == (4,)
 
 
+def test_step_request_processor_sees_compute_ahead_token(monkeypatch):
+    """Constraints see the token already fed into the decode step.
+
+    ``request.output_tokens`` trails ``input_tokens`` by one token in the
+    MLLM compute-ahead pipeline.  Omitting that current token desynchronizes an
+    incremental grammar after its first generated token and makes it fail open.
+    """
+    histories = []
+
+    def constraint(token_ids, logits):
+        histories.append(list(token_ids))
+        constrained = mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
+        constrained[..., 2] = 0
+        return constrained
+
+    monkeypatch.setattr(
+        "vllm_mlx.mllm_batch_generator.make_sampler",
+        lambda **_kwargs: lambda logprobs: mx.argmax(logprobs, axis=-1),
+    )
+    gen = _make_step_stub_generator()
+    request = _make_sampling_request(0, 0.0, 1.0)
+    request.output_tokens = [9]
+    request.logits_processors = [constraint]
+
+    sampled, _ = MLLMBatchGenerator._step(
+        gen,
+        mx.array([[3]], dtype=mx.uint32),
+        cache=[],
+        requests=[request],
+    )
+
+    assert histories == [[9, 3]]
+    assert int(sampled.item()) == 2
+
+
 def test_step_caches_shared_sampler_across_calls(monkeypatch):
     """Repeated steps with the same (temp, top_p) reuse the cached sampler."""
     make_sampler_calls = []

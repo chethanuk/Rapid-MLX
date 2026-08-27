@@ -20,6 +20,7 @@ The route-level tests reuse the lightweight-engine fixture pattern from
 engine, which keeps CI hermetic.
 """
 
+import contextvars
 import json
 import sys
 import types
@@ -326,6 +327,7 @@ class _RecordingEngine:
     """
 
     preserve_native_tool_format = False
+    is_mllm = False
 
     def __init__(self):
         self.calls: list[SimpleNamespace] = []
@@ -350,8 +352,14 @@ def _install_lightweight_engine_modules(monkeypatch):
     base_mod.BaseEngine = _BaseEngine
     base_mod.GenerationOutput = _GenerationOutput
 
+    batched_mod = types.ModuleType("vllm_mlx.engine.batched")
+    batched_mod._admission_engine_context = contextvars.ContextVar(
+        "test_admission_engine", default=None
+    )
+
     monkeypatch.setitem(sys.modules, "vllm_mlx.engine", engine_pkg)
     monkeypatch.setitem(sys.modules, "vllm_mlx.engine.base", base_mod)
+    monkeypatch.setitem(sys.modules, "vllm_mlx.engine.batched", batched_mod)
 
 
 _IMPORTED_UNDER_LIGHTWEIGHT_ENGINE = (
@@ -359,6 +367,7 @@ _IMPORTED_UNDER_LIGHTWEIGHT_ENGINE = (
     "vllm_mlx.config.server_config",
     "vllm_mlx.engine",
     "vllm_mlx.engine.base",
+    "vllm_mlx.engine.batched",
     "vllm_mlx.middleware.auth",
     "vllm_mlx.service.helpers",
     "vllm_mlx.routes.anthropic",
@@ -560,3 +569,33 @@ class TestRouteOutputConfigSurface:
             "output_config.effort leaked into engine chat kwargs — "
             "this field belongs to Pick 1 (concurrent PR)."
         )
+
+
+@pytest.mark.asyncio
+async def test_mllm_output_schema_attaches_request_local_processor(monkeypatch):
+    """Claude-shaped structured output is constrained on the MLLM lane."""
+    from vllm_mlx.api import guided
+    from vllm_mlx.routes import anthropic as anthropic_route
+
+    marker = object()
+    schema = {"type": "object", "properties": {"title": {"type": "string"}}}
+    monkeypatch.setattr(
+        anthropic_route,
+        "extract_json_schema_for_guided",
+        lambda _response_format: schema,
+    )
+    monkeypatch.setattr(
+        guided,
+        "build_json_schema_logits_processor",
+        lambda tokenizer, actual_schema: (
+            marker if tokenizer == "tok" and actual_schema == schema else None
+        ),
+    )
+    request = SimpleNamespace(response_format=object())
+    engine = SimpleNamespace(is_mllm=True, tokenizer="tok")
+    chat_kwargs = {}
+
+    await anthropic_route._attach_mllm_schema_processor(engine, request, chat_kwargs)
+
+    assert chat_kwargs["grammar_logits_processor"] is marker
+    assert chat_kwargs["enable_thinking"] is False
