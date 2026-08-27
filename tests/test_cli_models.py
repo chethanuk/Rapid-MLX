@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import os
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +51,22 @@ def _split_by_modality() -> tuple[dict, dict]:
 def test_gemma4_load_fallback_prints_validated_runtime(monkeypatch, capsys):
     """Execute the submit-load failure path that prints the recovery hint."""
     import concurrent.futures
+
+    # ``_run_submit_flow`` imports the Apple-only engine lazily before it
+    # reaches the model-load boundary.  Keep this recovery-hint test runnable
+    # in the no-MLX Linux matrix by replacing only those lazy imports; none of
+    # their runtime behavior is exercised because ``FailedLoad`` aborts first.
+    engine_core = ModuleType("vllm_mlx.engine_core")
+    engine_core.AsyncEngineCore = object
+    engine_core.EngineConfig = object
+    engine_core._init_mlx_step_thread = lambda: None
+    scheduler = ModuleType("vllm_mlx.scheduler")
+    scheduler.SchedulerConfig = object
+    tokenizer = ModuleType("vllm_mlx.utils.tokenizer")
+    tokenizer.load_model_with_fallback = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "vllm_mlx.engine_core", engine_core)
+    monkeypatch.setitem(sys.modules, "vllm_mlx.scheduler", scheduler)
+    monkeypatch.setitem(sys.modules, "vllm_mlx.utils.tokenizer", tokenizer)
 
     class FailedLoad:
         def result(self):
