@@ -237,3 +237,47 @@ def test_version_subcommand_stays_byte_clean_through_main():
     # blocking fix): a wrapper scraping "rapid-mlx X.Y.Z" stays dependable.
     _rc, out = _run_main(["version"], stdout_tty=True, stdin_tty=True)
     assert "r a p i d - m l x" not in out
+
+
+def test_banner_shows_through_main_on_interactive_subcommand():
+    """The banner's *show* path must be covered all the way through the real
+    ``main()`` too, not just the helper gate — otherwise the cover-py
+    changed-lines gate (--fail-under 100 on the cli.py diff) is red. ``models``
+    is the ideal probe subcommand: it is NOT in ``_BYTE_CLEAN_SUBCOMMANDS``, so
+    it shows the banner on a tty, and its dispatch lists local model aliases —
+    parses with no required args and does no network/model load, so the test
+    is hermetic and fast."""
+    _rc, out = _run_main(["models"], stdout_tty=True, stdin_tty=True)
+    assert "r a p i d - m l x" in out
+    assert "Rapid-MLX" in out
+
+
+def test_banner_color_varies_with_no_color_env_through_main():
+    # On a TTY the banner shows; under NO_COLOR it keeps the mono glyphs but
+    # drops every ANSI escape (opt-out contract), driven through real main().
+    _rc, color = _run_main(["models"], stdout_tty=True, stdin_tty=True)
+    assert "\x1b[" in color
+    _rc, mono = _run_main(
+        ["models"], stdout_tty=True, stdin_tty=True, env={"NO_COLOR": "1"}
+    )
+    assert "r a p i d - m l x" in mono
+    assert "\x1b[" not in mono
+
+
+def test_banner_render_hiccup_never_blocks_the_command(monkeypatch):
+    """The banner is decorative: if its renderer throws (a broken glyph, a
+    font/ANSI edge case), ``main()`` must swallow it and still run the user's
+    real command to completion. This also covers the except guard that the
+    changed-lines coverage gate requires."""
+    import vllm_mlx._banner as banner_mod
+
+    def _boom(version, *, color):
+        raise RuntimeError("agent-injected render failure")
+
+    monkeypatch.setattr(banner_mod, "render_banner", _boom)
+    # ``models`` is on the *show* path (not byte-clean), so render_banner is
+    # actually invoked and raises; ``version`` would never reach it (byte-clean
+    # suppresses before the render), so the guard couldn't be exercised.
+    _rc, out = _run_main(["models"], stdout_tty=True, stdin_tty=True)
+    assert _rc == 0  # the command itself still completes
+    assert "r a p i d - m l x" not in out  # nothing partial was printed
