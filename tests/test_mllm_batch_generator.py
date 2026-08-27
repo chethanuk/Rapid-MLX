@@ -766,7 +766,6 @@ def test_step_request_processor_sees_compute_ahead_token(monkeypatch):
     )
     gen = _make_step_stub_generator()
     request = _make_sampling_request(0, 0.0, 1.0)
-    request.output_tokens = [9]
     request.logits_processors = [constraint]
 
     sampled, _ = MLLMBatchGenerator._step(
@@ -775,8 +774,17 @@ def test_step_request_processor_sees_compute_ahead_token(monkeypatch):
         cache=[],
         requests=[request],
     )
+    history_id = id(request.logits_processor_tokens)
+    MLLMBatchGenerator._step(
+        gen,
+        mx.array([[4]], dtype=mx.uint32),
+        cache=[],
+        requests=[request],
+    )
 
-    assert histories == [[9, 3]]
+    assert histories == [[3], [3, 4]]
+    assert request.logits_processor_tokens == [3, 4]
+    assert id(request.logits_processor_tokens) == history_id
     assert int(sampled.item()) == 2
 
 

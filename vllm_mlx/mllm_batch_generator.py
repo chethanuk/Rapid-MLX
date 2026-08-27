@@ -304,6 +304,7 @@ class MLLMBatchRequest:
     # token suppression).  These use the same ``(token_ids, logits)``
     # contract as the text scheduler and are owned by this request.
     logits_processors: list[Callable] = field(default_factory=list)
+    logits_processor_tokens: list[int] = field(default_factory=list)
     video_fps: float | None = None  # Caller-specified video FPS
     video_max_frames: int | None = None  # Caller-specified max video frames
 
@@ -550,7 +551,7 @@ def _apply_request_logits_processors(
     token_ids: list[int] | None = None,
 ) -> mx.array:
     """Apply request-owned processors using its cumulative output tokens."""
-    history = req.output_tokens if token_ids is None else token_ids
+    history = req.logits_processor_tokens if token_ids is None else token_ids
     for processor in req.logits_processors:
         row_logits = processor(history, row_logits)
     return row_logits
@@ -1539,16 +1540,22 @@ class MLLMBatchGenerator:
             and len(requests) == logits.shape[0]
             and any(request.logits_processors for request in requests)
         ):
+            # Materialize the current token batch once, then keep each
+            # processor's cumulative host history incrementally. Rebuilding
+            # ``[*output_tokens, current.item()]`` per request would copy the
+            # full sequence on every step (quadratic over a long response) and
+            # synchronize the device once per active request.
+            current_tokens = input_tokens[:, -1].tolist()
+            for request, token in zip(requests, current_tokens):
+                if request.logits_processors:
+                    request.logits_processor_tokens.append(int(token))
             logits = mx.concatenate(
                 [
                     (
                         _apply_request_logits_processors(
                             request,
                             logits[i : i + 1],
-                            [
-                                *request.output_tokens,
-                                int(input_tokens[i, -1].item()),
-                            ],
+                            request.logits_processor_tokens,
                         )
                         if request.logits_processors
                         else logits[i : i + 1]

@@ -591,7 +591,7 @@ async def test_mllm_output_schema_attaches_request_local_processor(monkeypatch):
             marker if tokenizer == "tok" and actual_schema == schema else None
         ),
     )
-    request = SimpleNamespace(response_format=object())
+    request = SimpleNamespace(response_format=object(), tools=[])
     engine = SimpleNamespace(is_mllm=True, tokenizer="tok")
     chat_kwargs = {}
 
@@ -599,3 +599,23 @@ async def test_mllm_output_schema_attaches_request_local_processor(monkeypatch):
 
     assert chat_kwargs["grammar_logits_processor"] is marker
     assert chat_kwargs["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_mllm_output_schema_does_not_replace_tool_grammar(monkeypatch):
+    """Combined tools/schema requests retain the existing tool-call contract."""
+    from vllm_mlx.api import guided
+    from vllm_mlx.routes import anthropic as anthropic_route
+
+    monkeypatch.setattr(
+        guided,
+        "build_json_schema_logits_processor",
+        lambda *_args: pytest.fail("whole-response schema must not replace tools"),
+    )
+    request = SimpleNamespace(response_format=object(), tools=[object()])
+    engine = SimpleNamespace(is_mllm=True, tokenizer="tok")
+    chat_kwargs = {}
+
+    await anthropic_route._attach_mllm_schema_processor(engine, request, chat_kwargs)
+
+    assert chat_kwargs == {}

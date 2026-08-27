@@ -106,7 +106,11 @@ def _resolved_sampling_kwargs(openai_request) -> dict:
 
 async def _attach_mllm_schema_processor(engine, openai_request, chat_kwargs) -> None:
     """Keep Anthropic structured output on the MLLM scheduler decode path."""
-    if not engine.is_mllm or openai_request.response_format is None:
+    if (
+        not engine.is_mllm
+        or openai_request.response_format is None
+        or openai_request.tools
+    ):
         return
     schema = extract_json_schema_for_guided(openai_request.response_format)
     if not schema:
