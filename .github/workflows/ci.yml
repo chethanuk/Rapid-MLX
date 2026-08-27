@@ -455,6 +455,12 @@ jobs:
             tests/test_server.py \
             tests/test_paged_cache.py \
             tests/test_mllm_continuous_batching.py \
+            tests/test_mllm_batch_generator.py \
+            tests/test_mllm_penalty_passthrough.py \
+            tests/test_guided.py \
+            tests/test_chat_streaming_guided.py \
+            tests/test_anthropic_output_config.py \
+            tests/test_response_format_json_schema_strict.py \
             tests/test_mllm_cache.py \
             tests/test_memory_cache.py \
             tests/test_optimizations.py \
