@@ -380,6 +380,26 @@ class TestBodyOnly:
         assert "## [cl_description_quality]" in captured.err
 
 
+class TestBaseOverrideValidation:
+    def test_bad_base_sha_fails_fast_with_clear_message(self, repo_root_cwd, capsys):
+        """An explicit ``--base <sha>`` that Git can't resolve must fail fast
+        with a fix message — a bad SHA silently degrading the review/
+        diff-coverage base to whatever the fallback picks is exactly the
+        noise the override exists to avoid."""
+        # repo_root_cwd is a non-git tmp dir → `git cat-file -e <badsha>`
+        # exits non-zero, the same as a genuinely bad SHA in a real repo.
+        rc = run_pipeline(
+            pr_number=999,
+            base="0123456789abcdef0123456789abcdef01234567",
+            fail_fast=True,
+        )
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "--base is not an object Git can resolve" in captured.err
+        # Fail fast: no step (not even fetch) got to run.
+        assert "## [fetch]" not in captured.err
+
+
 class TestSelectModels:
     """Pin the candidate-selection contract for ``stress_e2e_bench``.
 

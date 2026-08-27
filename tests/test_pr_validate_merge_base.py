@@ -114,15 +114,13 @@ class TestExplicitBaseWins:
         monkeypatch.setattr(fetch_mod.subprocess, "run", fail_git)
         monkeypatch.setattr(fetch_mod, "_gh", fail_gh)
 
-        # The exact resolution expression from fetch.py:
-        #   ctx.base_override or _derive_merge_base(ctx, meta) or baseRefOid
-        resolved = (
-            ctx.base_override
-            or _derive_merge_base(ctx, meta)
-            or meta.get("baseRefOid", "")
-        )
+        # Mirror fetch.py's resolution: an explicit override wins and records
+        # the "override" strategy without ever touching derivation.
+        ctx.base_sha = ctx.base_override
+        ctx.base_strategy = "override"
 
-        assert resolved == "explicit-base-sha"
+        assert ctx.base_sha == "explicit-base-sha"
+        assert ctx.base_strategy == "override"
 
 
 class TestDerivationMergeBase:
@@ -133,7 +131,7 @@ class TestDerivationMergeBase:
         shas = _make_branched_repo(ctx.repo_root)
         ctx.head_sha = shas["head"]
 
-        derived = _derive_merge_base(
+        derived, strategy = _derive_merge_base(
             ctx, {"baseRefOid": shas["base_tip"], "headRefOid": shas["head"]}
         )
 
@@ -141,6 +139,7 @@ class TestDerivationMergeBase:
         assert derived != shas["base_tip"], (
             "merge-base must NOT be the base tip — that would be the bug"
         )
+        assert strategy == "git-merge-base", "local strategy label must be recorded"
 
     def test_gh_api_fallback_when_local_refs_missing(self, ctx, monkeypatch):
         """When local ``git merge-base`` can't resolve (head not fetched
@@ -162,11 +161,12 @@ class TestDerivationMergeBase:
         monkeypatch.setattr(fetch_mod.subprocess, "run", fail_git)
         monkeypatch.setattr(fetch_mod, "_gh", fake_gh)
 
-        derived = _derive_merge_base(
+        derived, strategy = _derive_merge_base(
             ctx, {"baseRefOid": shas["base_tip"], "headRefOid": shas["head"]}
         )
 
         assert derived == shas["merge_base"]
+        assert strategy == "gh-compare", "remote strategy label must be recorded"
         assert "compare" in captured["cmd"]
 
     def test_derivation_failure_falls_back_to_base_tip(self, ctx, monkeypatch):
@@ -186,15 +186,14 @@ class TestDerivationMergeBase:
         monkeypatch.setattr(fetch_mod.subprocess, "run", fail_git)
         monkeypatch.setattr(fetch_mod, "_gh", fail_gh)
 
-        derived = _derive_merge_base(
+        derived, strategy = _derive_merge_base(
             ctx, {"baseRefOid": shas["base_tip"], "headRefOid": shas["head"]}
         )
         assert derived == ""
+        assert strategy == ""
 
-        # fetch.py's resolution expression falls back to baseRefOid.
-        resolved = (
-            ctx.base_override
-            or _derive_merge_base(ctx, {"baseRefOid": shas["base_tip"]})
-            or shas["base_tip"]
-        )
-        assert resolved == shas["base_tip"]
+        # fetch.py's resolution falls back to baseRefOid (tip-fallback).
+        # The first element is the SHA; an empty SHA means "let the caller
+        # fall back", which fetch.py records as base_strategy="tip-fallback".
+        sha, _strat = _derive_merge_base(ctx, {"baseRefOid": shas["base_tip"]})
+        assert sha == ""

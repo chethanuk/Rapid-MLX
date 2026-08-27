@@ -15,8 +15,10 @@ PRs without a concrete necessity may be closed. See docs/development/pr_merge_so
 ## Non-goals
 
 <!--
-What this PR deliberately does NOT do, so reviewers don't ask "why didn't you also fix X".
-Optional when the intent is obvious; required for large or refactor-like changes.
+Required — part of the six-field PR contract (Why / Scope / Non-goals / Acceptance /
+Verification / Behaviour delta). What this PR deliberately does NOT do, so reviewers
+don't ask "why didn't you also fix X". Say it plainly even when it seems obvious;
+"none" is a valid answer for a tiny change.
 -->
 
 ## Acceptance
@@ -35,7 +37,7 @@ Prefer concrete, testable statements tied to the tests/verification below.
 <!--
 Required when this PR changes a DEFAULT, a running lane, or a policy that users or the release pipeline depend on.
 Otherwise delete this section. Name the before → after so a reader can see the intended behaviour shift at a glance.
-Example: "`rapid-mlx serve` default port 8000 → 8080 on `qwen3.5-*` models." / "default review cap: 2 rounds → 3 rounds."
+Example: "`rapid-mlx serve` default port 8000 → 8080 on `qwen3.5-*` models."
 -->
 
 ## AI assistance disclosure

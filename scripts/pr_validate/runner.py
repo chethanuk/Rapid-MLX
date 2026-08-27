@@ -10,6 +10,7 @@ a step: write the module under ``steps/``, import it here, append to
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -142,6 +143,25 @@ def run_pipeline(
             pipeline = [s for s in pipeline if s.name not in dropped]
 
     ctx = Context(pr_number=pr_number, verbose=verbose, base_override=base)
+    if base:
+        # Validate an explicit ``--base <sha>`` fails fast and clearly: a bad
+        # SHA silently degrades review/diff-coverage to whatever the fallback
+        # resolves, which is exactly the noise the override exists to avoid.
+        probe = subprocess.run(
+            ["git", "cat-file", "-e", base],
+            capture_output=True,
+            text=True,
+            cwd=str(ctx.repo_root),
+        )
+        if probe.returncode != 0:
+            print(
+                "error: --base is not an object Git can resolve: "
+                f"{base!r}\n  -> confirm the SHA exists in this clone "
+                "(git cat-file -e <sha>), or drop --base and let the "
+                "fetch step derive the exact merge-base automatically.",
+                file=sys.stderr,
+            )
+            return 1
     run_id = (
         f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
         f"{os.getpid()}-{time.time_ns()}"

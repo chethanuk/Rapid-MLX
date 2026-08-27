@@ -174,9 +174,10 @@ PRs by design — re-open or rebase first.
 
 ### `test_plan_check` (step 0.5)
 
-Reads the PR body for a `## Test plan` checklist. If any item is
-unchecked (`- [ ]`) the step fails — the author hasn't finished what
-they said they'd do. Lesson from #427.
+Scans the PR body for unchecked task items (`- [ ]`, Markdown task list)
+anywhere in any section — the `## Verification` list most often — and
+fails if any is left unchecked: the author hasn't finished what they said
+they'd do. Lesson from #427.
 
 ### `cl_description_quality` (step 0.7)
 

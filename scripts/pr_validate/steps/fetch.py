@@ -83,11 +83,20 @@ class FetchStep(Step):
         #      merge-base``, falling back to ``gh api`` compare);
         #   3. else fall back to ``baseRefOid`` (the base-branch tip) so a
         #      best-effort derivation failure never breaks fail-fast fetch.
-        ctx.base_sha = (
-            ctx.base_override
-            or _derive_merge_base(ctx, meta)
-            or meta.get("baseRefOid", "")
-        )
+        # ``ctx.base_strategy`` records which path resolved it (see below),
+        # and the run log / scorecard shows it so reviewers can see exactly
+        # what the diff-coverage and stress-A/B base was.
+        if ctx.base_override:
+            ctx.base_sha = ctx.base_override
+            ctx.base_strategy = "override"
+        else:
+            sha, strategy = _derive_merge_base(ctx, meta)
+            if sha:
+                ctx.base_sha = sha
+                ctx.base_strategy = strategy
+            else:
+                ctx.base_sha = meta.get("baseRefOid", "")
+                ctx.base_strategy = "tip-fallback"
         ctx.additions = meta.get("additions", 0)
         ctx.deletions = meta.get("deletions", 0)
         ctx.files_changed = sorted(
@@ -142,10 +151,14 @@ class FetchStep(Step):
                 "rebase before validating",
             )
 
+        base_desc = ""
+        if ctx.base_sha:
+            base_strat = ctx.base_strategy or "unknown"
+            base_desc = f" | base {ctx.base_sha[:10]} ({base_strat})"
         ctx.run_log(
             f"fetched: '{ctx.pr_title[:60]}' by {ctx.pr_author} "
             f"({ctx.additions}+/{ctx.deletions}- LOC, "
-            f"{len(ctx.files_changed)} files, blast={ctx.blast_radius})"
+            f"{len(ctx.files_changed)} files, blast={ctx.blast_radius}{base_desc})"
         )
 
         return StepResult(
@@ -171,11 +184,12 @@ def _gh(cmd: str) -> str:
     return result.stdout
 
 
-def _derive_merge_base(ctx: Context, meta: dict) -> str:
-    """Return the PR's exact merge-base SHA, or ``""`` if undeterminable.
+def _derive_merge_base(ctx: Context, meta: dict) -> tuple[str, str]:
+    """Return ``(sha, strategy)`` for the PR's exact merge-base.
 
-    Best-effort by design — a derivation failure must never sink the
-    fail-fast fetch step; callers fall back to ``baseRefOid``.
+    Returns ``("", "")`` if undetermined. Best-effort by design — a
+    derivation failure must never sink the fail-fast fetch step; callers
+    fall back to ``baseRefOid``.
 
     The merge-base is the common ancestor of the PR head and its base
     branch — the point the PR actually forked from. Using it (rather
@@ -183,18 +197,20 @@ def _derive_merge_base(ctx: Context, meta: dict) -> str:
     reviewer's "changed lines" set limited to THIS PR's edits even after
     the base branch has moved on.
 
-    Two strategies, in order:
-      1. Local ``git merge-base <base> <head>`` — cheapest and exact, but
-         needs both commits present in the local clone (they are whenever
-         the validator's clone has fetched the PR head + base).
-      2. ``gh api repos/<repo>/compare/<base>...<head>`` — the compare
-         API returns the ``merge_base_commit.sha`` and works even when the
+    Two strategies, in order (the returned label is logged so the
+    scorecard shows which one resolved the base):
+      1. ``git-merge-base`` — local ``git merge-base <base> <head>``,
+         cheapest and exact, but needs both commits present in the local
+         clone (they are whenever the validator's clone has fetched the
+         PR head + base).
+      2. ``gh-compare`` — ``gh api repos/<repo>/compare/<base>...<head>``
+         returns the ``merge_base_commit.sha`` and works even when the
          head commit isn't fetched locally (the common fork-PR case).
     """
     base_tip = meta.get("baseRefOid", "") or ctx.base_branch
     head = ctx.head_sha or meta.get("headRefOid", "")
     if not base_tip or not head:
-        return ""
+        return "", ""
 
     # 1) Local git — exact and dependency-free. cwd is the repo root.
     try:
@@ -207,7 +223,7 @@ def _derive_merge_base(ctx: Context, meta: dict) -> str:
         )
         sha = result.stdout.strip()
         if sha:
-            return sha
+            return sha, "git-merge-base"
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
@@ -218,8 +234,8 @@ def _derive_merge_base(ctx: Context, meta: dict) -> str:
         )
         sha = out.strip()
         if sha:
-            return sha
+            return sha, "gh-compare"
     except subprocess.CalledProcessError:
         pass
 
-    return ""
+    return "", ""
