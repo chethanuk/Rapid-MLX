@@ -252,7 +252,10 @@ final class ResidentLoadRejectProtocol: URLProtocol, @unchecked Sendable {
 @MainActor
 @Suite("Resident-load rejection feedback", .serialized)
 struct ResidentLoadFeedbackTests {
-    @Test("Resident admission publishes alias-scoped working state immediately")
+    @Test(
+        "Resident admission publishes alias-scoped working state immediately",
+        .timeLimit(.minutes(1))
+    )
     func publishesResidentLoadInFlightState() async {
         defer { ResidentLoadRejectProtocol.reset() }
         let server = makeServer()
@@ -279,7 +282,10 @@ struct ResidentLoadFeedbackTests {
     /// The per-alias ``residentLoadFailure(for:)`` lookup did not exist before
     /// this fix, so this test does not merely fail — it does not compile
     /// against old `main`, guaranteeing it cannot silently rot into a pass.
-    @Test("A rejected resident load publishes the engine's reason")
+    @Test(
+        "A rejected resident load publishes the engine's reason",
+        .timeLimit(.minutes(1))
+    )
     func publishesRejectedLoadFailure() async {
         defer { ResidentLoadRejectProtocol.reset() }
         ResidentLoadRejectProtocol.rejectLoad = true
@@ -297,7 +303,10 @@ struct ResidentLoadFeedbackTests {
 
     /// A successful in-process load clears any prior rejection, so the banner
     /// does not keep showing last round's failure once the model loads.
-    @Test("A successful resident load clears a prior rejection")
+    @Test(
+        "A successful resident load clears a prior rejection",
+        .timeLimit(.minutes(1))
+    )
     func successfulLoadClearsRejection() async {
         defer { ResidentLoadRejectProtocol.reset() }
         // First a rejection (sets the published failure)…
@@ -314,7 +323,10 @@ struct ResidentLoadFeedbackTests {
         #expect(server.residentLoadFailure(for: "flux2-klein-4b") == nil)
     }
 
-    @Test("Assistant resident load persists authoritative catalog provenance without a hint")
+    @Test(
+        "Assistant resident load persists authoritative catalog provenance without a hint",
+        .timeLimit(.minutes(1))
+    )
     func residentAssistantPersistsProbedChatAlias() async throws {
         defer { ResidentLoadRejectProtocol.reset() }
         ResidentLoadRejectProtocol.rejectLoad = false
@@ -358,7 +370,10 @@ struct ResidentLoadFeedbackTests {
     /// successfully loading, and a rejection for model A must not surface for
     /// model B. Failures are keyed per alias, so concurrent/interleaved loads
     /// of different models each keep their own outcome.
-    @Test("Rejections are independent per alias (no cross-talk)")
+    @Test(
+        "Rejections are independent per alias (no cross-talk)",
+        .timeLimit(.minutes(1))
+    )
     func rejectionsArePerAliasIndependent() async {
         defer { ResidentLoadRejectProtocol.reset() }
         // Only model A is rejected; model B and a second attempt at A that
@@ -393,7 +408,10 @@ struct ResidentLoadFeedbackTests {
     /// (in ``startLoading``, steering clear of the main actor) while a second,
     /// newer attempt completes first — reproducing exactly the interleaving
     /// where latest-attempt-wins must hold.
-    @Test("An older rejection cannot clobber a newer success for the same alias")
+    @Test(
+        "An older rejection cannot clobber a newer success for the same alias",
+        .timeLimit(.minutes(1))
+    )
     func olderRejectionDoesNotClobberNewerSuccess() async throws {
         defer { ResidentLoadRejectProtocol.reset() }
         let server = makeServer()
@@ -431,7 +449,10 @@ struct ResidentLoadFeedbackTests {
     /// attempt's rejection. The per-alias dictionary allows an old success to
     /// wipe a fresh failure unless the return-time write is also guarded by
     /// which attempt is newest (#1838 follow-up).
-    @Test("An older success cannot clear a newer rejection for the same alias")
+    @Test(
+        "An older success cannot clear a newer rejection for the same alias",
+        .timeLimit(.minutes(1))
+    )
     func olderSuccessDoesNotClearNewerRejection() async throws {
         defer { ResidentLoadRejectProtocol.reset() }
         let server = makeServer()
@@ -492,6 +513,15 @@ struct ResidentLoadFeedbackTests {
             binaryPath: binaryPath,
             sessionDefaults: sessionDefaults
         )
+        // Resident-load feedback is independent of memory admission. Pin a
+        // roomy host so low-RAM CI runners cannot park `ensureServing` on a
+        // confirmation dialog that this headless suite intentionally lacks.
+        server.memorySnapshotProvider = {
+            MemoryProbe.Snapshot(
+                totalBytes: 64 * 1_024 * 1_024 * 1_024,
+                usedBytes: 0
+            )
+        }
         server._testSetResidencyClient(client)
         server._testInstallChild(ProcessGroupChild.testStub())
         return server
