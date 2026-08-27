@@ -394,17 +394,6 @@ jobs:
               raise SystemExit("producer run identity mismatch: " + ", ".join(failed))
           print(run["run_attempt"])
           PY
-          RUN_ATTEMPT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_attempt"])' "$RUN_JSON")"
-          JOBS="$RUNNER_TEMP/producer-jobs.json"
-          gh api "repos/${REPO}/actions/runs/${PROMOTE_RUN_ID}/jobs?filter=latest&per_page=100" > "$JOBS"
-          python3 - "$JOBS" <<'PY'
-          import json, pathlib, sys
-          jobs = json.loads(pathlib.Path(sys.argv[1]).read_text()).get("jobs")
-          matches = [j for j in jobs or [] if j.get("name") == "desktop-candidate-gate"]
-          if len(matches) != 1 or matches[0].get("conclusion") != "success":
-              raise SystemExit("producer desktop-candidate-gate is not exactly one successful job")
-          PY
-          echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#rapid-mac-v}" >> "$GITHUB_OUTPUT"
 
       - name: Download exact SHA-labelled pre-tag candidate
@@ -418,14 +407,34 @@ jobs:
 
       - name: Verify provenance, signing, notarization, and tag binding
         env:
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           PROMOTE_RUN_ID: ${{ inputs.promote_run_id }}
           PROMOTE_SHA: ${{ inputs.promote_sha }}
-          RUN_ATTEMPT: ${{ steps.producer.outputs.run_attempt }}
           VERSION: ${{ steps.producer.outputs.version }}
         run: |
           set -euo pipefail
+          RUN_ATTEMPT="$(python3 - <<'PY'
+          import json
+          manifest = json.load(open("candidate/desktop-promotion-manifest.json"))
+          attempt = (manifest.get("producer") or {}).get("run_attempt")
+          if type(attempt) is not int or attempt < 1:
+              raise SystemExit("candidate manifest has no positive producer run_attempt")
+          print(attempt)
+          PY
+          )"
+          JOBS="$RUNNER_TEMP/producer-jobs.json"
+          gh api \
+            "repos/${REPO}/actions/runs/${PROMOTE_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            > "$JOBS"
+          python3 - "$JOBS" <<'PY'
+          import json, pathlib, sys
+          jobs = json.loads(pathlib.Path(sys.argv[1]).read_text()).get("jobs")
+          matches = [j for j in jobs or [] if j.get("name") == "desktop-candidate-gate"]
+          if len(matches) != 1 or matches[0].get("conclusion") != "success":
+              raise SystemExit("artifact-producing desktop-candidate-gate attempt is not exactly one successful job")
+          PY
           python3 scripts/desktop_promotion.py verify \
             --bundle candidate \
             --manifest candidate/desktop-promotion-manifest.json \

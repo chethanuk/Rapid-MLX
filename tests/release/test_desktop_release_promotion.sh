@@ -146,12 +146,14 @@ contains "$TAGSTEP" 'ACCEPTED_SHA: ${{ needs.release-prep.outputs.accepted_sha }
   "tag step claims at the pre-approval accepted SHA"
 contains "$TAGSTEP" 'scripts/tag_desktop_app.sh' "tag step invokes the tagged script"
 lacks "$TAGSTEP" "git push" "tag step never git pushes"
-contains "$TAGSTEP" 'gh workflow run rapid-mac-release.yml' \
+contains "$TAGSTEP" 'actions/workflows/rapid-mac-release.yml/dispatches' \
   "tag claim is followed by an explicit Desktop promotion dispatch"
-contains "$TAGSTEP" '-f "promote_run_id=$PRODUCER_RUN_ID"' \
+contains "$TAGSTEP" 'promote_run_id: $run_id' \
   "promotion dispatch carries the exact producer run"
-contains "$TAGSTEP" '-f "promote_sha=$ACCEPTED_SHA"' \
+contains "$TAGSTEP" 'promote_sha: $sha' \
   "promotion dispatch carries the accepted source SHA"
+contains "$TAGSTEP" 'desktop_run_id=$DESKTOP_RUN_ID' \
+  "promotion dispatch records the exact child run ID"
 
 CANDIDATE=$(sed -n '/name: Stage exact pre-tag Desktop candidate bundle/,/^  dry-run-summary:/p' "$AUTO_RELEASE")
 contains "$CANDIDATE" 'desktop_promotion.py create' \
@@ -166,6 +168,10 @@ contains "$PROMOTE" 'run-id: ${{ inputs.promote_run_id }}' \
   "publisher downloads from the exact producer run"
 contains "$PROMOTE" 'desktop_promotion.py verify' \
   "publisher verifies every promoted byte and producer identity"
+contains "$PROMOTE" 'manifest.get("producer")' \
+  "publisher reads the artifact-producing attempt from the downloaded manifest"
+contains "$PROMOTE" '/attempts/${RUN_ATTEMPT}/jobs' \
+  "publisher verifies the candidate job from the artifact-producing attempt"
 contains "$PROMOTE" 'desktop_manifest.py verify' \
   "publisher re-verifies the DMG manifest against its extracted app"
 contains "$PROMOTE" 'xcrun stapler validate' \
@@ -189,6 +195,10 @@ contains "$PUBLISH_WAIT" 'APP_TAG: rapid-mac-v${{ needs.detect.outputs.version }
   "publication wait binds the exact Desktop tag"
 contains "$PUBLISH_WAIT" 'ACCEPTED_SHA: ${{ needs.release-prep.outputs.accepted_sha }}' \
   "publication wait binds the validated candidate SHA"
+contains "$PUBLISH_WAIT" 'EXPECTED_RUN_ID: ${{ steps.desktop_dispatch.outputs.desktop_run_id }}' \
+  "publication wait binds the exact dispatched child run"
+contains "$PUBLISH_WAIT" '--expected-run-id "$EXPECTED_RUN_ID"' \
+  "publication helper receives that exact child run ID"
 contains "$PUBLISH_WAIT" '--workflow rapid-mac-release.yml' \
   "publication wait binds the expected Desktop workflow"
 contains "$PUBLISH_WAIT" 'timeout-minutes: 360' \

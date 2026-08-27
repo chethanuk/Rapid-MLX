@@ -926,18 +926,28 @@ jobs:
           bash scripts/tag_desktop_app.sh
 
       - name: Dispatch exact Desktop candidate promotion
+        id: desktop_dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           APP_TAG: rapid-mac-v${{ needs.detect.outputs.version }}
           ACCEPTED_SHA: ${{ needs.release-prep.outputs.accepted_sha }}
           PRODUCER_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          gh workflow run rapid-mac-release.yml \
-            --ref "$APP_TAG" \
-            -f "promote_run_id=$PRODUCER_RUN_ID" \
-            -f "promote_sha=$ACCEPTED_SHA"
-          echo "::notice::dispatched exact Desktop promotion from auto-release run ${PRODUCER_RUN_ID} at ${ACCEPTED_SHA}"
+          PAYLOAD="$(jq -nc \
+            --arg ref "$APP_TAG" \
+            --arg run_id "$PRODUCER_RUN_ID" \
+            --arg sha "$ACCEPTED_SHA" \
+            '{ref: $ref, inputs: {promote_run_id: $run_id, promote_sha: $sha}}')"
+          RESPONSE="$(gh api \
+            --method POST \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${REPO}/actions/workflows/rapid-mac-release.yml/dispatches" \
+            --input - <<<"$PAYLOAD")"
+          DESKTOP_RUN_ID="$(jq -er '.workflow_run_id | select(type == "number" and . > 0)' <<<"$RESPONSE")"
+          echo "desktop_run_id=$DESKTOP_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::dispatched exact Desktop promotion run ${DESKTOP_RUN_ID} from auto-release run ${PRODUCER_RUN_ID} at ${ACCEPTED_SHA}"
 
       # An existing same-SHA tag is an idempotent success for the tag claim, but
       # it does not prove the Desktop workflow ever completed. Wait for the exact
@@ -951,12 +961,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_TAG: rapid-mac-v${{ needs.detect.outputs.version }}
           ACCEPTED_SHA: ${{ needs.release-prep.outputs.accepted_sha }}
+          EXPECTED_RUN_ID: ${{ steps.desktop_dispatch.outputs.desktop_run_id }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           python3 scripts/check_desktop_publish.py \
             --app-tag "$APP_TAG" \
             --accepted-sha "$ACCEPTED_SHA" \
+            --expected-run-id "$EXPECTED_RUN_ID" \
             --repo "$REPO" \
             --workflow rapid-mac-release.yml \
             --deadline-min 350 \

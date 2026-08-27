@@ -227,14 +227,16 @@ lacks "$APP_STEP" "TAG_APPROVED" \
 lacks "$APP_STEP" "git push" "app tag step does not git push the tag"
 
 DISPATCH_STEP=$(sed -n '/name: Dispatch exact Desktop candidate promotion/,/name: Wait for exact Desktop/p' "$WORKFLOW")
-contains "$DISPATCH_STEP" 'gh workflow run rapid-mac-release.yml' \
-  "auto-release explicitly dispatches the Desktop publisher"
-contains "$DISPATCH_STEP" '--ref "$APP_TAG"' \
+contains "$DISPATCH_STEP" 'actions/workflows/rapid-mac-release.yml/dispatches' \
+  "auto-release explicitly dispatches the Desktop publisher through the API"
+contains "$DISPATCH_STEP" '--arg ref "$APP_TAG"' \
   "dispatch is bound to the immutable Desktop tag"
-contains "$DISPATCH_STEP" '-f "promote_run_id=$PRODUCER_RUN_ID"' \
+contains "$DISPATCH_STEP" 'promote_run_id: $run_id' \
   "dispatch passes the exact producer run"
-contains "$DISPATCH_STEP" '-f "promote_sha=$ACCEPTED_SHA"' \
+contains "$DISPATCH_STEP" 'promote_sha: $sha' \
   "dispatch passes the exact accepted SHA"
+contains "$DISPATCH_STEP" '.workflow_run_id' \
+  "dispatch captures the exact child run ID returned by GitHub"
 
 # Everything that can refuse the app half has to happen BEFORE the engine
 # Release is published. Publishing is the irreversible step: once the Release
