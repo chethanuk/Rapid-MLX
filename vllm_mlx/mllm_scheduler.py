@@ -491,8 +491,9 @@ class MLLMScheduler:
                     if isinstance(item, int) and not isinstance(item, bool)
                 )
 
-        _add_ids(_config_value(self.model_config, "eos_token_id"))
-        text_config = _config_value(self.model_config, "text_config")
+        model_config = getattr(self, "model_config", None)
+        _add_ids(_config_value(model_config, "eos_token_id"))
+        text_config = _config_value(model_config, "text_config")
         _add_ids(_config_value(text_config, "eos_token_id"))
 
         return stop_tokens
