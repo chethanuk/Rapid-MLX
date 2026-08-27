@@ -55,6 +55,7 @@ def test_scheduler_json_schema_processor_forces_eos_after_complete_value():
         },
     )
     assert processor is not None
+    processor._stop_ids = (-1, tokenizer.eos_token_id)
 
     prompt = tokenizer.encode("title:", add_special_tokens=False)
     processor(prompt, mx.zeros((1, len(tokenizer))))
@@ -64,6 +65,7 @@ def test_scheduler_json_schema_processor_forces_eos_after_complete_value():
     eos_id = tokenizer.eos_token_id
 
     assert math.isfinite(row[eos_id])
+    assert not math.isfinite(row[-1])
     assert all(
         not math.isfinite(value) for idx, value in enumerate(row) if idx != eos_id
     )

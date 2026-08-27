@@ -2534,7 +2534,7 @@ class GrammarLogitsProcessor:
                 import mlx.core as mx
 
                 allowed = [
-                    token for token in self._stop_ids if token < logits.shape[-1]
+                    token for token in self._stop_ids if 0 <= token < logits.shape[-1]
                 ]
                 if allowed:
                     out = mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
