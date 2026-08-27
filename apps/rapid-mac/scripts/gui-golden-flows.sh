@@ -259,8 +259,25 @@ class Sink(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
-        record = {"method": "POST", "path": self.path, "bytes": length}
+        payload = self.rfile.read(length)
+        event = None
+        timestamp = None
+        try:
+            envelope = json.loads(payload)
+            batch = envelope.get("batch") if isinstance(envelope, dict) else None
+            first = batch[0] if isinstance(batch, list) and batch else None
+            if isinstance(first, dict):
+                event = first.get("event") if isinstance(first.get("event"), str) else None
+                timestamp = first.get("timestamp") if isinstance(first.get("timestamp"), str) else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        record = {
+            "method": "POST",
+            "path": self.path,
+            "bytes": length,
+            "event": event,
+            "timestamp": timestamp,
+        }
         with write_lock, open(request_log, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
             stream.flush()
@@ -325,6 +342,7 @@ assert_no_telemetry_requests() {
 
 assert_one_telemetry_request() {
     local stage="$1"
+    local not_before="$2"
     local evidence="$OUT/telemetry-$stage.json"
     local count=0
     for _ in {1..80}; do
@@ -336,17 +354,21 @@ assert_one_telemetry_request() {
         sleep 0.05
     done
     jq -s --arg stage "$stage" --arg log "$TELEMETRY_SINK_LOG" \
+        --arg not_before "$not_before" \
         '{stage: $stage, request_count: length, request_log: $log,
-          requests: map({method, path, bytes})}' \
+          not_before: $not_before,
+          requests: map({method, path, bytes, event, timestamp})}' \
         "$TELEMETRY_SINK_LOG" > "$evidence"
     [[ "$count" == 1 ]] \
         || die "Settings opt-in did not produce exactly one telemetry request during $stage"
     jq -e '(.request_count == 1)
               and (.requests[0].method == "POST")
               and (.requests[0].path == "/v1/events")
-              and (.requests[0].bytes > 0)' \
+              and (.requests[0].bytes > 0)
+              and (.requests[0].event == "session_start")
+              and (.requests[0].timestamp >= .not_before)' \
         "$evidence" >/dev/null \
-        || die "Settings opt-in reached the sink with an invalid request during $stage"
+        || die "Settings opt-in did not produce a new session_start during $stage"
 }
 
 finish() {
@@ -1504,10 +1526,17 @@ flow_fresh_install() {
     [[ "$(element_field "$OUT/telemetry-settings-privacy.json" \
         Settings.Privacy.TelemetryToggle value)" == "0" ]] \
         || die "declined telemetry decision was not still off in Settings"
+    # TelemetryEvent timestamps have whole-second precision. Cross a UTC
+    # second boundary before the toggle so a request created during launch but
+    # delayed in URLSession cannot masquerade as this positive control.
+    local boundary_second opt_in_not_before
+    boundary_second="$(date -u +%s)"
+    while [[ "$(date -u +%s)" == "$boundary_second" ]]; do sleep 0.05; done
+    opt_in_not_before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     press "$OUT/telemetry-settings-privacy.json" Settings.Privacy.TelemetryToggle \
         "$OUT/telemetry-settings-opt-in.json" \
         || die "Settings telemetry opt-in is not pressable"
-    assert_one_telemetry_request settings-opt-in
+    assert_one_telemetry_request settings-opt-in "$opt_in_not_before"
     cleanup_persona
     cleanup_telemetry_sink
 }

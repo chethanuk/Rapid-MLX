@@ -94,7 +94,11 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
 
     assert 'LoopbackSinkServer(("127.0.0.1", 0), Sink)' in sink
     assert "HTTPServer.server_bind" in sink and "getfqdn" in sink
-    assert 'record = {"method": "POST", "path": self.path, "bytes": length}' in sink
+    assert '"method": "POST"' in sink
+    assert '"path": self.path' in sink
+    assert '"bytes": length' in sink
+    assert '"event": event' in sink
+    assert '"timestamp": timestamp' in sink
     assert 'RAPID_MLX_TELEMETRY_ENDPOINT="http://127.0.0.1:' in fresh_install
     expected_stages = (
         "before-onboarding",
@@ -126,6 +130,9 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
     )[0]
     assert '.requests[0].path == "/v1/events"' in positive_control
     assert ".requests[0].bytes > 0" in positive_control
+    assert '.requests[0].event == "session_start"' in positive_control
+    assert ".requests[0].timestamp >= .not_before" in positive_control
+    assert "opt_in_not_before" in fresh_install
 
 
 def test_each_fault_fails_with_its_own_message():
