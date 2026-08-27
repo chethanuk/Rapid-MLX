@@ -87,6 +87,38 @@ def test_ax_escape_posts_a_real_key_without_answering_nonmodal_consent():
     assert "dismissed telemetry invitation returned after relaunch" in fresh_install
 
 
+def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
+    source = HARNESS.read_text()
+    sink = source.split("start_telemetry_sink() {", 1)[1].split("\n}", 1)[0]
+    fresh_install = source.split("flow_fresh_install() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'LoopbackSinkServer(("127.0.0.1", 0), Sink)' in sink
+    assert "HTTPServer.server_bind" in sink and "getfqdn" in sink
+    assert 'record = {"method": "POST", "path": self.path, "bytes": length}' in sink
+    assert 'RAPID_MLX_TELEMETRY_ENDPOINT="http://127.0.0.1:' in fresh_install
+    expected_stages = (
+        "before-onboarding",
+        "before-first-value",
+        "post-value-before-decision",
+        "after-decline",
+        "declined-relaunch",
+    )
+    for stage in expected_stages:
+        assert f"assert_no_telemetry_requests {stage}" in fresh_install
+
+    assert "asked for telemetry before the first working feature" in fresh_install
+    assert "did not show exactly one telemetry invitation" in fresh_install
+    assert fresh_install.index("assert_no_telemetry_requests before-first-value") < (
+        fresh_install.index('send_prompt "Say hello in one short sentence."')
+    )
+    assert fresh_install.index(
+        "assert_no_telemetry_requests post-value-before-decision"
+    ) < fresh_install.index("TelemetryConsent.PostValue.Decline")
+    assert fresh_install.index("relaunch_persona") < fresh_install.index(
+        "assert_no_telemetry_requests declined-relaunch"
+    )
+
+
 def test_each_fault_fails_with_its_own_message():
     source = DRIVER.read_text()
     assert source.count("fail(") >= 4
