@@ -788,6 +788,42 @@ def test_step_request_processor_sees_compute_ahead_token(monkeypatch):
     assert int(sampled.item()) == 2
 
 
+def test_prefill_first_token_uses_request_logits_processor(monkeypatch):
+    """A request constraint owns token zero, not only steady-state decode."""
+    from mlx_lm.models import cache as cache_module
+
+    class _Cache:
+        def merge(self, _caches):
+            return self
+
+    monkeypatch.setattr(cache_module, "make_prompt_cache", lambda _model: [_Cache()])
+    monkeypatch.setattr(
+        "vllm_mlx.mllm_batch_generator.first_incompatible_mllm_cache_type",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.mllm_batch_generator.make_sampler",
+        lambda **_kwargs: lambda logprobs: mx.argmax(logprobs, axis=-1),
+    )
+
+    model = _RecordingModel()
+    gen = _make_generator(model)
+    gen._preprocess_request = lambda _request: None
+    gen._run_vision_encoding = lambda _request, cache: mx.zeros((1, 1, 4))
+    request = _make_request(pixel_values=None)
+
+    def _force_token_two(_token_ids, logits):
+        constrained = mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
+        constrained[..., 2] = 0
+        return constrained
+
+    request.logits_processors = [_force_token_two]
+
+    batch = gen._process_prompts([request])
+
+    assert int(batch.y.item()) == 2
+
+
 def test_step_caches_shared_sampler_across_calls(monkeypatch):
     """Repeated steps with the same (temp, top_p) reuse the cached sampler."""
     make_sampler_calls = []

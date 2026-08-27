@@ -35,6 +35,27 @@ requires_guided = pytest.mark.skipif(
 )
 
 
+def test_scheduler_json_schema_processor_returns_none_without_backend(monkeypatch):
+    from vllm_mlx.api import guided
+
+    monkeypatch.setattr(guided, "HAS_LLGUIDANCE", False)
+    assert guided.build_json_schema_logits_processor(object(), {}) is None
+
+
+@requires_guided
+def test_scheduler_json_schema_processor_fails_closed(monkeypatch):
+    from vllm_mlx.api import guided, tool_grammar
+
+    monkeypatch.setattr(tool_grammar, "get_lltokenizer", lambda _tokenizer: None)
+    assert guided.build_json_schema_logits_processor(object(), {}) is None
+
+    def _raise(_tokenizer):
+        raise RuntimeError("bad tokenizer")
+
+    monkeypatch.setattr(tool_grammar, "get_lltokenizer", _raise)
+    assert guided.build_json_schema_logits_processor(object(), {}) is None
+
+
 @requires_guided
 def test_scheduler_json_schema_processor_forces_eos_after_complete_value():
     """A complete JSON value terminates instead of admitting whitespace forever."""

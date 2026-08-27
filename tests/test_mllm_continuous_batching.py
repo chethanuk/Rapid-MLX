@@ -669,6 +669,16 @@ class TestMLLMEosContract:
 
         assert scheduler.stop_tokens == {11, 12, 13}
 
+    def test_boolean_model_eos_is_not_a_token_id(self):
+        from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
+
+        processor = SimpleNamespace(tokenizer=SimpleNamespace(eos_token_id=11))
+        model = SimpleNamespace(config=SimpleNamespace(eos_token_id=True))
+
+        scheduler = MLLMScheduler(model, processor, MLLMSchedulerConfig())
+
+        assert scheduler.stop_tokens == {11}
+
     def test_request_logits_processor_reaches_batch_generator(self):
         """Structured-output state stays request-local through admission."""
         from vllm_mlx.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
