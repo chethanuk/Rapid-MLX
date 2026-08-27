@@ -5443,6 +5443,14 @@ async def _create_chat_completion_impl(
                 "tool_choice",
                 "logprobs",
                 "top_logprobs",
+                # Decode processors are request-local and stateful. Reusing
+                # the first attempt's matcher/cursor would constrain the
+                # repair as a continuation of the abandoned document rather
+                # than a fresh JSON value. The repair prompt plus post-check
+                # are the established unconstrained second-attempt contract.
+                "grammar_logits_processor",
+                "reasoning_budget_logits_processor",
+                "suppressed_tokens_logits_processor",
             ):
                 repair_kwargs.pop(_k, None)
             # H-06 #267b: re-check the context-length gate AGAINST the

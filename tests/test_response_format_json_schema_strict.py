@@ -431,6 +431,7 @@ def test_strict_mllm_processor_fail_open_still_validates_response(monkeypatch):
     assert resp.json()["error"]["code"] == "json_schema_violation"
     assert len(engine.chat_calls) == 2
     assert engine.chat_calls[0]["kwargs"]["grammar_logits_processor"] is marker
+    assert "grammar_logits_processor" not in engine.chat_calls[1]["kwargs"]
 
 
 def test_strict_true_guided_unavailable_returns_200_when_initial_output_valid():
