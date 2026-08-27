@@ -117,6 +117,15 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
     assert fresh_install.index("relaunch_persona") < fresh_install.index(
         "assert_no_telemetry_requests declined-relaunch"
     )
+    assert fresh_install.index("assert_no_telemetry_requests declined-relaunch") < (
+        fresh_install.index("assert_one_telemetry_request settings-opt-in")
+    )
+    assert "Settings.Privacy.TelemetryToggle" in fresh_install
+    positive_control = source.split("assert_one_telemetry_request() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert '.requests[0].path == "/v1/events"' in positive_control
+    assert ".requests[0].bytes > 0" in positive_control
 
 
 def test_each_fault_fails_with_its_own_message():

@@ -323,6 +323,32 @@ assert_no_telemetry_requests() {
         || die "telemetry request crossed the consent boundary during $stage — see $TELEMETRY_SINK_LOG"
 }
 
+assert_one_telemetry_request() {
+    local stage="$1"
+    local evidence="$OUT/telemetry-$stage.json"
+    local count=0
+    for _ in {1..80}; do
+        kill -0 "$TELEMETRY_SINK_PID" 2>/dev/null \
+            || die "loopback telemetry sink exited during $stage"
+        count="$(wc -l < "$TELEMETRY_SINK_LOG" | tr -d '[:space:]')"
+        [[ "$count" == 1 ]] && break
+        [[ "$count" -gt 1 ]] && break
+        sleep 0.05
+    done
+    jq -s --arg stage "$stage" --arg log "$TELEMETRY_SINK_LOG" \
+        '{stage: $stage, request_count: length, request_log: $log,
+          requests: map({method, path, bytes})}' \
+        "$TELEMETRY_SINK_LOG" > "$evidence"
+    [[ "$count" == 1 ]] \
+        || die "Settings opt-in did not produce exactly one telemetry request during $stage"
+    jq -e '(.request_count == 1)
+              and (.requests[0].method == "POST")
+              and (.requests[0].path == "/v1/events")
+              and (.requests[0].bytes > 0)' \
+        "$evidence" >/dev/null \
+        || die "Settings opt-in reached the sink with an invalid request during $stage"
+}
+
 finish() {
     local status=$?
     set +e
@@ -1465,6 +1491,23 @@ flow_fresh_install() {
         die "dismissed telemetry invitation returned after relaunch"
     fi
     assert_no_telemetry_requests declined-relaunch
+    # Positive control for the five quiet checkpoints above: use the promised
+    # reversible Settings path and require the app to reach this exact sink.
+    # Without this, a dropped endpoint override could make every negative
+    # assertion pass while telemetry escaped to a different destination.
+    open_settings
+    wait_settings_stable "$OUT/telemetry-settings-rail.json" Settings.Category.privacy
+    press "$OUT/telemetry-settings-rail.json" Settings.Category.privacy \
+        "$OUT/telemetry-open-privacy.json" \
+        || die "Privacy category is not pressable after declined consent"
+    wait_settings_stable "$OUT/telemetry-settings-privacy.json" Settings.Privacy.TelemetryToggle
+    [[ "$(element_field "$OUT/telemetry-settings-privacy.json" \
+        Settings.Privacy.TelemetryToggle value)" == "0" ]] \
+        || die "declined telemetry decision was not still off in Settings"
+    press "$OUT/telemetry-settings-privacy.json" Settings.Privacy.TelemetryToggle \
+        "$OUT/telemetry-settings-opt-in.json" \
+        || die "Settings telemetry opt-in is not pressable"
+    assert_one_telemetry_request settings-opt-in
     cleanup_persona
     cleanup_telemetry_sink
 }
