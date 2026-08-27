@@ -188,8 +188,14 @@ jobs:
           fi
 
           case "$RUN_NAME" in
-            CI) CONTEXT=tests ;;
-            "rapid-mac CI") CONTEXT=desktop-tests ;;
+            CI)
+              CONTEXT=tests
+              WORKFLOW_FILE=ci.yml
+              ;;
+            "rapid-mac CI")
+              CONTEXT=desktop-tests
+              WORKFLOW_FILE=rapid-mac-ci.yml
+              ;;
             *)
               echo "::error::Unexpected source workflow: $RUN_NAME" >&2
               exit 1
@@ -205,6 +211,14 @@ jobs:
           if [ "$PR_STATE" != open ] || [ "$BASE_REF" != main ] || \
              [ "$LIVE_HEAD_SHA" != "$RUN_SHA" ] || [ "$FULL_CI" != true ]; then
             echo "Not settling stale or unpromoted evidence (PR=$PR_NUMBER state=$PR_STATE base=$BASE_REF live=$LIVE_HEAD_SHA run=$RUN_SHA full_ci=$FULL_CI)."
+            exit 0
+          fi
+
+          RUNS_JSON="$RUNNER_TEMP/source-runs.json"
+          gh api "repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?head_sha=${RUN_SHA}&event=pull_request&per_page=100" > "$RUNS_JSON"
+          LATEST_RUN_ID=$(jq -r '[.workflow_runs[]] | if length > 0 then max_by(.id).id else "" end' "$RUNS_JSON")
+          if [ "$LATEST_RUN_ID" != "$RUN_ID" ]; then
+            echo "Not settling superseded $RUN_NAME evidence (latest_run=${LATEST_RUN_ID:-missing} completed_run=$RUN_ID)."
             exit 0
           fi
 

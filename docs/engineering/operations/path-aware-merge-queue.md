@@ -127,8 +127,9 @@ The status transition is fail closed:
 4. Only a successful exact-head full-CI aggregate may replace that selected
    lane's pending status with success. The aggregate job settles same-repository
    PRs directly; a trusted `workflow_run` completion hook settles fork PRs.
-5. A stale SHA, removed label, failed/cancelled workflow, missing aggregate job,
-   classifier failure, or metadata mismatch leaves the status pending.
+5. A stale SHA, removed label, superseded exact-head run, failed/cancelled
+   workflow, missing aggregate job, classifier failure, or metadata mismatch
+   leaves the status pending.
 
 Do not replace this with a job-level `if` condition. GitHub reports a skipped
 job as successful, which would allow a required skipped context to bypass the

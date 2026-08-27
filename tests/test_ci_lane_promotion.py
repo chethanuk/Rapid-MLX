@@ -6,6 +6,9 @@ restore the expensive behavior where applying ``full-ci`` changed an
 engine-only or Desktop-only PR into an all-product run.
 """
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -107,6 +110,127 @@ def test_internal_product_aggregates_own_pending_to_success_transition():
         assert f'context: "{context}"' in settle["run"]
         assert 'state: "success"' in settle["run"]
 
+        permissions = _job(workflow, job_name)["permissions"]
+        assert permissions == {
+            "actions": "read",
+            "contents": "read",
+            "pull-requests": "read",
+            "statuses": "write",
+        }
+
+
+def _execute_internal_settlement(
+    tmp_path: Path,
+    *,
+    workflow: Path,
+    job_name: str,
+    full_ci: bool,
+    latest_run_id: int,
+) -> str | None:
+    run = _step_run(workflow, job_name, "Settle a successful internal full-CI status")
+    mock_bin = tmp_path / "bin"
+    mock_bin.mkdir()
+    mock_gh = mock_bin / "gh"
+    mock_gh.write_text(
+        """#!/bin/bash
+set -euo pipefail
+case "$*" in
+  "api repos/test/repo/pulls/7") cat "$MOCK_PR_JSON" ;;
+  *"/actions/workflows/"*"/runs?"*) cat "$MOCK_RUNS_JSON" ;;
+  *"--method POST"*) cat > "$MOCK_POST" ;;
+  *) echo "unexpected gh invocation: $*" >&2; exit 91 ;;
+esac
+"""
+    )
+    mock_gh.chmod(0o755)
+
+    head_sha = "a" * 40
+    pr_json = tmp_path / "pr.json"
+    pr_json.write_text(
+        json.dumps(
+            {
+                "state": "open",
+                "base": {"ref": "main"},
+                "head": {"sha": head_sha},
+                "labels": [{"name": "full-ci"}] if full_ci else [],
+            }
+        )
+    )
+    runs_json = tmp_path / "runs.json"
+    runs_json.write_text(json.dumps({"workflow_runs": [{"id": latest_run_id}]}))
+    post = tmp_path / "post.json"
+    env = os.environ | {
+        "GH_TOKEN": "test-token",
+        "HEAD_SHA": head_sha,
+        "MOCK_POST": str(post),
+        "MOCK_PR_JSON": str(pr_json),
+        "MOCK_RUNS_JSON": str(runs_json),
+        "PATH": f"{mock_bin}:{os.environ['PATH']}",
+        "PR_NUMBER": "7",
+        "REPO": "test/repo",
+        "RUN_ID": "100",
+        "RUN_URL": "https://example.invalid/run/100",
+        "RUNNER_TEMP": str(tmp_path),
+    }
+    subprocess.run(["bash", "-c", run], check=True, env=env, capture_output=True)
+    return post.read_text() if post.exists() else None
+
+
+def test_internal_settlement_rejects_removed_label_and_superseded_run(tmp_path):
+    for index, (workflow, job_name) in enumerate(
+        (
+            (ENGINE_WORKFLOW, "tests"),
+            (DESKTOP_WORKFLOW, "desktop-tests"),
+        )
+    ):
+        removed = tmp_path / f"removed-{index}"
+        removed.mkdir()
+        assert (
+            _execute_internal_settlement(
+                removed,
+                workflow=workflow,
+                job_name=job_name,
+                full_ci=False,
+                latest_run_id=100,
+            )
+            is None
+        )
+
+        superseded = tmp_path / f"superseded-{index}"
+        superseded.mkdir()
+        assert (
+            _execute_internal_settlement(
+                superseded,
+                workflow=workflow,
+                job_name=job_name,
+                full_ci=True,
+                latest_run_id=101,
+            )
+            is None
+        )
+
+
+def test_internal_settlement_accepts_live_label_on_latest_exact_head(tmp_path):
+    for index, (workflow, job_name, context) in enumerate(
+        (
+            (ENGINE_WORKFLOW, "tests", "tests"),
+            (DESKTOP_WORKFLOW, "desktop-tests", "desktop-tests"),
+        )
+    ):
+        lane = tmp_path / f"valid-{index}"
+        lane.mkdir()
+        posted = _execute_internal_settlement(
+            lane,
+            workflow=workflow,
+            job_name=job_name,
+            full_ci=True,
+            latest_run_id=100,
+        )
+        assert posted is not None
+        payload = json.loads(posted)
+        assert payload["state"] == "success"
+        assert payload["context"] == context
+
 
 def test_metadata_gate_is_trusted_fail_closed_and_never_executes_pr_head():
     workflow = _workflow_strings(LABEL_GATE_WORKFLOW)
@@ -156,6 +280,8 @@ def test_metadata_gate_settles_only_live_exact_head_successful_full_ci():
     assert 'FULL_CI" != true' in run
     assert 'WORKFLOW_CONCLUSION" != success' in run
     assert 'JOB_CONCLUSION" != success' in run
+    assert 'LATEST_RUN_ID" != "$RUN_ID' in run
+    assert "actions/workflows/${WORKFLOW_FILE}/runs" in run
     assert "actions/runs/${RUN_ID}/jobs" in run
     assert 'state: "success"' in run
     assert "statuses/${RUN_SHA}" in run
