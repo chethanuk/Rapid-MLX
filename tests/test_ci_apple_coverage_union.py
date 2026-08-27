@@ -14,13 +14,27 @@ def _workflow() -> tuple[str, dict]:
 
 
 def _ci_linux_extra() -> list[str]:
-    """Parse the canonical ``[ci-linux]`` test-dependency list from pyproject."""
-    import tomllib
+    """Parse the canonical ``[ci-linux]`` test-dependency list from pyproject.
 
+    Version-agnostic: ``tomllib`` is stdlib on 3.11+ only, and the Linux
+    test-matrix explicitly includes 3.10. On 3.10 we fall back to extracting
+    the quoted member strings of the ``ci-linux = [...]`` TOML array — every
+    entry is a plain PEP 508 specifier line, so a quote scan is exact and
+    avoids a hard 3.11 dependency in a gate that must run on 3.10-3.12.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import re
+
+        text = PYPROJECT.read_text()
+        block = re.search(r"^ci-linux\s*=\s*\[(.*?)\]\s*$", text, re.S | re.M)
+        if block is None:
+            raise AssertionError("[ci-linux] array not found in pyproject.toml")
+        deps = re.findall(r'"([^"]+)"', block.group(1))
+        return [d for d in deps if d.strip()]
     with PYPROJECT.open("rb") as fh:
-        deps = tomllib.load(fh)["project"]["optional-dependencies"]["ci-linux"]
-    return deps
-
+        return tomllib.load(fh)["project"]["optional-dependencies"]["ci-linux"]
 
 
 def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
