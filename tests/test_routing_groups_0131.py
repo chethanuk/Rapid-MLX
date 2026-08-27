@@ -19,7 +19,7 @@ false``).
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -69,6 +69,18 @@ def _metadata(config: dict, snapshot_dir: Path) -> ModelMetadata:
         snapshot_dir=snapshot_dir,
         is_local=False,
     )
+
+
+def _install_scheduler_stub(monkeypatch) -> None:
+    """Let the public serve entry points run in the Linux no-MLX lane."""
+    scheduler = ModuleType("vllm_mlx.scheduler")
+
+    class SchedulerConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    scheduler.SchedulerConfig = SchedulerConfig
+    monkeypatch.setitem(sys.modules, "vllm_mlx.scheduler", scheduler)
 
 
 def test_fix1_unaliased_qwen4_exp_vendored_goes_text_lane(monkeypatch, tmp_path):
@@ -303,6 +315,7 @@ def test_fix3_cli_serve_forwards_parsed_spec_decode_to_lane_contract(
         raise _StopAtPFlashError
 
     monkeypatch.setattr(cli, "_check_disk_space", lambda *_a, **_kw: None)
+    _install_scheduler_stub(monkeypatch)
     monkeypatch.setattr(cli, "_check_memory_capacity", lambda *_a, **_kw: None)
     monkeypatch.setattr(cli, "_ensure_model_downloaded", lambda *_a, **_kw: None)
     monkeypatch.setattr(utils_mod, "resolve_serving_lane", _resolve)
@@ -332,7 +345,12 @@ def test_fix3_cli_serve_forwards_parsed_spec_decode_to_lane_contract(
 def test_fix3_standalone_server_forwards_parsed_mtp_to_lane_contract(monkeypatch):
     from vllm_mlx import cli, server
 
+    class _StopAtPFlashError(Exception):
+        pass
+
     seen = []
+
+    _install_scheduler_stub(monkeypatch)
 
     def _resolve(_model, **kwargs):
         seen.append(kwargs)
@@ -341,6 +359,10 @@ def test_fix3_standalone_server_forwards_parsed_mtp_to_lane_contract(monkeypatch
     monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
     monkeypatch.setattr(server, "resolve_serving_lane", _resolve)
     monkeypatch.setattr(server, "load_model", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "vllm_mlx.pflash.resolve_pflash_config",
+        lambda *_a, **_kw: (_ for _ in ()).throw(_StopAtPFlashError()),
+    )
     monkeypatch.setattr(cli, "_port_preflight_or_die", lambda *_a, **_kw: None)
     monkeypatch.setattr("uvicorn.run", lambda *_a, **_kw: None)
     monkeypatch.setattr(
@@ -361,7 +383,10 @@ def test_fix3_standalone_server_forwards_parsed_mtp_to_lane_contract(monkeypatch
         ],
     )
 
-    with mock.patch.object(server, "register_audio_routes_if_enabled"):
+    with (
+        mock.patch.object(server, "register_audio_routes_if_enabled"),
+        pytest.raises(_StopAtPFlashError),
+    ):
         server.main()
 
     assert seen

@@ -367,6 +367,7 @@ jobs:
             tests/test_music_engine.py \
             tests/test_audio_model_worker.py \
             tests/test_server_load_model_order.py \
+            tests/test_routing_groups_0131.py \
             tests/test_ready_banner_timing.py \
             tests/test_api_validation_bundle.py \
             tests/test_aliases_contract.py \
@@ -482,6 +483,7 @@ jobs:
             tests/test_suffix_decoding.py \
             tests/test_qwen4_exp_artifact_parity.py \
             tests/test_qwen4_exp_reference_parity.py \
+            tests/test_routing_groups_0131.py \
             tests/test_qwen4_exp_vendored.py \
             -v --tb=short \
             -m "not slow" \
