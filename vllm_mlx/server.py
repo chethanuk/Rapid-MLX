@@ -3449,8 +3449,10 @@ Examples:
     if not _srv_force_mllm and not _srv_force_text and not _srv_generative_media:
         _ensure_routing_config(args.model)
     _srv_requested_spec_decode = getattr(args, "spec_decode", "none") or "none"
-    if _srv_requested_spec_decode == "none" and getattr(args, "enable_mtp", False):
-        _srv_requested_spec_decode = "mtp"
+    if _srv_requested_spec_decode == "none" and getattr(
+        args, "force_spec_decode", False
+    ):
+        _srv_requested_spec_decode = "auto"
     _srv_is_mllm, _ = resolve_serving_lane(
         args.model,
         force_mllm=_srv_force_mllm,

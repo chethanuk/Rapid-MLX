@@ -17,7 +17,12 @@ shape returned by the alias artifact's ``config.json`` (``model_type=qwen4_exp``
 false``).
 """
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
 
 from vllm_mlx.api import utils as utils_mod
 from vllm_mlx.api.utils import (
@@ -221,3 +226,143 @@ def test_fix3_spec_decode_requested_slides_vision_capable_to_text(
     vision_only = resolve_serving_lane_decision("/local/qwen35-vision", force_mllm=True)
     assert vision_only.is_mllm is True
     assert vision_only.reason == "vision_lane_forced"
+
+
+def test_fix3_spec_decode_on_text_checkpoint_keeps_text_lane(monkeypatch):
+    monkeypatch.setattr(utils_mod, "is_mllm_model", lambda _name: False)
+
+    decision = resolve_serving_lane_decision(
+        "/local/text-checkpoint", requested_spec_decode="mtp"
+    )
+
+    assert decision.is_mllm is False
+    assert decision.reason == "text_checkpoint"
+
+
+def test_fix3_cli_helper_forwards_legacy_mtp_as_requested_spec_decode(monkeypatch):
+    from vllm_mlx import cli
+
+    seen = {}
+
+    def _resolve(_model, **kwargs):
+        seen.update(kwargs)
+        return False, True
+
+    monkeypatch.setattr(utils_mod, "resolve_serving_lane", _resolve)
+
+    assert (
+        cli._serve_will_run_on_mllm_lane(
+            SimpleNamespace(
+                model="/local/vision-checkpoint",
+                mllm=False,
+                no_mllm=False,
+                spec_decode="none",
+                enable_mtp=True,
+            )
+        )
+        is False
+    )
+    assert seen["requested_spec_decode"] == "mtp"
+
+    seen.clear()
+    assert (
+        cli._serve_will_run_on_mllm_lane(
+            SimpleNamespace(
+                model="/local/vision-checkpoint",
+                mllm=False,
+                no_mllm=False,
+                spec_decode="none",
+                enable_mtp=False,
+                force_spec_decode=True,
+            )
+        )
+        is False
+    )
+    assert seen["requested_spec_decode"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [("--enable-mtp", "mtp"), ("--force-spec-decode", "auto")],
+)
+def test_fix3_cli_serve_forwards_parsed_spec_decode_to_lane_contract(
+    monkeypatch, flag, expected
+):
+    from vllm_mlx import cli
+
+    class _StopAtPFlashError(Exception):
+        pass
+
+    seen = []
+
+    def _resolve(_model, **kwargs):
+        seen.append(kwargs)
+        return False, True
+
+    def _stop(*_args, **_kwargs):
+        raise _StopAtPFlashError
+
+    monkeypatch.setattr(cli, "_check_disk_space", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "_check_memory_capacity", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "_ensure_model_downloaded", lambda *_a, **_kw: None)
+    monkeypatch.setattr(utils_mod, "resolve_serving_lane", _resolve)
+    monkeypatch.setattr("vllm_mlx.pflash.resolve_pflash_config", _stop)
+    monkeypatch.setattr(
+        "vllm_mlx._version_check.prompt_upgrade_if_available", lambda: False
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rapid-mlx",
+            "serve",
+            "qwen3.5-4b-4bit",
+            flag,
+        ],
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    with pytest.raises(_StopAtPFlashError):
+        cli.main()
+
+    assert seen
+    assert all(call["requested_spec_decode"] == expected for call in seen)
+
+
+def test_fix3_standalone_server_forwards_parsed_mtp_to_lane_contract(monkeypatch):
+    from vllm_mlx import cli, server
+
+    seen = []
+
+    def _resolve(_model, **kwargs):
+        seen.append(kwargs)
+        return False, True
+
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _name: None)
+    monkeypatch.setattr(server, "resolve_serving_lane", _resolve)
+    monkeypatch.setattr(server, "load_model", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "_port_preflight_or_die", lambda *_a, **_kw: None)
+    monkeypatch.setattr("uvicorn.run", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "vllm_mlx._version_check.prompt_upgrade_if_available", lambda: False
+    )
+    monkeypatch.setattr(
+        "vllm_mlx._version_check.print_staleness_warning_if_any",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vllm_mlx.server",
+            "--model",
+            "qwen3.5-4b-4bit",
+            "--force-spec-decode",
+        ],
+    )
+
+    with mock.patch.object(server, "register_audio_routes_if_enabled"):
+        server.main()
+
+    assert seen
+    assert seen[0]["requested_spec_decode"] == "auto"
