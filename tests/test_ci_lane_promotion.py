@@ -13,6 +13,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 DESKTOP_WORKFLOW = ROOT / ".github/workflows/rapid-mac-ci.yml"
+LABEL_GATE_WORKFLOW = ROOT / ".github/workflows/full-ci-label-gate.yml"
+VERSION_WORKFLOW = ROOT / ".github/workflows/version-check.yml"
 
 
 def _step_run(workflow: Path, job: str, step_name: str) -> str:
@@ -23,6 +25,11 @@ def _step_run(workflow: Path, job: str, step_name: str) -> str:
 
 def _job(workflow: Path, job: str) -> dict[str, object]:
     return yaml.safe_load(workflow.read_text())["jobs"][job]
+
+
+def _workflow_strings(workflow: Path) -> dict[str, object]:
+    """Keep ``on`` as a string instead of YAML 1.1's boolean True."""
+    return yaml.load(workflow.read_text(), Loader=yaml.BaseLoader)
 
 
 def test_engine_full_ci_still_classifies_the_pr_diff():
@@ -55,6 +62,118 @@ def test_non_desktop_change_exits_before_full_ci_requirement():
     no_lane = run.index('if [ "$DESKTOP_EXPECTED" != true ]')
     promotion = run.index('if [ "${{ github.event_name }}" = pull_request ]')
     assert classifier_gate < no_lane < promotion
+
+
+def test_unpromoted_product_aggregates_pass_without_publishing_success():
+    for workflow, job_name, result_step in (
+        (ENGINE_WORKFLOW, "tests", "Check test results"),
+        (DESKTOP_WORKFLOW, "desktop-tests", "Check desktop results"),
+    ):
+        run = _step_run(workflow, job_name, result_step)
+        promotion = run.index("full_gate" if job_name == "tests" else "FULL_GATE")
+        unpromoted_branch = run[promotion : run.index("fi", promotion) + 2]
+        assert "status remains pending" in unpromoted_branch
+        assert "exit 0" in unpromoted_branch
+        assert "exit 1" not in unpromoted_branch
+
+
+def test_internal_product_aggregates_own_pending_to_success_transition():
+    for workflow, job_name, lane, context in (
+        (ENGINE_WORKFLOW, "tests", "engine", "tests"),
+        (DESKTOP_WORKFLOW, "desktop-tests", "desktop", "desktop-tests"),
+    ):
+        steps = _job(workflow, job_name)["steps"]
+        pending = next(
+            step
+            for step in steps
+            if step.get("name") == "Start an internal PR merge status pending"
+        )
+        settle = next(
+            step
+            for step in steps
+            if step.get("name") == "Settle a successful internal full-CI status"
+        )
+
+        pending_condition = str(pending["if"])
+        assert f"needs.changes.outputs.{lane} == 'true'" in pending_condition
+        assert "head.repo.full_name == github.repository" in pending_condition
+        assert "full_gate" not in pending_condition
+        assert f'context: "{context}"' in pending["run"]
+        assert 'state: "pending"' in pending["run"]
+
+        settle_condition = str(settle["if"])
+        assert "needs.changes.outputs.full_gate == 'true'" in settle_condition
+        assert "head.repo.full_name == github.repository" in settle_condition
+        assert f'context: "{context}"' in settle["run"]
+        assert 'state: "success"' in settle["run"]
+
+
+def test_metadata_gate_is_trusted_fail_closed_and_never_executes_pr_head():
+    workflow = _workflow_strings(LABEL_GATE_WORKFLOW)
+    triggers = workflow["on"]
+    assert "pull_request_target" in triggers
+    assert "workflow_dispatch" in triggers
+    assert "workflow_run" in triggers
+    assert "pull_request" not in triggers
+    assert workflow["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
+
+    job = workflow["jobs"]["publish-required-statuses"]
+    steps = job["steps"]
+    assert steps[0]["name"] == "Resolve the live PR and fail closed first"
+    resolve = steps[0]["run"]
+    assert 'gh api "repos/${REPO}/pulls/${PR_NUMBER}"' in resolve
+    assert "post_status tests pending" in resolve
+    assert "post_status desktop-tests pending" in resolve
+    assert "PR_STATE" in resolve and "BASE_REF" in resolve and "HEAD_SHA" in resolve
+
+    checkout = steps[1]
+    assert checkout["name"] == "Check out the trusted policy"
+    assert checkout["with"]["ref"] == "${{ steps.pr.outputs.base_sha }}"
+    workflow_text = LABEL_GATE_WORKFLOW.read_text()
+    assert "pull_request.head.sha" not in checkout["with"]["ref"]
+    assert "github.event.pull_request.title" not in workflow_text
+    assert "github.event.pull_request.body" not in workflow_text
+
+    classify = steps[2]["run"]
+    assert "pulls/${PR_NUMBER}/files" in classify
+    assert "scripts/classify_ci_changes.py" in classify
+
+    publish = steps[3]["run"]
+    assert 'LIVE_HEAD_SHA" != "$HEAD_SHA' in publish
+    assert 'LIVE_FULL_CI" != "$FULL_CI' in publish
+
+
+def test_metadata_gate_settles_only_live_exact_head_successful_full_ci():
+    workflow = _workflow_strings(LABEL_GATE_WORKFLOW)
+    settle = workflow["jobs"]["settle-completed-gate"]
+    assert settle["if"] == "github.event_name == 'workflow_run'"
+    run = settle["steps"][0]["run"]
+    assert 'LIVE_HEAD_SHA" != "$RUN_SHA' in run
+    assert 'FULL_CI" != true' in run
+    assert 'WORKFLOW_CONCLUSION" != success' in run
+    assert 'JOB_CONCLUSION" != success' in run
+    assert "actions/runs/${RUN_ID}/jobs" in run
+    assert 'state: "success"' in run
+    assert "statuses/${RUN_SHA}" in run
+
+
+def test_all_strict_required_workflows_emit_on_merge_group():
+    for workflow in (ENGINE_WORKFLOW, DESKTOP_WORKFLOW, VERSION_WORKFLOW):
+        triggers = _workflow_strings(workflow)["on"]
+        assert triggers["merge_group"]["types"] == ["checks_requested"]
+
+    version = _workflow_strings(VERSION_WORKFLOW)
+    guard = version["jobs"]["version-bump-guard"]
+    queue_step = next(
+        step
+        for step in guard["steps"]
+        if step.get("name") == "Pass — PR contract already validated before merge queue"
+    )
+    assert queue_step["if"] == "github.event_name == 'merge_group'"
 
 
 def test_gui_golden_job_requires_both_desktop_lane_and_full_promotion():

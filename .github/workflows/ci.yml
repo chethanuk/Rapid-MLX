@@ -643,7 +643,26 @@ jobs:
       - l1-smoke
     runs-on: ubuntu-latest
     if: always()
+    permissions:
+      contents: read
+      statuses: write
     steps:
+      - name: Start an internal PR merge status pending
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.engine == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg target_url "$RUN_URL" \
+            '{state: "pending", context: "tests", description: "Evaluating the required engine merge gate", target_url: $target_url}' \
+            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null
+
       - name: Check test results
         run: |
           if [ "${{ needs.changes.result }}" != success ]; then
@@ -674,8 +693,8 @@ jobs:
           fi
           if [ "${{ github.event_name }}" = "pull_request" ] \
             && [ "${{ needs.changes.outputs.full_gate }}" != "true" ]; then
-            echo "Engine PR gate passed; apply the full-ci label when this PR is ready to merge"
-            exit 1
+            echo "Engine PR checks passed; the required tests status remains pending until the full-ci label is applied"
+            exit 0
           fi
           if [ "${{ needs.test-matrix.result }}" != "success" ]; then
             echo "Unit tests failed"
@@ -694,3 +713,20 @@ jobs:
             echo "Small-model tool-loop contract failed"
             exit 1
           fi
+
+      - name: Settle a successful internal full-CI status
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.engine == 'true' &&
+          needs.changes.outputs.full_gate == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg target_url "$RUN_URL" \
+            '{state: "success", context: "tests", description: "Exact-head full-CI merge gate passed", target_url: $target_url}' \
+            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null

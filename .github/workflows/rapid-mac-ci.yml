@@ -773,7 +773,26 @@ jobs:
       - gui-golden-flows
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
     steps:
+      - name: Start an internal PR merge status pending
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.desktop == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg target_url "$RUN_URL" \
+            '{state: "pending", context: "desktop-tests", description: "Evaluating the required Desktop merge gate", target_url: $target_url}' \
+            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null
+
       - name: Check desktop results
         env:
           DESKTOP_EXPECTED: ${{ needs.changes.outputs.desktop }}
@@ -795,8 +814,8 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = pull_request ] && [ "$FULL_GATE" != true ]; then
-            echo "Desktop PR gate passed; apply the full-ci label when this PR is ready to merge"
-            exit 1
+            echo "Desktop PR checks passed; the required desktop-tests status remains pending until the full-ci label is applied"
+            exit 0
           fi
           for result in "$IDENTIFIERS" "$IDENTIFIER_TESTS" "$HARNESS_CONTRACTS" "$BUILD"; do
             if [ "$result" != success ]; then
@@ -814,3 +833,20 @@ jobs:
               exit 1
             fi
           fi
+
+      - name: Settle a successful internal full-CI status
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.desktop == 'true' &&
+          needs.changes.outputs.full_gate == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -n \
+            --arg target_url "$RUN_URL" \
+            '{state: "success", context: "desktop-tests", description: "Exact-head full-CI merge gate passed", target_url: $target_url}' \
+            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null
