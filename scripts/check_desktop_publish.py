@@ -16,7 +16,8 @@ all of the following hold:
   2. An EXACT `rapid-mac-release.yml` run reaches SUCCESS within the deadline. A
      run is exact when its ref/branch is the tag, its head_sha equals
      ``accepted_sha``, and its event is the tag push (or an explicit
-     ``workflow_dispatch`` at the tag ref — a recovery we never create here).
+     ``workflow_dispatch`` at the tag ref. Auto-release creates that dispatch
+     with the exact pre-tag producer run and accepted SHA).
      Poll policy: prefer any exact success; keep waiting while an exact run is
      active (queued/in_progress); fail only when no exact run is active and a
      failed one remains.
@@ -29,9 +30,9 @@ all of the following hold:
      deadline.
 
 If the tag exists but no successful exact run/release is reached, the diagnostic
-directs recovery to: rerun the failed exact workflow, or dispatch
-``rapid-mac-release.yml`` at ``--ref <tag>``, then re-run auto-release. It never
-moves or deletes the tag, and it never auto-dispatches or broadens publication.
+directs recovery to rerun that exact promotion or rerun auto-release, whose
+dispatch supplies both required ``promote_run_id`` and ``promote_sha`` inputs.
+This helper never moves/deletes a tag or broadens publication.
 
 All logic is exercised with raw ``gh`` output (never text/regex on structured
 fields) and a deadline + sleep that are injectable, so the poll behaviour is
@@ -181,7 +182,8 @@ def _qualifying_runs(
     Uses the official workflow-runs API filtered by ``branch == app_tag``, then
     requires, in Python: ``head_branch == app_tag`` (exact ref), ``head_sha ==
     accepted_sha`` (exact candidate), and ``event`` in {push, workflow_dispatch}
-    (push is the expected trigger; dispatch-at-tag is an explicit recovery).
+    (push is the standalone tag path; dispatch-at-tag is the auto-release
+    build-once promotion path).
     API discontinuity (call fails, malformed JSON) fails immediately here.
     """
     runs_json = _run(
@@ -477,17 +479,18 @@ def verify(
             raise PublishGateError(
                 f"{app_tag}: rapid-mac-release.yml run(s) on the tag ref completed "
                 f"without success and no exact run is active. The tagged Desktop "
-                "publish failed. Recovery: re-run the failed exact workflow run, or "
-                f"dispatch rapid-mac-release.yml at --ref {app_tag}, then re-run "
-                "auto-release. Do NOT move or delete the tag."
+                "publish failed. Recovery: re-run the failed exact promotion, or "
+                "re-run auto-release so it dispatches rapid-mac-release.yml with "
+                "the exact promote_run_id and promote_sha. Do NOT move or delete "
+                "the tag."
             )
         if time.monotonic() >= deadline:
             raise PublishGateError(
                 f"{app_tag}: no successful, exact rapid-mac-release.yml run on the tag "
                 "ref within the deadline. The tagged Desktop publish did not "
-                "complete. Recovery: re-run the failed exact workflow, or dispatch "
-                f"rapid-mac-release.yml at --ref {app_tag}, then re-run auto-release. "
-                "Do NOT move or delete the tag."
+                "complete. Recovery: re-run the failed exact promotion, or re-run "
+                "auto-release so it supplies the exact promote_run_id and "
+                "promote_sha. Do NOT move or delete the tag."
             )
         time.sleep(sleep_sec)
 
@@ -515,8 +518,8 @@ def verify(
             f"{app_tag}: the run succeeded but no published (non-draft) GitHub "
             "Release with an uploaded non-zero rapid-mlx-desktop.dmg asset exists. "
             "The Desktop artifact was not published; the engine must not release. "
-            "Recovery: re-run the failed exact workflow, or dispatch "
-            f"rapid-mac-release.yml at --ref {app_tag}, then re-run auto-release."
+            "Recovery: re-run the failed exact promotion, or re-run auto-release "
+            "so it supplies the exact promote_run_id and promote_sha."
         )
     release_digest, release_size = release_identity
     if (release_digest, release_size) != (run_digest, run_size):

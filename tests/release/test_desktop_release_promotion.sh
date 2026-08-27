@@ -146,6 +146,38 @@ contains "$TAGSTEP" 'ACCEPTED_SHA: ${{ needs.release-prep.outputs.accepted_sha }
   "tag step claims at the pre-approval accepted SHA"
 contains "$TAGSTEP" 'scripts/tag_desktop_app.sh' "tag step invokes the tagged script"
 lacks "$TAGSTEP" "git push" "tag step never git pushes"
+contains "$TAGSTEP" 'gh workflow run rapid-mac-release.yml' \
+  "tag claim is followed by an explicit Desktop promotion dispatch"
+contains "$TAGSTEP" '-f "promote_run_id=$PRODUCER_RUN_ID"' \
+  "promotion dispatch carries the exact producer run"
+contains "$TAGSTEP" '-f "promote_sha=$ACCEPTED_SHA"' \
+  "promotion dispatch carries the accepted source SHA"
+
+CANDIDATE=$(sed -n '/name: Stage exact pre-tag Desktop candidate bundle/,/^  dry-run-summary:/p' "$AUTO_RELEASE")
+contains "$CANDIDATE" 'desktop_promotion.py create' \
+  "candidate creates cryptographic promotion provenance"
+contains "$CANDIDATE" 'rapid-mlx-desktop-pre-tag-candidate-${{ github.sha }}' \
+  "candidate artifact name exposes lifecycle stage and full source SHA"
+contains "$CANDIDATE" 'apps/rapid-mac/build/sparkle/appcast.xml' \
+  "candidate stages the exact signed Sparkle appcast"
+
+PROMOTE=$(sed -n '/^  promote-candidate:/,/^  desktop-ready:/p' "$RAPID_RELEASE")
+contains "$PROMOTE" 'run-id: ${{ inputs.promote_run_id }}' \
+  "publisher downloads from the exact producer run"
+contains "$PROMOTE" 'desktop_promotion.py verify' \
+  "publisher verifies every promoted byte and producer identity"
+contains "$PROMOTE" 'desktop_manifest.py verify' \
+  "publisher re-verifies the DMG manifest against its extracted app"
+contains "$PROMOTE" 'xcrun stapler validate' \
+  "publisher re-validates the notarization ticket"
+contains "$PROMOTE" 'spctl --assess' \
+  "publisher re-validates Gatekeeper acceptance"
+contains "$PROMOTE" 'name: rapid-mlx-desktop-dmg' \
+  "publisher exposes exact bytes under the canonical downstream artifact name"
+lacks "$PROMOTE" 'desktop-releasable' \
+  "promotion lane never invokes the build action"
+lacks "$PROMOTE" 'notarize.sh' \
+  "promotion lane never re-notarizes or repacks"
 
 # A same-SHA tag claim may no-op after a prior failed/missed Desktop workflow.
 # The engine must therefore wait for exact tagged Desktop publication evidence,
@@ -201,20 +233,22 @@ else
 fi
 
 RESOLVER_USES=$(grep -c 'resolve_github_tag_commit "$TAG"' "$RAPID_RELEASE")
-[[ "$RESOLVER_USES" == 2 ]] \
-  && ok "both tagged-lane tag checks use the bounded recursive resolver" \
-  || bad "both tagged-lane tag checks use the bounded recursive resolver (got $RESOLVER_USES)"
+[[ "$RESOLVER_USES" == 3 ]] \
+  && ok "promotion plus both publication checks use the bounded recursive resolver" \
+  || bad "promotion plus both publication checks use the bounded recursive resolver (got $RESOLVER_USES)"
 lacks "$RAPID_RELEASE" 'git/refs/tags/${TAG}' \
   "tagged lane has no remaining one-level tag resolver"
 
-BUILD_TIMEOUT=$(sed -n '/^  build:/,/^  mirror-dist:/p' "$RAPID_RELEASE" | awk '/timeout-minutes:/ {print $2; exit}')
-MIRROR_TIMEOUT=$(sed -n '/^  mirror-dist:/,/^  publish-updater-fallback:/p' "$RAPID_RELEASE" | awk '/timeout-minutes:/ {print $2; exit}')
-PUBLISH_TIMEOUT=$(sed -n '/^  publish-updater-fallback:/,$p' "$RAPID_RELEASE" | awk '/timeout-minutes:/ {print $2; exit}')
-if [[ "$BUILD_TIMEOUT" == 120 && "$MIRROR_TIMEOUT" == 30 && "$PUBLISH_TIMEOUT" == 120 \
+BUILD_TIMEOUT=$(awk '/^  build:/{job=1} job && /timeout-minutes:/{print $2; exit}' "$RAPID_RELEASE")
+PROMOTE_TIMEOUT=$(awk '/^  promote-candidate:/{job=1} job && /timeout-minutes:/{print $2; exit}' "$RAPID_RELEASE")
+MIRROR_TIMEOUT=$(awk '/^  mirror-dist:/{job=1} job && /timeout-minutes:/{print $2; exit}' "$RAPID_RELEASE")
+PUBLISH_TIMEOUT=$(awk '/^  publish-updater-fallback:/{job=1} job && /timeout-minutes:/{print $2; exit}' "$RAPID_RELEASE")
+if [[ "$BUILD_TIMEOUT" == 120 && "$PROMOTE_TIMEOUT" == 45 \
+      && "$MIRROR_TIMEOUT" == 30 && "$PUBLISH_TIMEOUT" == 120 \
       && $((BUILD_TIMEOUT + MIRROR_TIMEOUT + PUBLISH_TIMEOUT)) -lt 350 ]]; then
-  ok "parent poll covers child build, mirror, turnstyle and publication budgets"
+  ok "parent poll covers the slower Desktop source, mirror, turnstyle and publication budgets"
 else
-  bad "parent poll covers child build, mirror, turnstyle and publication budgets"
+  bad "parent poll covers the slower Desktop source, mirror, turnstyle and publication budgets"
 fi
 
 # ---------------------------------------------------------------------------
@@ -330,9 +364,10 @@ echo "== 7. release job re-verifies LIVE environment protection before claim =="
 # when the tag is claimed. The release job live-fetches the environment +
 # deployment-branch-policies and runs the SAME check_release_environment.py —
 # positioned BEFORE the pre-tag blocker/main re-queries and any tag write — and
-# carries the actions:read permission the environments read-back needs.
+# carries actions:write for the environment read-back plus exact dispatch.
 RELJOB=$(sed -n '/^  release:$/,/^name: Auto-release on version bump/p' "$AUTO_RELEASE")
-contains "$RELJOB" 'actions: read' "release job has actions:read (environments read-back)"
+contains "$RELJOB" 'actions: write' \
+  "release job has actions:write for environment read-back plus exact dispatch"
 RE_ENV=$(sed -n '/Verify live rapid-mac-tag environment protection/,/Download the release evidence/p' "$AUTO_RELEASE")
 contains "$RE_ENV" 'repos/${REPO}/environments/${ENV_NAME}' \
   "release job live-fetches the rapid-mac-tag environment"
