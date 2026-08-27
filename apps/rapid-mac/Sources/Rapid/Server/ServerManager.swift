@@ -1959,7 +1959,11 @@ final class ServerManager {
         ) else { return }
         memoryConfirmRunning.insert(seq)
         if child != nil {
-            await stop()
+            await stop(
+                preservingLastServedAlias: Self.memoryConfirmationPreservesResumeAlias(
+                    currentWarning
+                )
+            )
         }
         // The activation sample above is the guard for this exact click.
         // Avoid a second sample after the queue has entered `.launching`,
@@ -1972,6 +1976,12 @@ final class ServerManager {
         )
         memoryConfirmRunning.remove(seq)
         memoryConfirmations.completeConfirmedLaunch(warningID: currentWarning.id)
+    }
+
+    nonisolated static func memoryConfirmationPreservesResumeAlias(
+        _ warning: ModelSizing.MemoryWarning
+    ) -> Bool {
+        warning.plannedReleaseAlias != nil
     }
 
     /// The user backed out of a memory-risky load. Just drops the
