@@ -4837,8 +4837,12 @@ flow_model_switch_active_request() {
            | select(.identifier == "ModelSwitchGuard.Cancel")' \
         "$OUT/switch-guard.json" >/dev/null \
         || die "active stream did not present the native switch guard"
-    press "$OUT/switch-guard.json" ModelSwitchGuard.Cancel "$OUT/switch-cancelled.json" \
-        || die "switch guard Cancel was not actionable"
+    # This is a native confirmation dialog, whose cancel role maps to Escape.
+    # Hosted SwiftUI exposes the enabled Cancel button in AX but may reject
+    # AXPress for that transient element. Exercise the platform cancel action
+    # and let the state assertions below prove that it took effect.
+    "$AX_DRIVER" key "$APP_PID" escape > "$OUT/switch-cancelled.json" \
+        || die "switch guard did not honor the native Cancel action"
 
     # Cancellation occurs before /v1/models/load or process teardown. The
     # original stream must complete and the original model remains selected.
