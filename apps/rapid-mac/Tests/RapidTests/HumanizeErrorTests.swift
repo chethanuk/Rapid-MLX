@@ -70,6 +70,10 @@ struct HumanizeErrorTests {
     @Test("Unrelated structured server failures remain private diagnostics")
     func structuredServerFailureReasonStaysPrivate() {
         #expect(ChatStreamError.httpStatus(
+            400,
+            #"{"error":{"message":"Context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}"#
+        ).attachmentFailureMessage == nil)
+        #expect(ChatStreamError.httpStatus(
             500,
             #"{"error":{"message":"Internal server error"}}"#
         ).attachmentFailureMessage == nil)

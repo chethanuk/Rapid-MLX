@@ -819,6 +819,7 @@ enum ChatStreamError: LocalizedError {
            message.localizedCaseInsensitiveContains("exceeds the per-batch cap") {
             return "That image is too large for this model. Try an image no larger than 2,048 pixels on its longest side."
         }
+        guard envelope.error.code == "image_input_unsupported" else { return nil }
         return message
     }
 }
