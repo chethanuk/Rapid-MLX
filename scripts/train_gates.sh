@@ -158,10 +158,10 @@ SKIPPED=()
 FAILED=()
 
 note()  { printf '    %s\n' "$*"; }
-passed(){ PASSED+=("$1"); printf 'GATE %s: PASS — %s\n' "$1" "$2"; }
-passed_na(){ PASSED+=("$1"); printf 'GATE %s: PASS (N/A) — %s\n' "$1" "$2"; }
-skip()  { SKIPPED+=("$1"); printf 'GATE %s: SKIPPED — %s\n' "$1" "$2"; }
-fail()  { FAILED+=("$1"); printf 'GATE %s: FAILURE — %s\n' "$1" "$2"; }
+passed(){ PASSED+=("$1"); printf 'GATE %s: PASS — %s\n' "$1" "${2:-}"; }
+passed_na(){ PASSED+=("$1"); printf 'GATE %s: PASS (N/A) — %s\n' "$1" "${2:-}"; }
+skip()  { SKIPPED+=("$1"); printf 'GATE %s: SKIPPED — %s\n' "$1" "${2:-}"; }
+fail()  { FAILED+=("$1"); printf 'GATE %s: FAILURE — %s\n' "$1" "${2:-}"; }
 
 # ---------------------------------------------------------------------------
 # Gate 1 — Linux no-MLX pytest (fresh venv, no mlx), one process per ci.yml
@@ -239,18 +239,23 @@ PY
 
     # Split the parsed space-joined strings into arrays so no accidental
     # word-splitting/globbing ever occurs when they are passed to pytest.
-    local -a pytest_args=()
+    # NOTE (bash-3.2 + set -u): `read -a` on an EMPTY string leaves the array
+    # unbound, and `${arr[@]}` on an unbound array errors under `set -u`. So
+    # every array expansion below uses the `${arr[@]+"${arr[@]}"}` guard, which
+    # is a no-op when the array holds no elements.
+    local -a pytest_args=() deselect_args=()
     read -r -a pytest_args <<<"$paths_str"
-    local -a deselect_args=()
     read -r -a deselect_args <<<"$deselect_str"
-    if [[ "$cov_append" == "1" ]]; then pytest_args+=(--cov-append); fi
-    if [[ -n "$marker_str" ]]; then pytest_args+=(-k "$marker_str"); fi
+    local -a aux_args=()
+    if [[ "$cov_append" == "1" ]]; then aux_args+=(--cov-append); fi
+    if [[ -n "$marker_str" ]]; then aux_args+=(-k "$marker_str"); fi
 
     if ! ( cd "$ROOT" \
         && COVERAGE_FILE="$covfile" \
         "$py" -m pytest \
-          "${pytest_args[@]}" \
-          "${deselect_args[@]}" \
+          ${pytest_args[@]+"${pytest_args[@]}"} \
+          ${deselect_args[@]+"${deselect_args[@]}"} \
+          ${aux_args[@]+"${aux_args[@]}"} \
           -v --tb=short \
           --cov=vllm_mlx \
           --cov-report=term-missing ); then
@@ -407,10 +412,10 @@ PY
   if ! ( cd "$ROOT" \
       && COVERAGE_FILE="$COV_DIR/coverage-apple.data" \
       "$apple_py" -m pytest \
-        "${apple_args[@]}" \
+        ${apple_args[@]+"${apple_args[@]}"} \
         -v --tb=short \
-        "${m_args[@]}" \
-        "${k_args[@]}" \
+        ${m_args[@]+"${m_args[@]}"} \
+        ${k_args[@]+"${k_args[@]}"} \
         --cov=vllm_mlx \
         --cov-report=term-missing ); then
     fail 4 "Apple-MLX pytest failed (see output above)"
