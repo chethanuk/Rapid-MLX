@@ -45,13 +45,21 @@ Run it on the exact ref whose head you intend to validate:
 ```bash
 DRY_RUN_REF=main  # or the pushed branch containing an auto-release change
 DRY_RUN_SHA="$(gh api \
-  "repos/raullenchai/Rapid-MLX/git/ref/heads/$DRY_RUN_REF" --jq .object.sha)"
+  "repos/raullenchai/Rapid-MLX/commits/$DRY_RUN_REF" --jq .sha)"
+DRY_RUN_DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 gh workflow run auto-release.yml -R raullenchai/Rapid-MLX --ref "$DRY_RUN_REF" -f dry_run=true
 
-DRY_RUN_ID="$(gh run list -R raullenchai/Rapid-MLX \
-  --workflow auto-release.yml --event workflow_dispatch \
-  --commit "$DRY_RUN_SHA" --limit 1 --json databaseId --jq '.[0].databaseId')"
+DRY_RUN_ID=
+for _ in {1..30}; do
+  DRY_RUN_ID="$(gh run list -R raullenchai/Rapid-MLX \
+    --workflow auto-release.yml --event workflow_dispatch \
+    --commit "$DRY_RUN_SHA" --created ">=$DRY_RUN_DISPATCHED_AT" \
+    --limit 10 --json databaseId,createdAt \
+    --jq 'sort_by(.createdAt) | last | .databaseId // empty')"
+  test -z "$DRY_RUN_ID" || break
+  sleep 2
+done
 test -n "$DRY_RUN_ID"
 test "$(gh run view "$DRY_RUN_ID" -R raullenchai/Rapid-MLX \
   --json headSha --jq .headSha)" = "$DRY_RUN_SHA"
@@ -59,7 +67,9 @@ gh run watch "$DRY_RUN_ID" -R raullenchai/Rapid-MLX --exit-status
 gh run view "$DRY_RUN_ID" -R raullenchai/Rapid-MLX
 ```
 
-The final `dry-run-summary` job must be green, bind the accepted Desktop SHA to
+The timestamp-bounded lookup ensures `DRY_RUN_ID` belongs to this dispatch,
+rather than reusing an older run at the same SHA. The final `dry-run-summary`
+job must be green, bind the accepted Desktop SHA to
 `DRY_RUN_SHA`, and report that both publication jobs were skipped with no
 protected environment or release mutation. A failed or mismatched run is not
 evidence; fix the gate or ref selection and run it once on the corrected exact

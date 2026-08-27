@@ -147,6 +147,21 @@ contains "$(cat "$RELEASE_DOC")" \
   'gh workflow run auto-release.yml -R raullenchai/Rapid-MLX --ref "$DRY_RUN_REF" -f dry_run=true' \
   "runbook uses the documented workflow_dispatch ref + Boolean input"
 contains "$(cat "$RELEASE_DOC")" \
+  '"repos/raullenchai/Rapid-MLX/commits/$DRY_RUN_REF" --jq .sha' \
+  "runbook resolves branch, tag, and SHA refs through the generic commit endpoint"
+lacks "$(cat "$RELEASE_DOC")" \
+  'git/ref/heads/$DRY_RUN_REF' \
+  "runbook does not resolve selectable refs through a branch-only endpoint"
+contains "$(cat "$RELEASE_DOC")" \
+  'DRY_RUN_DISPATCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"' \
+  "runbook records an unambiguous lower bound before dispatch"
+contains "$(cat "$RELEASE_DOC")" \
+  '--created ">=$DRY_RUN_DISPATCHED_AT"' \
+  "run discovery cannot select an older run at the same SHA"
+contains "$(cat "$RELEASE_DOC")" \
+  'for _ in {1..30}; do' \
+  "runbook waits for the newly dispatched run to become visible"
+contains "$(cat "$RELEASE_DOC")" \
   "Every PR that changes \`.github/workflows/auto-release.yml\`" \
   "release workflow PRs must link a green dry-run URL"
 contains "$(cat "$RELEASE_DOC")" \
