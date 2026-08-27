@@ -33,13 +33,16 @@ DESKTOP_ACTIVATION_KINDS: frozenset[str] = frozenset(
         ACTIVATION_FIRST_IMAGE,
     }
 )
-ACTIVATION_KINDS: frozenset[str] = frozenset(
-    {
-        ACTIVATION_FIRST_INFERENCE,
-        ACTIVATION_MODEL_PULL,
-        ACTIVATION_AGENT_SETUP,
-    }
-) | DESKTOP_ACTIVATION_KINDS
+ACTIVATION_KINDS: frozenset[str] = (
+    frozenset(
+        {
+            ACTIVATION_FIRST_INFERENCE,
+            ACTIVATION_MODEL_PULL,
+            ACTIVATION_AGENT_SETUP,
+        }
+    )
+    | DESKTOP_ACTIVATION_KINDS
+)
 
 # Where the milestone happened. ``cli`` = the interactive REPL / a CLI
 # subcommand; ``api`` = the HTTP server serving an external caller.

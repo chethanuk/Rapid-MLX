@@ -76,4 +76,22 @@ struct DeferredTelemetryConsentWiringTests {
                 "Escape belongs to the active app interaction; only an explicit click may decline")
         #expect(!banner.contains("@FocusState"))
     }
+
+    @Test("Every consent surface discloses the Desktop activation shape and country derivation")
+    func activationDisclosureContract() throws {
+        let banner = try Self.source("Sources/Rapid/UI/TelemetryConsentView.swift")
+        let settings = try Self.source("Sources/Rapid/UI/SettingsView.swift")
+        let privacy = try Self.source("PRIVACY.md")
+        let normalizedPrivacy = privacy.split(whereSeparator: \Character.isWhitespace).joined(separator: " ")
+
+        for surface in [banner, settings] {
+            #expect(surface.contains("first successful chat reply, vision reply, dictation, or image"))
+            #expect(surface.contains("only the milestone name and “Desktop”"))
+            #expect(surface.contains("derives a country code but never stores your IP"))
+        }
+        #expect(privacy.contains("`activation` — once per install"))
+        #expect(privacy.contains("`surface: desktop`"))
+        #expect(privacy.contains("two-letter country code"))
+        #expect(normalizedPrivacy.contains("the IP address is never persisted"))
+    }
 }
