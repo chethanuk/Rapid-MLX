@@ -36,9 +36,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
-from scripts.train_gates_parser import CI_WORKFLOW, parse_linux_pytest_args
+from scripts.train_gates_parser import parse_linux_pytest_args
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -150,7 +148,7 @@ def _lint_one(path: Path) -> list[str]:
         problems.append(
             f"{path.name}: unguarded top-level mlx import(s) {mlx_imports}; "
             "this crashes collection on the no-MLX Linux leg. Guard with a "
-            "top-level ``pytest.importorskip(\"mlx\")`` before the import, or "
+            'top-level ``pytest.importorskip("mlx")`` before the import, or '
             "mark the module ``pytestmark = pytest.mark.requires_mlx`` "
             "(lazy imports + marker), or take it off the no-MLX roster."
         )
