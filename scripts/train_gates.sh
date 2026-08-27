@@ -6,10 +6,22 @@
 # matrix runs for an engine train, so a train can be "frozen" without waiting
 # for (or burning) hosted runners. On full success it prints exactly:
 #
-#     GATES OK <sha> <gates-hash>
+#     GATES OK <sha> <gates-hash>  (python X.Y.Z)
 #
 # and exits 0. If any non-skippable gate fails it prints a per-gate FAILURE
-# block and exits non-zero.
+# block and exits 1. A run on a DIRTY working tree (tracked files modified or
+# staged — untracked files are ignored by the check) still runs every gate but
+# NEVER prints the literal `GATES OK`: its receipt is
+#
+#     GATES DIRTY <sha> <gates-hash>  (python X.Y.Z)
+#
+# and it exits 3, because the validated bytes are not the committed <sha>.
+#
+# Exit codes:
+#   0  GATES OK — all 5 gates passed on a clean tree (the freeze receipt)
+#   1  a gate failed, or fewer than 5 gates passed (a skip is not a pass)
+#   2  usage error, unresolvable base, base == HEAD, or base not an ancestor
+#   3  GATES DIRTY — all 5 gates passed but the tree has modified tracked files
 #
 # The gate definitions are NOT hardcoded here: they are parsed at runtime from
 # .github/workflows/ci.yml and .github/workflows/rapid-mac-ci.yml by
@@ -19,8 +31,12 @@
 #
 # Environment (all optional):
 #   TRAIN_GATES_PYTHON           control interpreter: must be able to import
-#                                yaml, coverage, diff_cover, pytest. Defaults
-#                                to python3, then falls back to a repo .venv.
+#                                yaml (PyYAML); every gate builds its own fresh
+#                                venv FROM this interpreter. The hosted coverage
+#                                union is 3.11-only, so use a python3.11 for a
+#                                faithful freeze (a WARNING is printed for any
+#                                other version). Defaults to python3, then falls
+#                                back to a repo .venv.
 #   TRAIN_GATES_APPLE_VENV       path to an existing Apple-Silicon venv that
 #                                already has the package installed (with mlx),
 #                                to reuse for Gate 4 instead of reinstalling.
@@ -33,16 +49,19 @@
 #                                (a skip is NOT a pass).
 #
 # The 5 gates (hosted equivalents in parens):
-#   1. Linux no-MLX pytest  (ci.yml test-matrix)   — fresh venv, `pip install
-#      . --no-deps`, assert `import mlx` FAILS, then run the parsed Linux pytest
-#      invocations (one process per `pytest` block in ci.yml — the broad roster
-#      and the engine-lifecycle seam set run in separate processes, mirroring
-#      the hosted split, with the second `--cov-append`ing into the same data).
+#   1. Linux no-MLX pytest  (ci.yml test-matrix)   — fresh venv, the hosted
+#      install verbatim (`pip install -e . --no-deps` + the synced
+#      config/requirements-ci-linux.txt), assert `import mlx` FAILS, then run
+#      the parsed Linux pytest invocations (one process per `pytest` block in
+#      ci.yml — the broad roster and the engine-lifecycle seam set run in
+#      separate processes, mirroring the hosted split, with the second
+#      `--cov-append`ing into the same data).
 #   2. mypy error budget     (ci.yml type-check)    — `pip install -r
 #      config/mypy-requirements.txt` then `python scripts/check_mypy_error_budget.py`.
-#   3. coverage union        (ci.yml changed-lines-coverage) — combine the
-#      Linux+Apple coverage .data produced by gates 1+4, emit coverage.xml,
-#      then diff-cover --compare-branch <base-sha> --fail-under 100.
+#   3. coverage union        (ci.yml changed-lines-coverage) — fresh venv with
+#      `coverage` + the exact `diff-cover==X.Y.Z` pin parsed from ci.yml,
+#      combine the Linux+Apple coverage .data produced by gates 1+4, emit
+#      coverage.xml, then diff-cover --compare-branch <base-sha> --fail-under 100.
 #   4. Apple-MLX pytest      (ci.yml test-apple-silicon) — run the parsed Apple
 #      pytest roster (with ci.yml's -m / -k filters) in an mlx-capable venv.
 #   5. Desktop swift test    (rapid-mac-ci.yml build, the `swift test` step
@@ -51,11 +70,16 @@
 #      toward the 5-pass contract).
 #
 # gates-hash: a deterministic hash over the exact gate definitions (the parsed
-# Linux/Apple pytest args, the mypy script + budget files, the diff-cover
-# inputs/flags, the swift invocation, and the relevant workflow step text). A
-# CI-definition edit (a test added to a pytest roster, a mypy budget pin
-# change, a diff_cover knob) changes the hash. Host state (venv paths,
-# timestamps, machine id) is never included.
+# Linux/Apple pytest args, the Linux lane's requirements file, the mypy script
+# + budget files, the diff-cover inputs/flags/pin, the swift invocation, and
+# the relevant workflow step text). A CI-definition edit (a test added to a
+# pytest roster, a mypy budget pin change, a diff_cover knob) changes the hash.
+# Host state (venv paths, timestamps, machine id) is never included.
+#
+# Scratch: all transient coverage artifacts live in a TMPDIR-honoring run dir
+# (never the repo root). It is deleted on success and KEPT (path printed) when
+# a gate fails, so the per-gate coverage inputs, the combined data and the xml
+# can be inspected.
 
 set -euo pipefail
 
@@ -63,47 +87,146 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PARSER_MODULE="scripts.train_gates_parser"
 
 usage() {
-  echo "usage: $0 <base-sha>" >&2
-  echo "  <base-sha>  merge-base (or base commit) to diff/validate against" >&2
-  exit 2
+  cat <<'EOF'
+usage: scripts/train_gates.sh <base-sha>
+       scripts/train_gates.sh -h | --help
+
+  <base-sha>  the commit to diff/validate against (any git rev: sha, tag,
+              branch). It must be a strict ancestor of HEAD — typically
+              $(git merge-base origin/main HEAD). HEAD itself is refused: an
+              empty diff would pass diff-cover at 100% by construction.
+
+Receipt (last line) and exit code:
+  GATES OK <head-sha> <gates-hash>  (python X.Y.Z)      0  frozen
+  GATES DIRTY <head-sha> <gates-hash>  (python X.Y.Z)   3  all gates passed
+        but tracked files are modified/staged — NOT a freeze (untracked files
+        are ignored by the dirty check)
+  GATES FAILED / GATES INCOMPLETE                        1
+  usage error, unresolvable base, base == HEAD, base not an ancestor   2
+
+Environment (optional): TRAIN_GATES_PYTHON (PyYAML-capable python3.11
+  recommended), TRAIN_GATES_APPLE_VENV, TRAIN_GATES_ALLOW_APPLE_INSTALL=1,
+  TRAIN_GATES_SKIP_APPLE=1, TRAIN_GATES_SKIP_SWIFT=1 — see the script header.
+EOF
 }
+
+# ---------------------------------------------------------------------------
+# Argument handling — BEFORE any interpreter resolution, workflow parsing or
+# hashing, so `--help` and bad invocations are cheap and never touch the
+# environment.
+# ---------------------------------------------------------------------------
+if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -ne 1 ]]; then
+  echo "ERROR: expected exactly one argument <base-sha>, got $#" >&2
+  usage >&2
+  exit 2
+fi
+if [[ -z "$1" || "$1" == -* ]]; then
+  echo "ERROR: unknown option or empty base '$1'" >&2
+  usage >&2
+  exit 2
+fi
+BASE_SHA="$1"
+
+# Resolve the base in THIS repo. `--quiet` keeps git's own `fatal:` off the
+# terminal so an unresolvable base yields exactly one clear line + usage.
+if ! BASE_SHA_RESOLVED="$(git -C "$ROOT" rev-parse --verify --quiet "${BASE_SHA}^{commit}")"; then
+  echo "ERROR: cannot resolve base '$BASE_SHA' to a commit in $ROOT (unfetched? typo?)" >&2
+  usage >&2
+  exit 2
+fi
+
+# The validated head is the current checkout HEAD (what we're actually testing).
+HEAD_RESOLVED="$(git -C "$ROOT" rev-parse HEAD)"
+
+# Refuse base == HEAD: diff-cover would compare an EMPTY diff and pass 100% by
+# construction — a receipt that validates nothing.
+if [[ "$BASE_SHA_RESOLVED" == "$HEAD_RESOLVED" ]]; then
+  echo "ERROR: base $BASE_SHA_RESOLVED IS the current HEAD; there are no changed lines to validate." >&2
+  echo "       diff-cover would compare an empty diff and pass 100% by construction." >&2
+  echo "       Pass the merge-base instead, e.g. \$(git merge-base origin/main HEAD)." >&2
+  exit 2
+fi
+
+# B4: reject a wrong/forward base. diff-cover compares against <base-sha>; it
+# must be a real ancestor of HEAD, else a forward/foreign base yields a trivial
+# (often empty) diff and a guaranteed 100% pass — a false green.
+if ! git -C "$ROOT" merge-base --is-ancestor "$BASE_SHA_RESOLVED" "$HEAD_RESOLVED"; then
+  echo "ERROR: base $BASE_SHA_RESOLVED is NOT an ancestor of HEAD." >&2
+  echo "       A forward/wrong base would make diff-cover compare an empty/trivial diff and pass 100% by construction." >&2
+  exit 2
+fi
+
+# Dirty check — tracked files only. `--untracked-files=no` deliberately ignores
+# untracked files (scratch notes, build output) because they are not part of
+# the validated <sha> either way; a modified or staged TRACKED file means the
+# bytes under test differ from the commit, so the receipt becomes GATES DIRTY.
+GIT_DIRTY=""
+DIRTY_STATUS="$(git -C "$ROOT" status --porcelain --untracked-files=no)"
+if [[ -n "$DIRTY_STATUS" ]]; then
+  GIT_DIRTY=1
+  echo "train-gates: WARNING: working tree is DIRTY (modified/staged tracked files; untracked files are ignored):"
+  printf '%s\n' "$DIRTY_STATUS" | sed 's/^/    /'
+  echo "train-gates:          the gates still run, but the receipt will be GATES DIRTY (exit 3), never GATES OK."
+fi
 
 # ---------------------------------------------------------------------------
 # Scratch dir (honors TMPDIR) + exit cleanup. All transient coverage artifacts
 # live here — NEVER the repo root — so a second run on a new head cannot
-# silently union stale coverage from the previous head.
+# silently union stale coverage from the previous head. Kept on failure.
 # ---------------------------------------------------------------------------
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-run-XXXXXX")"
 COV_DIR="$RUN_TMP/cov"
 mkdir -p "$COV_DIR"
-cleanup() { rm -rf "$RUN_TMP"; }
+KEEP_RUN_TMP=""
+cleanup() {
+  if [[ -n "$KEEP_RUN_TMP" ]]; then
+    echo "train-gates: run artifacts kept for inspection: $RUN_TMP" >&2
+  else
+    rm -rf "$RUN_TMP"
+  fi
+}
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Control interpreter
+# Control interpreter (needs only PyYAML: every gate builds its own venv).
 # ---------------------------------------------------------------------------
 resolve_python() {
   if [[ -n "${TRAIN_GATES_PYTHON:-}" ]]; then
+    if ! "${TRAIN_GATES_PYTHON}" -c 'import yaml' >/dev/null 2>&1; then
+      echo "ERROR: TRAIN_GATES_PYTHON=${TRAIN_GATES_PYTHON} cannot import yaml (pip install pyyaml)" >&2
+      return 1
+    fi
     echo "${TRAIN_GATES_PYTHON}"
     return
   fi
-  if python3 -c 'import yaml, coverage, diff_cover, pytest' >/dev/null 2>&1; then
+  if python3 -c 'import yaml' >/dev/null 2>&1; then
     echo "python3"
     return
   fi
   local venv_candidate="$ROOT/.venv/bin/python"
   if [[ -x "$venv_candidate" ]] \
-    && "$venv_candidate" -c 'import yaml, coverage, diff_cover, pytest' >/dev/null 2>&1; then
+    && "$venv_candidate" -c 'import yaml' >/dev/null 2>&1; then
     echo "$venv_candidate"
     return
   fi
-  echo "ERROR: no interpreter with yaml+coverage+diff_cover+pytest found; set TRAIN_GATES_PYTHON" >&2
+  echo "ERROR: no interpreter with PyYAML found; set TRAIN_GATES_PYTHON (a python3.11 with pyyaml)" >&2
   return 1
 }
 
 PYTHON_BIN="$(resolve_python)"
 PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
 echo "train-gates: control interpreter: $PYTHON_BIN (python $PY_VERSION)"
+if [[ "${PY_VERSION%.*}" != "3.11" ]]; then
+  echo "train-gates: WARNING: control interpreter is python $PY_VERSION, but the hosted coverage union" >&2
+  echo "                      (changed-lines-coverage) and the Linux data it consumes are 3.11-only." >&2
+  echo "                      Every gate venv is created from this interpreter, so line coverage can" >&2
+  echo "                      diverge on version-conditional code. Set TRAIN_GATES_PYTHON=<python3.11>" >&2
+  echo "                      for a faithful freeze." >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Parse the gate surface from the workflows (single source of truth).
@@ -130,6 +253,8 @@ compute_gates_hash() {
   {
     echo "linux-pytest"
     "$PYTHON_BIN" -c 'import sys,json; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True))' "$LINUX_JSON"
+    echo "linux-requirements"
+    git -C "$ROOT" hash-object "$ROOT/config/requirements-ci-linux.txt"
     echo "apple-pytest"
     "$PYTHON_BIN" -c 'import sys,json; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True))' "$APPLE_JSON"
     echo "mypy-script-sha"
@@ -163,6 +288,17 @@ passed_na(){ PASSED+=("$1"); if [[ $# -ge 2 ]]; then printf 'GATE %s: PASS (N/A)
 skip()  { SKIPPED+=("$1"); printf 'GATE %s: SKIPPED — %s\n' "$1" "${2:-}"; }
 fail()  { FAILED+=("$1"); if [[ $# -ge 2 ]]; then printf 'GATE %s: FAILURE — %s\n' "$1" "$2"; else printf 'GATE %s: FAILURE\n' "$1"; fi; }
 
+# run_gate <label> <fn> [args...] — run one gate, never abort the run on its
+# failure (every gate records its own PASSED/FAILED/SKIPPED entry), and print
+# its wall time so a freeze transcript carries per-gate timings.
+run_gate() {
+  local label="$1"
+  shift
+  local t0=$SECONDS
+  "$@" || true
+  echo "  gate $label wall time: $((SECONDS - t0))s"
+}
+
 # ---------------------------------------------------------------------------
 # Gate 1 — Linux no-MLX pytest (fresh venv, no mlx), one process per ci.yml
 # pytest block.
@@ -176,13 +312,21 @@ gate1_linux() {
   echo "  fresh venv: $venv"
 
   "$PYTHON_BIN" -m venv "$venv"
-  # --no-deps mirrors the hosted Linux install precisely (linux CI installs
-  # pytest bits separately; here the fresh venv gets a bootstrap pytest + the
-  # package with default extras, exactly the "no MLX" contract).
   "$py" -m pip install --quiet --upgrade pip
-  "$py" -m pip install --quiet "$ROOT" --no-deps
-  # pytest bits needed to actually run the selected tests.
-  "$py" -m pip install --quiet pytest pytest-asyncio pytest-cov pydantic fastapi jsonschema httpx psutil transformers requests pyyaml python-multipart uvicorn websockets jinja2
+  # Mirror ci.yml test-matrix "Install dependencies" line for line:
+  #     pip install -e . --no-deps
+  #     pip install --requirement config/requirements-ci-linux.txt
+  # The package goes in editable and WITHOUT deps, so the base deps' mlx /
+  # mlx-lm never land (the "no MLX" contract), and the lane's test surface
+  # comes from the same synced requirements file the hosted lane installs —
+  # never an ad hoc package list here (a pin change there also changes the
+  # gates-hash). Remaining, documented divergence from hosted: this runs on
+  # the local OS/arch with the control interpreter's version, not on
+  # ubuntu-latest x86-64 across the 3.10/3.11/3.12 matrix; the roster, flags
+  # and the coverage data name (coverage-linux-3.11.data — the leg the hosted
+  # union consumes) are identical.
+  "$py" -m pip install --quiet -e "$ROOT" --no-deps
+  "$py" -m pip install --quiet --requirement "$ROOT/config/requirements-ci-linux.txt"
 
   if "$py" -c "import mlx" >/dev/null 2>&1; then
     fail 1 "import mlx unexpectedly SUCCEEDED in the fresh --no-deps venv; the hosted Linux gate expects no MLX"
@@ -273,10 +417,6 @@ PY
 gate2_mypy() {
   echo
   echo "== Gate 2: mypy error budget =="
-  if ! "$PYTHON_BIN" -c "import yaml" >/dev/null 2>&1; then
-    fail 2 "control interpreter lacks pyyaml; cannot parse the workflow"
-    return 1
-  fi
   if [[ ! -f "$ROOT/config/mypy-requirements.txt" ]]; then
     fail 2 "config/mypy-requirements.txt missing"
     return 1
@@ -313,38 +453,53 @@ gate3_diffcover() {
     fail 3 "missing $apple_data (Gate 4 must produce it)"
     return 1
   fi
-  if ! "$PYTHON_BIN" -c "import coverage, diff_cover" >/dev/null 2>&1; then
-    fail 3 "control interpreter lacks coverage/diff_cover"
-    return 1
-  fi
+
+  # Mirror the hosted job's "Install coverage tools" step in a fresh venv:
+  # `pip install coverage "diff-cover==X.Y.Z"`, with the pin PARSED from
+  # ci.yml (never hardcoded here) so a hosted pin bump moves this gate — and
+  # the gates-hash — with it.
+  local pin
+  pin="$("$PYTHON_BIN" -c 'import sys,json; print(json.loads(sys.argv[1])["diff_cover_pin"])' "$DIFF_JSON")"
+  local venv
+  venv="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-cov-XXXXXX")"
+  local py="$venv/bin/python"
+  echo "  coverage venv: $venv (coverage + diff-cover==$pin, the ci.yml pin)"
+  "$PYTHON_BIN" -m venv "$venv"
+  "$py" -m pip install --quiet --upgrade pip
+  "$py" -m pip install --quiet coverage "diff-cover==$pin"
+
   # Reproduce the hosted changed-lines-coverage job exactly: combine + xml +
   # diff-cover all run FROM the repo root (so `.coveragerc` applies, the
   # relative_files coverage paths resolve, and `--compare-branch <base-sha>`
   # resolves against `.git`). The .data inputs live under COV_DIR (never the
-  # repo root), and the transient combined `./.coverage` + `coverage.xml` are
+  # repo root), and the transient combined `.coverage` + `coverage.xml` are
   # pointed into COV_DIR too so no coverage artifact ever lands in the repo
   # root (a stale one there would silently union on the next run's new head).
+  #
+  # COVERAGE_FILE is exported for the WHOLE subshell: `coverage xml` reads the
+  # combined data file, which lives at $combined — with the variable scoped to
+  # `combine` only, `xml` would look for a nonexistent ./.coverage and fail
+  # "No data to report." `--keep` leaves the per-gate inputs in place (the run
+  # dir is kept on failure) so they can be inspected.
   local combined="$COV_DIR/.coverage"
   local work_xml="$COV_DIR/coverage.xml"
   rm -f "$combined" "$work_xml"
   if ! ( cd "$ROOT" \
-      && COVERAGE_FILE="$combined" "$PYTHON_BIN" -m coverage combine "$linux_data" "$apple_data" \
-      && "$PYTHON_BIN" -m coverage xml -o "$work_xml" ); then
+      && export COVERAGE_FILE="$combined" \
+      && "$py" -m coverage combine --keep "$linux_data" "$apple_data" \
+      && "$py" -m coverage xml -o "$work_xml" ); then
     fail 3 "coverage combine/xml failed (see output above)"
-    rm -f "$combined" "$work_xml"
     return 1
   fi
   if ! ( cd "$ROOT" \
-      && "$PYTHON_BIN" -m diff_cover.diff_cover_tool \
+      && "$py" -m diff_cover.diff_cover_tool \
           "$work_xml" \
           --compare-branch "$base_sha" \
           --show-uncovered \
           --fail-under 100 ); then
-    rm -f "$combined" "$work_xml"
     fail 3 "diff-cover --compare-branch $base_sha failed (see output above)"
     return 1
   fi
-  rm -f "$combined" "$work_xml"
   passed 3
 }
 
@@ -373,8 +528,10 @@ gate4_apple() {
     echo "  creating Apple venv: $venv"
     "$PYTHON_BIN" -m venv "$venv"
     "$apple_py" -m pip install --quiet --upgrade pip
+    # Mirror ci.yml test-apple-silicon "Install project and dependencies":
+    #     pip install -e ".[vision]"   then   pip install -e ".[ci-apple]"
     "$apple_py" -m pip install --quiet -e "${ROOT}[vision]"
-    "$apple_py" -m pip install --quiet pytest pytest-asyncio pytest-cov
+    "$apple_py" -m pip install --quiet -e "${ROOT}[ci-apple]"
   else
     fail 4 "no Apple venv provided; set TRAIN_GATES_APPLE_VENV=<venv with the package + mlx>, TRAIN_GATES_ALLOW_APPLE_INSTALL=1 to create one, or TRAIN_GATES_SKIP_APPLE=1"
     return 1
@@ -466,22 +623,9 @@ gate5_swift() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if [[ $# -lt 1 ]]; then
-  usage
-fi
-BASE_SHA="${1}"
-BASE_SHA_RESOLVED="$(git -C "$ROOT" rev-parse --verify "${BASE_SHA}^{commit}")"
 echo "train-gates: base-sha resolved -> $BASE_SHA_RESOLVED"
+echo "train-gates: head under test   -> $HEAD_RESOLVED"
 echo "train-gates: gates-hash        -> $GATES_HASH"
-
-# B4: reject a wrong/forward base. diff-cover compares against <base-sha>; it
-# must be a real ancestor of HEAD, else a forward/foreign base yields a trivial
-# (often empty) diff and a guaranteed 100% pass — a false green.
-if ! git -C "$ROOT" merge-base --is-ancestor "$BASE_SHA_RESOLVED" HEAD; then
-  echo "ERROR: base $BASE_SHA_RESOLVED is NOT an ancestor of HEAD." >&2
-  echo "       A forward/wrong base would make diff-cover compare an empty/trivial diff and pass 100% by construction." >&2
-  exit 2
-fi
 
 # B2: never tolerate stale coverage artifacts from a previous run in the repo
 # root — the next run against a NEW head would silently union old coverage into
@@ -490,27 +634,19 @@ for stale in "$ROOT"/coverage-*.data "$ROOT"/coverage.xml "$ROOT"/.coverage; do
   [[ -e "$stale" ]] && rm -f "$stale" && echo "train-gates: removed stale $stale"
 done
 
-# The validated head is the current checkout HEAD (what we're actually testing).
-HEAD_RESOLVED="$(git -C "$ROOT" rev-parse HEAD)"
-GIT_DIRTY=""
-if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
-  GIT_DIRTY=1
-  echo "train-gates: WARNING: working tree is DIRTY; the hash below covers committed gate defs only."
-fi
-
 # Design: even if one gate fails we keep going so the operator sees every
 # failure in one pass. Each gate writes its own PASSED/FAILED/SKIPPED entry
-# and returns non-zero on failure; we ignore that code here (set -e would
-# otherwise abort the run) and decide the exit status from the FAILED array.
+# and returns non-zero on failure; run_gate ignores that code (set -e would
+# otherwise abort the run) and the exit status comes from the FAILED array.
 #
 # Order matters: Gate 4 (Apple) must produce coverage-apple.data BEFORE Gate 3
 # (coverage union + diff-cover) combines it, so the run order is 1 -> 2 -> 4 ->
 # 3 -> 5.
-gate1_linux "$BASE_SHA_RESOLVED" || true
-gate2_mypy || true
-gate4_apple || true
-gate3_diffcover "$BASE_SHA_RESOLVED" || true
-gate5_swift "$BASE_SHA_RESOLVED" || true
+run_gate 1 gate1_linux
+run_gate 2 gate2_mypy
+run_gate 4 gate4_apple
+run_gate 3 gate3_diffcover "$BASE_SHA_RESOLVED"
+run_gate 5 gate5_swift "$BASE_SHA_RESOLVED"
 
 echo
 printf 'PASSED (%d): %s\n' "${#PASSED[@]}" "${PASSED[*]:-none}"
@@ -518,6 +654,7 @@ if [[ "${#SKIPPED[@]}" -gt 0 ]]; then
   printf 'SKIPPED (%d): %s\n' "${#SKIPPED[@]}" "${SKIPPED[*]}"
 fi
 if [[ "${#FAILED[@]}" -gt 0 ]]; then
+  KEEP_RUN_TMP=1
   printf 'FAILED (%d): %s\n' "${#FAILED[@]}" "${FAILED[*]}"
   echo
   echo "GATES FAILED — a gate below blocked the freeze:"
@@ -534,10 +671,15 @@ if [[ "${#PASSED[@]}" -ne 5 ]]; then
   exit 1
 fi
 
+# A dirty tree never earns the literal `GATES OK`: the bytes that were tested
+# are not the committed HEAD. Distinct receipt, distinct exit code (3).
 if [[ -n "$GIT_DIRTY" ]]; then
   echo
-  echo "^^MARK^^ GATES OK ${HEAD_RESOLVED} ${GATES_HASH}  (python ${PY_VERSION})  [DIRTY TREE — freeze not trustworthy]"
-else
-  echo
-  echo "GATES OK ${HEAD_RESOLVED} ${GATES_HASH}  (python ${PY_VERSION})"
+  echo "GATES DIRTY ${HEAD_RESOLVED} ${GATES_HASH}  (python ${PY_VERSION})"
+  echo "train-gates: all 5 gates passed, but tracked files are modified/staged (see the WARNING above);" >&2
+  echo "             this is NOT a freeze receipt — commit or stash, then rerun for GATES OK." >&2
+  exit 3
 fi
+
+echo
+echo "GATES OK ${HEAD_RESOLVED} ${GATES_HASH}  (python ${PY_VERSION})"

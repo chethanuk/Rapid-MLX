@@ -51,6 +51,10 @@ _K_FILTER = re.compile(r'-k\s+"([^"]+)"')
 
 _M_FILTER = re.compile(r'-m\s+"([^"]+)"')
 
+# The exact diff-cover pin the hosted changed-lines-coverage job installs
+# (``pip install coverage "diff-cover==8.0.3"``); Gate 3 installs the same pin.
+_DIFF_COVER_PIN = re.compile(r"diff-cover==([0-9][0-9A-Za-z.]*)")
+
 
 def _load_workflow() -> dict[str, Any]:
     if yaml is None:
@@ -217,7 +221,13 @@ def parse_mypy_invocation() -> dict[str, Any]:
 
 
 def parse_diff_cover_invocation() -> dict[str, Any]:
-    """Parse the diff-cover invocation from ci.yml (changed-lines job)."""
+    """Parse the diff-cover invocation from ci.yml (changed-lines job).
+
+    Returns ``{linux, apple, fail_under, diff_cover_pin}`` — the two coverage
+    inputs, the threshold, and the exact ``diff-cover==X.Y.Z`` pin the job's
+    "Install coverage tools" step installs (Gate 3 installs the same pin into
+    its own fresh venv, so a hosted pin bump moves the local gate with it).
+    """
     workflow = _load_workflow()
     job = workflow["jobs"]["changed-lines-coverage"]
     step = _find_step_by_name(job, "Combine coverage and enforce changed lines")
@@ -233,10 +243,20 @@ def parse_diff_cover_invocation() -> dict[str, Any]:
         raise _drift("diff-cover --compare-branch missing")
     if "--fail-under 100" not in run_text:
         raise _drift("diff-cover --fail-under 100 missing")
+
+    install_step = _find_step_by_name(job, "Install coverage tools")
+    install_text = install_step["run"]
+    pin_match = _DIFF_COVER_PIN.search(install_text)
+    if pin_match is None or "coverage" not in install_text:
+        raise _drift(
+            "changed-lines-coverage 'Install coverage tools' drifted; expected "
+            f"'pip install coverage \"diff-cover==X.Y.Z\"', found {install_text!r}"
+        )
     return {
         "linux": "coverage-linux-3.11.data",
         "apple": "coverage-apple.data",
         "fail_under": 100,
+        "diff_cover_pin": pin_match.group(1),
     }
 
 

@@ -16,6 +16,7 @@ Pure-pytest, Linux-friendly, no MLX import (the parser is stdlib + PyYAML).
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -151,7 +152,10 @@ def test_linux_parser_extracts_deselect_and_k_filter() -> None:
     main_invocation = parsed[0]
 
     # Every --deselect= arg in the FIRST (main) block must be captured, and only
-    # those. (The engine-lifecycle block has none.)
+    # those — including the case where the workflow deselects nothing (since
+    # #2508 declared jinja2 in the ci-linux extra, the roster carries no
+    # --deselect= at all; the parser must then return an empty list, never a
+    # phantom entry). The engine-lifecycle block never has any.
     main_block = _split_blocks(run_text)[0]
     expected_deselect = [
         line.strip().split("--deselect=", 1)[1].split(" \\")[0].split()[0]
@@ -159,7 +163,7 @@ def test_linux_parser_extracts_deselect_and_k_filter() -> None:
         if "--deselect=" in line
     ]
     assert main_invocation["deselect"] == expected_deselect
-    assert "--deselect=" in run_text  # sanity: the workflow does deselect
+    assert len(expected_deselect) == run_text.count("--deselect=")
 
     # The -k filter must be captured verbatim on the main block.
     assert main_invocation["marker"], (
@@ -262,6 +266,76 @@ def test_diff_cover_invocation_matches_workflow() -> None:
     assert parsed["fail_under"] == 100
     assert parsed["linux"] == "coverage-linux-3.11.data"
     assert parsed["apple"] == "coverage-apple.data"
+
+
+def test_diff_cover_pin_matches_workflow_install_step() -> None:
+    # Gate 3 installs `coverage` + the SAME diff-cover pin the hosted job
+    # installs, parsed from its "Install coverage tools" step — never
+    # hardcoded in the script. Guard the pin verbatim so a hosted bump that
+    # the parser fails to pick up trips here.
+    parsed = parse_diff_cover_invocation()
+    install_text = _run_text(
+        "changed-lines-coverage", "Install coverage tools", CI_PARSED
+    )
+    assert f"diff-cover=={parsed['diff_cover_pin']}" in install_text
+    assert "coverage" in install_text
+    assert parsed["diff_cover_pin"] == "8.0.3"  # current hosted pin, verbatim
+
+
+# ---------------------------------------------------------------------------
+# train_gates.sh argument handling — these paths exit BEFORE any interpreter
+# resolution, workflow parsing or venv creation, so they are cheap and
+# Linux-friendly (bash + git only) and never touch the environment.
+# ---------------------------------------------------------------------------
+TRAIN_GATES_SH = REPO_ROOT / "scripts" / "train_gates.sh"
+
+
+def _run_train_gates(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(TRAIN_GATES_SH), *args],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_train_gates_help_exits_zero_with_usage_on_stdout() -> None:
+    for flag in ("-h", "--help"):
+        proc = _run_train_gates(flag)
+        assert proc.returncode == 0, (flag, proc.stderr)
+        assert proc.stdout.startswith("usage: scripts/train_gates.sh <base-sha>")
+        assert "GATES DIRTY" in proc.stdout  # the receipt contract is documented
+        assert proc.stderr == ""
+
+
+def test_train_gates_missing_or_bad_args_exit_2_with_usage() -> None:
+    for args in ((), ("--bogus",), ("a", "b")):
+        proc = _run_train_gates(*args)
+        assert proc.returncode == 2, (args, proc.stdout, proc.stderr)
+        assert proc.stderr.startswith("ERROR: "), (args, proc.stderr)
+        assert "usage: scripts/train_gates.sh <base-sha>" in proc.stderr
+        assert "GATES OK" not in proc.stdout
+
+
+def test_train_gates_unresolvable_base_is_one_clear_error_not_git_fatal() -> None:
+    proc = _run_train_gates("no-such-rev-zz")
+    assert proc.returncode == 2, (proc.stdout, proc.stderr)
+    first_line = proc.stderr.splitlines()[0]
+    assert first_line.startswith("ERROR: cannot resolve base 'no-such-rev-zz'")
+    assert "fatal:" not in proc.stderr
+    assert "usage: scripts/train_gates.sh <base-sha>" in proc.stderr
+
+
+def test_train_gates_refuses_base_equal_to_head() -> None:
+    # base == HEAD would make diff-cover compare an EMPTY diff and pass 100%
+    # by construction; the script must refuse before running any gate.
+    proc = _run_train_gates("HEAD")
+    assert proc.returncode == 2, (proc.stdout, proc.stderr)
+    assert "IS the current HEAD" in proc.stderr
+    assert "merge-base" in proc.stderr
+    assert "GATES OK" not in proc.stdout
+    assert "== Gate 1" not in proc.stdout
 
 
 # ---------------------------------------------------------------------------

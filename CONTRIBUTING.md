@@ -124,19 +124,28 @@ validation gates the hosted CI matrix runs — now reproducible locally on one
 machine:
 
 ```bash
-scripts/train_gates.sh <merge-base-sha>
+scripts/train_gates.sh "$(git merge-base origin/main HEAD)"
+scripts/train_gates.sh --help
 ```
 
 A PR is "frozen" for a train only when `scripts/train_gates.sh <merge-base>`
-prints `GATES OK <sha> <gates-hash>` on the exact head you intend to freeze.
+prints `GATES OK <sha> <gates-hash>  (python X.Y.Z)` (exit 0) on the exact
+head you intend to freeze. The `<base-sha>` must be a strict ancestor of
+`HEAD` — the script refuses `HEAD` itself and any forward/foreign base (exit 2)
+because an empty diff would pass diff-cover at 100% by construction; an
+unresolvable base or bad arguments print one error line plus usage (exit 2).
+A working tree with modified or staged **tracked** files still runs every gate
+but never earns the literal `GATES OK`: its receipt is
+`GATES DIRTY <sha> <gates-hash>  (python X.Y.Z)` with exit 3 (untracked files
+are ignored by that check — they are not part of the validated `<sha>`).
 
 The 5 gates (and their hosted CI equivalents):
 
 | Gate | What it runs | Hosted equivalent |
 |---|---|---|
-| 1 | Linux no-MLX pytest (`pip install . --no-deps`, asserts `import mlx` fails, then the parsed Linux test roster) | `ci.yml` `test-matrix` |
+| 1 | Linux no-MLX pytest (the hosted install verbatim: `pip install -e . --no-deps` + `config/requirements-ci-linux.txt`, asserts `import mlx` fails, then the parsed Linux test roster) | `ci.yml` `test-matrix` |
 | 2 | Pinned mypy error budget (`config/mypy-requirements.txt` → `check_mypy_error_budget.py`) | `ci.yml` `type-check` |
-| 3 | Coverage union + `diff-cover --fail-under 100` against `<base-sha>` | `ci.yml` `changed-lines-coverage` |
+| 3 | Coverage union + `diff-cover --fail-under 100` against `<base-sha>`, in a fresh venv with `coverage` + the `diff-cover==X.Y.Z` pin parsed from `ci.yml` | `ci.yml` `changed-lines-coverage` |
 | 4 | Apple-MLX pytest (the parsed Apple test roster, in an mlx-capable venv) | `ci.yml` `test-apple-silicon` |
 | 5 | Desktop `swift test --no-parallel` (only if `apps/` changed vs base; PASS-BY-N/A if `apps/` is unchanged) | `rapid-mac-ci.yml` `build` job's `swift test` step only |
 
@@ -149,10 +158,15 @@ budget pin change, a diff-cover knob — drifts the local reproduction out of
 sync with the workflows. The printed `gates-hash` is a deterministic hash over
 the exact gate definitions, so a CI-definition change changes the hash.
 
-Environment knobs (all optional): `TRAIN_GATES_PYTHON` (an interpreter with
-`pyyaml` + `coverage` + `diff-cover` + `pytest`); `TRAIN_GATES_APPLE_VENV` /
+Environment knobs (all optional): `TRAIN_GATES_PYTHON` (the control
+interpreter — it only needs `pyyaml`; every gate builds its own fresh venv from
+it, so use a **python3.11** to match the hosted coverage union, which is
+3.11-only — any other version prints a warning); `TRAIN_GATES_APPLE_VENV` /
 `TRAIN_GATES_ALLOW_APPLE_INSTALL=1` / `TRAIN_GATES_SKIP_APPLE=1` for the Apple
-gate; `TRAIN_GATES_SKIP_SWIFT=1` for the Desktop gate. `GATES OK` requires all
+gate; `TRAIN_GATES_SKIP_SWIFT=1` for the Desktop gate. Transient coverage
+artifacts live in a `TMPDIR` run directory (never the repo root); it is deleted
+on success and kept (path printed) when a gate fails, so the per-gate coverage
+inputs can be inspected. `GATES OK` requires all
 5 gates to pass. A **skip is not a pass** — skipping only happens for a genuine
 environment constraint (missing `swift` toolchain, missing `apps/` dir, or an
 explicit `TRAIN_GATES_SKIP_*` flag) and leaves the train un-frozen. A **PASS,
