@@ -133,9 +133,14 @@ prints `GATES OK <sha> <gates-hash>  (python X.Y.Z)` (exit 0) on the exact
 head you intend to freeze. The `<base-sha>` must be a strict ancestor of
 `HEAD` — the script refuses `HEAD` itself and any forward/foreign base (exit 2)
 because an empty diff would pass diff-cover at 100% by construction; an
-unresolvable base or bad arguments print one error line plus usage (exit 2).
-A working tree with modified or staged **tracked** files still runs every gate
-but never earns the literal `GATES OK`: its receipt is
+unresolvable base or bad arguments print one error line plus usage (exit 2),
+as does an unusable control interpreter (no PyYAML, or python < 3.10). If any
+gate fails, the run still executes every remaining gate (so you see every
+failure in one pass) and ends with `GATES FAILED` plus one `FAILURE gate N`
+line per failed gate (exit 1); if no gate failed but fewer than 5 passed
+because one was skipped, it ends with `GATES INCOMPLETE` (exit 1) — a skip is
+not a pass. A working tree with modified or staged **tracked** files still runs
+every gate but never earns the literal `GATES OK`: its receipt is
 `GATES DIRTY <sha> <gates-hash>  (python X.Y.Z)` with exit 3 (untracked files
 are ignored by that check — they are not part of the validated `<sha>`).
 
@@ -164,9 +169,10 @@ it, so use a **python3.11** to match the hosted coverage union, which is
 3.11-only — any other version prints a warning); `TRAIN_GATES_APPLE_VENV` /
 `TRAIN_GATES_ALLOW_APPLE_INSTALL=1` / `TRAIN_GATES_SKIP_APPLE=1` for the Apple
 gate; `TRAIN_GATES_SKIP_SWIFT=1` for the Desktop gate. Transient coverage
-artifacts live in a `TMPDIR` run directory (never the repo root); it is deleted
-on success and kept (path printed) when a gate fails, so the per-gate coverage
-inputs can be inspected. `GATES OK` requires all
+artifacts and the per-gate venvs live in one `TMPDIR` run directory (never the
+repo root, never loose in `TMPDIR`); it is deleted on success and kept (path
+printed) when a gate fails, so the per-gate coverage inputs and venvs can be
+inspected. `GATES OK` requires all
 5 gates to pass. A **skip is not a pass** — skipping only happens for a genuine
 environment constraint (missing `swift` toolchain, missing `apps/` dir, or an
 explicit `TRAIN_GATES_SKIP_*` flag) and leaves the train un-frozen. A **PASS,

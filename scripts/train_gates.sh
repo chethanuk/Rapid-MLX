@@ -20,7 +20,8 @@
 # Exit codes:
 #   0  GATES OK — all 5 gates passed on a clean tree (the freeze receipt)
 #   1  a gate failed, or fewer than 5 gates passed (a skip is not a pass)
-#   2  usage error, unresolvable base, base == HEAD, or base not an ancestor
+#   2  usage error, unresolvable base, base == HEAD, base not an ancestor, or
+#      an unusable control interpreter (no PyYAML, or python < 3.10)
 #   3  GATES DIRTY — all 5 gates passed but the tree has modified tracked files
 #
 # The gate definitions are NOT hardcoded here: they are parsed at runtime from
@@ -40,6 +41,12 @@
 #   TRAIN_GATES_APPLE_VENV       path to an existing Apple-Silicon venv that
 #                                already has the package installed (with mlx),
 #                                to reuse for Gate 4 instead of reinstalling.
+#                                Gate 4 verifies that its `vllm_mlx` imports
+#                                from THIS checkout; if not (stale editable
+#                                install pinned to another worktree, or a
+#                                wheel) it re-points the venv with
+#                                `pip install -e "$ROOT" --no-deps`, and fails
+#                                the gate if that still does not resolve here.
 #   TRAIN_GATES_ALLOW_APPLE_INSTALL=1
 #                                if no apple venv is provided, create a fresh
 #                                one and `pip install -e "$ROOT[vision]"` (slow).
@@ -76,10 +83,12 @@
 # pytest roster, a mypy budget pin change, a diff_cover knob) changes the hash.
 # Host state (venv paths, timestamps, machine id) is never included.
 #
-# Scratch: all transient coverage artifacts live in a TMPDIR-honoring run dir
-# (never the repo root). It is deleted on success and KEPT (path printed) when
-# a gate fails, so the per-gate coverage inputs, the combined data and the xml
-# can be inspected.
+# Scratch: ALL transient state — the per-gate coverage artifacts AND the four
+# per-gate venvs (Linux, mypy, coverage, and the Apple venv when
+# TRAIN_GATES_ALLOW_APPLE_INSTALL=1 creates one) — lives in ONE TMPDIR-honoring
+# run dir, $RUN_TMP (never the repo root, never loose in TMPDIR). The run dir is
+# deleted on success and KEPT (path printed) when a gate fails, so the per-gate
+# coverage inputs, the combined data, the xml and the venvs can be inspected.
 
 set -euo pipefail
 
@@ -103,6 +112,7 @@ Receipt (last line) and exit code:
         are ignored by the dirty check)
   GATES FAILED / GATES INCOMPLETE                        1
   usage error, unresolvable base, base == HEAD, base not an ancestor   2
+  unusable control interpreter (no PyYAML, or python < 3.10)           2
 
 Environment (optional): TRAIN_GATES_PYTHON (PyYAML-capable python3.11
   recommended), TRAIN_GATES_APPLE_VENV, TRAIN_GATES_ALLOW_APPLE_INSTALL=1,
@@ -170,7 +180,7 @@ if [[ -n "$DIRTY_STATUS" ]]; then
   GIT_DIRTY=1
   echo "train-gates: WARNING: working tree is DIRTY (modified/staged tracked files; untracked files are ignored):"
   printf '%s\n' "$DIRTY_STATUS" | sed 's/^/    /'
-  echo "train-gates:          the gates still run, but the receipt will be GATES DIRTY (exit 3), never GATES OK."
+  echo "train-gates:          the gates still run, but the receipt will be GATES DIRTY (exit 3), never the OK receipt."
 fi
 
 # ---------------------------------------------------------------------------
@@ -194,31 +204,44 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Control interpreter (needs only PyYAML: every gate builds its own venv).
 # ---------------------------------------------------------------------------
+py_version_of() {
+  "$1" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo "unknown"
+}
+
 resolve_python() {
+  local candidate=""
   if [[ -n "${TRAIN_GATES_PYTHON:-}" ]]; then
     if ! "${TRAIN_GATES_PYTHON}" -c 'import yaml' >/dev/null 2>&1; then
       echo "ERROR: TRAIN_GATES_PYTHON=${TRAIN_GATES_PYTHON} cannot import yaml (pip install pyyaml)" >&2
       return 1
     fi
-    echo "${TRAIN_GATES_PYTHON}"
-    return
+    candidate="${TRAIN_GATES_PYTHON}"
+  elif python3 -c 'import yaml' >/dev/null 2>&1; then
+    candidate="python3"
+  elif [[ -x "$ROOT/.venv/bin/python" ]] \
+    && "$ROOT/.venv/bin/python" -c 'import yaml' >/dev/null 2>&1; then
+    candidate="$ROOT/.venv/bin/python"
+  else
+    echo "ERROR: no interpreter with PyYAML found; set TRAIN_GATES_PYTHON (a python3.11 with pyyaml)" >&2
+    return 1
   fi
-  if python3 -c 'import yaml' >/dev/null 2>&1; then
-    echo "python3"
-    return
+  # HARD floor: pyproject's requires-python and the hosted matrix (3.10/3.11/
+  # 3.12) never go below 3.10, and every gate venv is created FROM this
+  # interpreter — below the floor the package cannot even install, so this is
+  # an error (exit 2), not the 3.11 WARNING below.
+  if ! "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    echo "ERROR: control interpreter $candidate is python $(py_version_of "$candidate"), below the 3.10 floor" >&2
+    echo "       (pyproject requires-python >= 3.10; the hosted matrix is 3.10/3.11/3.12)." >&2
+    echo "       Set TRAIN_GATES_PYTHON=<python3.11 with pyyaml> for a faithful freeze." >&2
+    return 1
   fi
-  local venv_candidate="$ROOT/.venv/bin/python"
-  if [[ -x "$venv_candidate" ]] \
-    && "$venv_candidate" -c 'import yaml' >/dev/null 2>&1; then
-    echo "$venv_candidate"
-    return
-  fi
-  echo "ERROR: no interpreter with PyYAML found; set TRAIN_GATES_PYTHON (a python3.11 with pyyaml)" >&2
-  return 1
+  echo "$candidate"
 }
 
-PYTHON_BIN="$(resolve_python)"
-PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+if ! PYTHON_BIN="$(resolve_python)"; then
+  exit 2
+fi
+PY_VERSION="$(py_version_of "$PYTHON_BIN")"
 echo "train-gates: control interpreter: $PYTHON_BIN (python $PY_VERSION)"
 if [[ "${PY_VERSION%.*}" != "3.11" ]]; then
   echo "train-gates: WARNING: control interpreter is python $PY_VERSION, but the hosted coverage union" >&2
@@ -306,13 +329,20 @@ run_gate() {
 gate1_linux() {
   echo
   echo "== Gate 1: Linux no-MLX pytest =="
-  local venv
-  venv="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-venv-XXXXXX")"
+  # Under $RUN_TMP (never loose in TMPDIR) so the EXIT trap removes the venv on
+  # success and keeps it next to the coverage inputs on failure.
+  local venv="$RUN_TMP/venv-linux"
   local py="$venv/bin/python"
   echo "  fresh venv: $venv"
 
-  "$PYTHON_BIN" -m venv "$venv"
-  "$py" -m pip install --quiet --upgrade pip
+  # run_gate invokes this body under `|| true`, which disables errexit for the
+  # whole function: every environment step is guarded explicitly so a failed
+  # venv/pip aborts THIS gate with a truthful message instead of cascading into
+  # a misleading pytest failure.
+  "$PYTHON_BIN" -m venv "$venv" \
+    || { fail 1 "python -m venv $venv failed (control interpreter $PYTHON_BIN)"; return 1; }
+  "$py" -m pip install --quiet --upgrade pip \
+    || { fail 1 "pip upgrade in the fresh Linux venv failed"; return 1; }
   # Mirror ci.yml test-matrix "Install dependencies" line for line:
   #     pip install -e . --no-deps
   #     pip install --requirement config/requirements-ci-linux.txt
@@ -325,8 +355,10 @@ gate1_linux() {
   # ubuntu-latest x86-64 across the 3.10/3.11/3.12 matrix; the roster, flags
   # and the coverage data name (coverage-linux-3.11.data — the leg the hosted
   # union consumes) are identical.
-  "$py" -m pip install --quiet -e "$ROOT" --no-deps
-  "$py" -m pip install --quiet --requirement "$ROOT/config/requirements-ci-linux.txt"
+  "$py" -m pip install --quiet -e "$ROOT" --no-deps \
+    || { fail 1 "pip install -e . --no-deps into the fresh Linux venv failed"; return 1; }
+  "$py" -m pip install --quiet --requirement "$ROOT/config/requirements-ci-linux.txt" \
+    || { fail 1 "pip install -r config/requirements-ci-linux.txt into the fresh Linux venv failed"; return 1; }
 
   if "$py" -c "import mlx" >/dev/null 2>&1; then
     fail 1 "import mlx unexpectedly SUCCEEDED in the fresh --no-deps venv; the hosted Linux gate expects no MLX"
@@ -421,13 +453,15 @@ gate2_mypy() {
     fail 2 "config/mypy-requirements.txt missing"
     return 1
   fi
-  local venv
-  venv="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-mypy-XXXXXX")"
+  local venv="$RUN_TMP/venv-mypy"
   local py="$venv/bin/python"
   echo "  mypy venv: $venv"
-  "$PYTHON_BIN" -m venv "$venv"
-  "$py" -m pip install --quiet --upgrade pip
-  "$py" -m pip install --quiet --requirement "$ROOT/config/mypy-requirements.txt"
+  "$PYTHON_BIN" -m venv "$venv" \
+    || { fail 2 "python -m venv $venv failed (control interpreter $PYTHON_BIN)"; return 1; }
+  "$py" -m pip install --quiet --upgrade pip \
+    || { fail 2 "pip upgrade in the mypy venv failed"; return 1; }
+  "$py" -m pip install --quiet --requirement "$ROOT/config/mypy-requirements.txt" \
+    || { fail 2 "pip install -r config/mypy-requirements.txt into the mypy venv failed"; return 1; }
   note "installed pinned mypy environment"
   if ! ( cd "$ROOT" && "$py" "$ROOT/scripts/check_mypy_error_budget.py" ); then
     fail 2 "mypy error budget overrun (see output above); freeze blocked"
@@ -460,13 +494,15 @@ gate3_diffcover() {
   # the gates-hash — with it.
   local pin
   pin="$("$PYTHON_BIN" -c 'import sys,json; print(json.loads(sys.argv[1])["diff_cover_pin"])' "$DIFF_JSON")"
-  local venv
-  venv="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-cov-XXXXXX")"
+  local venv="$RUN_TMP/venv-cov"
   local py="$venv/bin/python"
   echo "  coverage venv: $venv (coverage + diff-cover==$pin, the ci.yml pin)"
-  "$PYTHON_BIN" -m venv "$venv"
-  "$py" -m pip install --quiet --upgrade pip
-  "$py" -m pip install --quiet coverage "diff-cover==$pin"
+  "$PYTHON_BIN" -m venv "$venv" \
+    || { fail 3 "python -m venv $venv failed (control interpreter $PYTHON_BIN)"; return 1; }
+  "$py" -m pip install --quiet --upgrade pip \
+    || { fail 3 "pip upgrade in the coverage venv failed"; return 1; }
+  "$py" -m pip install --quiet coverage "diff-cover==$pin" \
+    || { fail 3 "pip install coverage diff-cover==$pin into the coverage venv failed"; return 1; }
 
   # Reproduce the hosted changed-lines-coverage job exactly: combine + xml +
   # diff-cover all run FROM the repo root (so `.coveragerc` applies, the
@@ -521,17 +557,39 @@ gate4_apple() {
       fail 4 "TRAIN_GATES_APPLE_VENV=$TRAIN_GATES_APPLE_VENV has no bin/python"
       return 1
     fi
+    # A reused venv must import THIS checkout's package: an editable install
+    # pinned to another worktree, or a wheel in site-packages, would make Gate
+    # 4 (and its coverage data) test bytes that are not HEAD. Probe from a
+    # neutral cwd ($RUN_TMP) so the repo root is not silently on sys.path.
+    local root_real pkg_file
+    root_real="$(cd "$ROOT" && pwd -P)"
+    pkg_file="$(cd "$RUN_TMP" && "$apple_py" -c 'import os, vllm_mlx; print(os.path.realpath(vllm_mlx.__file__))' 2>/dev/null || true)"
+    if [[ "$pkg_file" != "$root_real/vllm_mlx/"* ]]; then
+      echo "  reused Apple venv imports vllm_mlx from '${pkg_file:-<not importable>}', not $root_real;"
+      echo "  re-pointing it: pip install -e \"\$ROOT\" --no-deps"
+      "$apple_py" -m pip install --quiet -e "$ROOT" --no-deps \
+        || { fail 4 "pip install -e . --no-deps into TRAIN_GATES_APPLE_VENV=$TRAIN_GATES_APPLE_VENV failed"; return 1; }
+      pkg_file="$(cd "$RUN_TMP" && "$apple_py" -c 'import os, vllm_mlx; print(os.path.realpath(vllm_mlx.__file__))' 2>/dev/null || true)"
+      if [[ "$pkg_file" != "$root_real/vllm_mlx/"* ]]; then
+        fail 4 "TRAIN_GATES_APPLE_VENV still imports vllm_mlx from '${pkg_file:-<not importable>}' after pip install -e . --no-deps; expected $root_real/vllm_mlx/"
+        return 1
+      fi
+    fi
+    note "reused Apple venv imports vllm_mlx from $pkg_file"
   elif [[ "${TRAIN_GATES_ALLOW_APPLE_INSTALL:-0}" == "1" ]]; then
-    local venv
-    venv="$(mktemp -d "${TMPDIR:-/tmp}/rapid-train-gates-apple-XXXXXX")"
+    local venv="$RUN_TMP/venv-apple"
     apple_py="$venv/bin/python"
     echo "  creating Apple venv: $venv"
-    "$PYTHON_BIN" -m venv "$venv"
-    "$apple_py" -m pip install --quiet --upgrade pip
+    "$PYTHON_BIN" -m venv "$venv" \
+      || { fail 4 "python -m venv $venv failed (control interpreter $PYTHON_BIN)"; return 1; }
+    "$apple_py" -m pip install --quiet --upgrade pip \
+      || { fail 4 "pip upgrade in the fresh Apple venv failed"; return 1; }
     # Mirror ci.yml test-apple-silicon "Install project and dependencies":
     #     pip install -e ".[vision]"   then   pip install -e ".[ci-apple]"
-    "$apple_py" -m pip install --quiet -e "${ROOT}[vision]"
-    "$apple_py" -m pip install --quiet -e "${ROOT}[ci-apple]"
+    "$apple_py" -m pip install --quiet -e "${ROOT}[vision]" \
+      || { fail 4 "pip install -e .[vision] into the fresh Apple venv failed"; return 1; }
+    "$apple_py" -m pip install --quiet -e "${ROOT}[ci-apple]" \
+      || { fail 4 "pip install -e .[ci-apple] into the fresh Apple venv failed"; return 1; }
   else
     fail 4 "no Apple venv provided; set TRAIN_GATES_APPLE_VENV=<venv with the package + mlx>, TRAIN_GATES_ALLOW_APPLE_INSTALL=1 to create one, or TRAIN_GATES_SKIP_APPLE=1"
     return 1
@@ -677,7 +735,7 @@ if [[ -n "$GIT_DIRTY" ]]; then
   echo
   echo "GATES DIRTY ${HEAD_RESOLVED} ${GATES_HASH}  (python ${PY_VERSION})"
   echo "train-gates: all 5 gates passed, but tracked files are modified/staged (see the WARNING above);" >&2
-  echo "             this is NOT a freeze receipt — commit or stash, then rerun for GATES OK." >&2
+  echo "             this is NOT a freeze receipt — commit or stash, then rerun for the OK receipt." >&2
   exit 3
 fi
 
