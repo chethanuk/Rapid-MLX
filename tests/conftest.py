@@ -3,6 +3,91 @@
 
 import pytest
 
+# Environment variables that point at the host's real, machine-specific HF
+# cache. Every non-opted-in test gets these redirected to a fresh ``tmp_path``
+# so a developer machine's real ``~/.cache/huggingface`` (possibly hundreds of
+# GB, or entirely empty) can never leak into, or be mutated by, a test. This is
+# the core of the hermetic-cache guarantee: a host with a 400 GB cache and a
+# host with none must produce identical results for every test that did not
+# explicitly opt in. See the ``_hermetic_hf_and_config_dirs`` fixture.
+#
+# ``HF_HUB_OFFLINE`` is deliberately NOT listed here: it is a network-access
+# toggle, not a cache-location knob, and ``tests/test_cli_offline_serve.py``
+# exercises it exhaustively with its own ``monkeypatch`` calls. Touching it
+# here would fight those tests. A test that needs offline semantics sets it
+# itself.
+_HF_CACHE_ENV_VARS = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
+
+# RAPID_MLX_* env vars that name a config/data directory on the real host.
+# Isolating them alongside the HF cache keeps state that lives in the user's
+# home (``~/.rapid-mlx/``, community-bench roots, the DDTree draft mirror)
+# out of the test run. All are already allowlisted as non-routing config knobs
+# in ``tests/test_no_out_of_band_routing.py`` (``ALLOWED_RAPID_MLX_ENV_VARS``);
+# this fixture only *points* them at a temp dir, it never selects a route.
+#
+# Readers, for reference (all read ``os.environ`` at call time, so a run-time
+# override takes effect):
+#   * ``RAPID_MLX_STATE_DIR``  — ``vllm_mlx/first_run.py::_state_dir``
+#   * ``RAPID_MLX_HOME``       — ``vllm_mlx/community_bench/*``
+#   * ``RAPID_MLX_DDTREE_PATCH_CACHE`` — ``vllm_mlx/speculative/ddtree/runtime.py``
+#   * ``RAPID_MLX_CONFIG_HOME`` — allowlisted; no current reader, kept for parity
+_RAPID_MLX_DIR_ENV_VARS = (
+    "RAPID_MLX_STATE_DIR",
+    "RAPID_MLX_HOME",
+    "RAPID_MLX_DDTREE_PATCH_CACHE",
+    "RAPID_MLX_CONFIG_HOME",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hf_and_config_dirs(tmp_path, monkeypatch, request):
+    """Isolate every test from the host's real HF cache and config dirs.
+
+    Sets ``HF_HOME`` / ``HF_HUB_CACHE`` / ``TRANSFORMERS_CACHE`` and the
+    machine-specific ``RAPID_MLX_*`` data dirs to a fresh per-test ``tmp_path``
+    so no test accidentally reads (or writes) the host's real cache or state
+    unless it deliberately opts in. This makes the no-MLX unit suite
+    deterministic across machines: a box with a 400 GB ``~/.cache/huggingface``
+    and a fresh Linux CI runner with none now run every non-opted-in test
+    against the same empty cache.
+
+    Opt-out: mark a test ``@pytest.mark.real_hf_cache`` (registered below) when
+    it genuinely needs the host's real cache. As of this writing NO no-MLX unit
+    test needs it — the one that used to read the real cache
+    (``test_doctor_env_health.py::test_huge_hf_cache_marks_warn``) was made
+    hermetic by mocking ``_hf_cache_dir`` / ``_dir_size_gb`` — so the marker is
+    an escape hatch for future tests, not a crutch for today's. Opting in must
+    be reviewed: it re-introduces host-state dependence for that one test.
+
+    Compatibility:
+      * Tests that already manipulate these vars via ``monkeypatch`` in their
+        own body simply override this fixture (test-body calls win; ``tmp_path``
+        and the autouse fixture's values are torn down together).
+      * The existing ``scheduler_config_stub`` and ``_reset_global_parser_state_after_each_test``
+        autouse fixtures are unaffected — they never read HF / RAPID_MLX dirs.
+      * Legacy ``HUGGINGFACE_HUB_CACHE`` (pre-``HF_HUB_CACHE`` spelling) is left
+        alone; no codebase reader uses it and ``test_release_check_random.py``
+        toggles it itself.
+    """
+    if request.node.get_closest_marker("real_hf_cache"):
+        yield
+        return
+
+    # NB: do NOT ``mkdir`` the target. Several tests assert their ``tmp_path``
+    # is left empty (e.g. ``test_community_bench_upload.py`` asserts
+    # ``not list(tmp_path.glob("*"))``), and every reader resolves the cache
+    # path lazily and tolerates a non-existent dir. Pointing the env at a
+    # not-yet-created path is exactly right for hermeticity.
+    hf_dir = tmp_path / "hf-cache"
+    for var in _HF_CACHE_ENV_VARS:
+        monkeypatch.setenv(var, str(hf_dir))
+
+    for var in _RAPID_MLX_DIR_ENV_VARS:
+        monkeypatch.setenv(var, str(tmp_path / var.lower()))
+
+    yield
+
+
 _SCRIPT_ONLY_MODULES = {"regression_suite.py"}
 """Files inside ``tests/`` that define ``test_*`` symbols but are
 actually standalone scripts invoked by the doctor harness via
@@ -141,6 +226,13 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "property: hermetic Hypothesis property-based test (see tests/property/)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_hf_cache: opt a test into using the host's real HF cache, "
+        "bypassing the hermetic autouse ``_hermetic_hf_and_config_dirs`` "
+        "fixture. Use only when a test genuinely needs the real cache; "
+        "review every use. See that fixture's docstring.",
     )
 
 

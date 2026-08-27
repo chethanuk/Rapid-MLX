@@ -1,0 +1,32 @@
+# Linux CI lane (`.github/workflows/ci.yml` → `test-matrix`) test dependency set.
+#
+# This is the SYNCED MIRROR of the `[ci-linux]` extra in pyproject.toml — the
+# extra is the canonical declaration; this file exists only because the lane
+# must stay no-MLX (see below) and pip cannot install "an extra without the
+# base package's deps". A drift test (`tests/test_ci_apple_coverage_union.py`)
+# fails CI if this file and pyproject.toml fall out of sync.
+#
+# WHY NOT `pip install -e ".[ci-linux]"`: the base `install_requires` pulls
+# mlx / mlx-lm, but Linux CI is Apple-Silicon-only and MUST NOT have MLX on
+# path — the lane's whole test architecture (the `scheduler_config_stub`
+# fake-mlx shim that only engages when `find_spec("mlx") is None`, plus the
+# roster NOTE "tests in this list MUST not import mlx") depends on it. So the
+# lane installs the package editable WITHOUT deps and gets only these test
+# deps — never mlx.
+#
+# Keep this list identical to the `[ci-linux]` extra (the drift test enforces it).
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pydantic
+fastapi
+jsonschema
+httpx
+psutil
+transformers
+requests
+pyyaml
+python-multipart
+uvicorn
+websockets
+jinja2
