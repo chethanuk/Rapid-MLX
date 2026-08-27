@@ -4887,7 +4887,20 @@ async def _create_chat_completion_impl(
                 # so operators see uniform traffic shape across the
                 # guided / postgen-validation / disabled arms.
                 incr_strict_request()
-                if not use_guided and _mllm_schema_processor is None:
+                if _mllm_schema_processor is not None and strict_enforcement_active:
+                    # The request-local matcher intentionally fails open if a
+                    # committed token desynchronizes it. Strict mode therefore
+                    # keeps the existing post-generation validator as a second
+                    # line of enforcement; a fail-open can preserve liveness,
+                    # but it cannot turn invalid JSON into a successful strict
+                    # response.
+                    use_strict_postgen_validation = True
+                    logger.info(
+                        "Strict json_schema mode on the MLLM lane — engaging "
+                        "request-local constrained decoding plus post-generate "
+                        "validation."
+                    )
+                elif not use_guided and _mllm_schema_processor is None:
                     # R12-4: pre-R12-4 this branch raised 400
                     # ``guided_extra_required``. That broke
                     # pydantic-ai end-to-end (Astrid r3) — every
