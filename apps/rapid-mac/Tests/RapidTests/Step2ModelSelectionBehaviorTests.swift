@@ -353,15 +353,26 @@ struct Step2ModelSelectionBehaviorTests {
         #expect(review.title == OnboardingModelSelection.Verb.downloadAndStart)
     }
 
-    /// Availability is the classification the model picker already disables on
-    /// — not a new claim invented for onboarding.
-    @Test("Availability comes from ModelSizing.classify, not from onboarding")
-    func availabilityUsesTheExistingDecision() {
+    /// Availability reuses the classification the model picker already disables
+    /// on — not a new claim invented for onboarding — plus the ONE established
+    /// carve-out the rest of the app already applies: a Mac's curated
+    /// recommendation (``RAMBucketedDefault.isRecommendedPick``) is trusted over
+    /// ``ModelSizing``'s estimate, which over-states low-bit / MoE footprints.
+    /// So ``isAvailable`` ⇔ ``!tooBig || isRecommendedPick`` — a model is only
+    /// unavailable when it is BOTH too big (per the estimate) AND not a curated
+    /// pick — exactly the predicate every start path uses (#2505 aligned
+    /// onboarding to it).
+    @Test("Availability is the picker predicate on top of a narrow curated-pick carve-out")
+    func availabilityUsesThePickerPredicate() {
         let hardware = MacHardware.detect()
         for alias in ["qwen3.5-4b-4bit", "lfm2.5-1b-4bit", "qwen3-0.6b-4bit"] {
-            let expected = ModelSizing.classify(
+            let tooBig = ModelSizing.classify(
                 ModelSizing.estimate(alias: alias), on: hardware
-            ) != .tooBig
+            ) == .tooBig
+            let carvedOut = RAMBucketedDefault.isRecommendedPick(
+                alias: alias, physicalRAMGB: hardware.physicalRAMGB
+            )
+            let expected = !tooBig || carvedOut
             #expect(OnboardingModelSelection.isAvailable(alias: alias, hardware: hardware) == expected)
         }
     }
