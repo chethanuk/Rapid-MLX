@@ -294,8 +294,9 @@ jobs:
         run: pytest tests/test_no_mllm_flag.py -v --tb=short
 
   preflight-summary:
-    # Roll-up so the bump PR has a single "Release pre-flight" required
-    # check to gate merge on, instead of N independent jobs.
+    # Roll-up of every pre-flight gate on the one exact bound head; the
+    # maintainer reads its conclusion (and pastes the release evidence line the
+    # roll-up emits into the bump PR body).
     needs:
       - bind-bump-pr
       - pf1-release-contract

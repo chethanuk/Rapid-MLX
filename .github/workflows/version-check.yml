@@ -50,7 +50,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  guard:
+  version-bump-guard:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -250,7 +250,6 @@ jobs:
           steps.isbump.outputs.is_bump == 'true' &&
           steps.isbump.outputs.escape_hatch != 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_VER: ${{ steps.verchange.outputs.head_ver }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -271,7 +270,10 @@ jobs:
               --print-preflight-run-id
           )
 
-          COMMIT_COUNT=$(git rev-list --count "$BASE_SHA..$HEAD_SHA")
+          # Authoritative commit count comes from the PR itself (GitHub's
+          # ``pull_request.commits``), not a local rev-list that can vary with
+          # how the source branch fetched / whether base advanced.
+          COMMIT_COUNT="${{ github.event.pull_request.commits }}"
           if [ "$COMMIT_COUNT" != "1" ]; then
             echo "::error::A release bump PR must contain exactly one commit; this PR has $COMMIT_COUNT. Squash it to the single canonical bump commit before release." >&2
             exit 1

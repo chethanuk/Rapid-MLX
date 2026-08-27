@@ -100,19 +100,29 @@ leaving each one stuck in `action_required` before any gate could run. Instead
 can read secrets and the protected environment read-back without creating a
 privileged PR-event context.
 
-To run it, first resolve the exact current bump-PR head, then dispatch with the
-PR number and that SHA:
+To run it, first resolve the exact current bump-PR head **and its branch ref**,
+then dispatch with the PR number and that SHA. The `--ref` is essential:
+without it the dispatch runs on `main`, and `bind-bump-pr` rejects the
+selection immediately ("Stale or wrong pre-flight selection") because the
+dispatch SHA won't equal the bump-PR head:
 
 ```bash
 PR_NUMBER=<bump-pr>
+BUMP_BRANCH="$(gh api \
+  "repos/raullenchai/Rapid-MLX/pulls/$PR_NUMBER" --jq .head.ref)"
 EXPECTED_SHA="$(gh api \
   "repos/raullenchai/Rapid-MLX/pulls/$PR_NUMBER" --jq .head.sha)"
 
 gh workflow run release-preflight.yml -R raullenchai/Rapid-MLX \
+  --ref "$BUMP_BRANCH" \
   -f pr_number="$PR_NUMBER" -f expected_sha="$EXPECTED_SHA"
 gh run watch "$(gh run list -R raullenchai/Rapid-MLX --workflow release-preflight.yml \
+  --branch "$BUMP_BRANCH" --limit 1 \
   --json databaseId --jq '.[0].databaseId')" -R raullenchai/Rapid-MLX --exit-status
 ```
+
+`--branch "$BUMP_BRANCH" --limit 1` on the run lookup picks the dispatch exactly
+on the bump branch (not some other dispatch racing on the same workflow).
 
 The first job, `bind-bump-pr`, resolves the PR through the GitHub API and fails
 unless it is **open, targeting `main`, from the same repository**, the given
@@ -139,6 +149,16 @@ synchronized with the new version. A bump PR therefore cannot merge without a
 valid green exact-head pre-flight run recorded in its body — while the
 pre-flight itself, being a maintainer dispatch, never blocks on a PR-event
 approval prompt.
+
+**Keeping the bump PR current is a REBASE, not a merge.** GitHub's "Update
+branch" creates a merge commit that trips the gate's exactly-one-commit check,
+so keep the bump PR on a single commit by rebasing (`git rebase origin/main`
+then force-push your branch — it is a feature branch, not `main`). And because
+the pre-flight binds to **one exact head**, any `main` advance after the green
+run changes nothing about the run already on the old head — but if you rebase
+the bump branch to a new head, the evidence line is now stale: **re-dispatch
+the pre-flight on the new exact head** and paste the fresh run URL before
+merging. This strictness is intentional (anti-TOCTOU).
 
 ## Desktop (Rapid-MLX Desktop) RC tags — validated before claimed
 
