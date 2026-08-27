@@ -79,7 +79,9 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
 def _payload_paths(bundle: Path) -> list[str]:
     sparkle = bundle / "sparkle"
     zips = sorted(
-        path for path in sparkle.glob("*.zip") if path.is_file() and not path.is_symlink()
+        path
+        for path in sparkle.glob("*.zip")
+        if path.is_file() and not path.is_symlink()
     )
     if len(zips) != 1:
         raise ValueError(
@@ -97,7 +99,8 @@ def _payload_paths(bundle: Path) -> list[str]:
     unexpected = actual - allowed
     if unexpected:
         raise ValueError(
-            "promotion bundle contains unrecorded payload: " + ", ".join(sorted(unexpected))
+            "promotion bundle contains unrecorded payload: "
+            + ", ".join(sorted(unexpected))
         )
     if (bundle / NOTES).stat().st_size == 0:
         raise ValueError("promotion release notes must not be empty")
@@ -111,7 +114,9 @@ def _verify_desktop_manifest(
     if manifest.get("source_sha") != source_sha:
         raise ValueError("Desktop manifest source SHA does not match promotion source")
     if manifest.get("version") != version or manifest.get("app_tag") != app_tag:
-        raise ValueError("Desktop manifest version/tag does not match promotion identity")
+        raise ValueError(
+            "Desktop manifest version/tag does not match promotion identity"
+        )
     if manifest.get("signed") is not True:
         raise ValueError("Desktop manifest is not a signed release candidate")
     artifacts = manifest.get("artifacts")
@@ -133,7 +138,9 @@ def _verify_appcast(bundle: Path, *, version: str, zip_relative: str) -> None:
         raise ValueError(f"cannot parse Sparkle appcast: {exc}") from exc
     enclosures = root.findall(".//enclosure")
     if len(enclosures) != 1:
-        raise ValueError(f"Sparkle appcast must contain exactly one enclosure; found {len(enclosures)}")
+        raise ValueError(
+            f"Sparkle appcast must contain exactly one enclosure; found {len(enclosures)}"
+        )
     enclosure = enclosures[0]
     zip_path = _regular_file(bundle, zip_relative)
     url = enclosure.get("url", "")
@@ -165,7 +172,11 @@ def create_manifest(
     parse_version(version)
     if app_tag != f"rapid-mac-v{version}":
         raise ValueError("promotion tag does not match version")
-    if repository.count("/") != 1 or repository.startswith("/") or repository.endswith("/"):
+    if (
+        repository.count("/") != 1
+        or repository.startswith("/")
+        or repository.endswith("/")
+    ):
         raise ValueError("repository must be an owner/name identifier")
     if workflow != ".github/workflows/auto-release.yml":
         raise ValueError("promotion producer must be auto-release.yml")
@@ -214,7 +225,9 @@ def verify_manifest(
         raise ValueError("expected promotion tag does not match version")
     canonical_manifest = _regular_file(bundle, PROMOTION_MANIFEST)
     if manifest_path.absolute() != canonical_manifest.absolute():
-        raise ValueError("promotion manifest must be the canonical file inside the bundle")
+        raise ValueError(
+            "promotion manifest must be the canonical file inside the bundle"
+        )
     manifest = _load_json(canonical_manifest, "promotion manifest")
     if manifest.get("schema") != SCHEMA:
         raise ValueError("promotion manifest has an unknown schema")
@@ -222,8 +235,13 @@ def verify_manifest(
         raise ValueError("promotion manifest has an unexpected lifecycle stage")
     release = manifest.get("release")
     producer = manifest.get("producer")
-    if not isinstance(release, dict) or release != {"version": version, "app_tag": app_tag}:
-        raise ValueError("promotion manifest release identity does not match expected tag/version")
+    if not isinstance(release, dict) or release != {
+        "version": version,
+        "app_tag": app_tag,
+    }:
+        raise ValueError(
+            "promotion manifest release identity does not match expected tag/version"
+        )
     if not isinstance(producer, dict):
         raise ValueError("promotion manifest producer must be an object")
     expected = {
@@ -235,7 +253,9 @@ def verify_manifest(
     }
     for key, value in expected.items():
         if producer.get(key) != value:
-            raise ValueError(f"promotion producer {key} does not match the requested run")
+            raise ValueError(
+                f"promotion producer {key} does not match the requested run"
+            )
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise ValueError("promotion manifest artifacts must be an array")
@@ -255,8 +275,12 @@ def verify_manifest(
     for relative in paths:
         path = _regular_file(bundle, relative)
         item = recorded[relative]
-        if item.get("size") != path.stat().st_size or item.get("sha256") != _sha256(path):
-            raise ValueError(f"promotion artifact bytes do not match manifest: {relative}")
+        if item.get("size") != path.stat().st_size or item.get("sha256") != _sha256(
+            path
+        ):
+            raise ValueError(
+                f"promotion artifact bytes do not match manifest: {relative}"
+            )
 
     _verify_desktop_manifest(
         bundle, source_sha=source_sha, version=version, app_tag=app_tag

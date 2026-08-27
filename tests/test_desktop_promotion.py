@@ -32,7 +32,9 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path]:
                     {
                         "filename": dmg.name,
                         "size": dmg.stat().st_size,
-                        "sha256": __import__("hashlib").sha256(dmg.read_bytes()).hexdigest(),
+                        "sha256": __import__("hashlib")
+                        .sha256(dmg.read_bytes())
+                        .hexdigest(),
                     }
                 ],
             }
