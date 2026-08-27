@@ -52,19 +52,23 @@ def _hermetic_hf_and_config_dirs(tmp_path, monkeypatch, request):
     against the same empty cache.
 
     Opt-out: mark a test ``@pytest.mark.real_hf_cache`` (registered below) when
-    it genuinely needs the host's real cache. As of this writing NO no-MLX unit
-    test needs it — the one that used to read the real cache
-    (``test_doctor_env_health.py::test_huge_hf_cache_marks_warn``) was made
-    hermetic by mocking ``_hf_cache_dir`` / ``_dir_size_gb`` — so the marker is
-    an escape hatch for future tests, not a crutch for today's. Opting in must
-    be reviewed: it re-introduces host-state dependence for that one test.
+    it genuinely needs the host's real cache. A handful of integration tests
+    legitimately probe the real cache (e.g. scan the repo index for a real
+    ``models--*`` layout, or load real weights for a tokenizer/grammar file) —
+    those must be marked so they keep working on a host with a real cache
+    (Studio). Every OTHER test — including one that used to read the real cache
+    (``test_doctor_env_health.py::test_huge_hf_cache_marks_warn``, made hermetic
+    by mocking ``_hf_cache_dir`` / ``_dir_size_gb``) — is hermetic by default.
+    Opting a test in must be reviewed: it re-introduces host-state dependence
+    for that one test.
 
     Compatibility:
       * Tests that already manipulate these vars via ``monkeypatch`` in their
         own body simply override this fixture (test-body calls win; ``tmp_path``
         and the autouse fixture's values are torn down together).
-      * The existing ``scheduler_config_stub`` and ``_reset_global_parser_state_after_each_test``
-        autouse fixtures are unaffected — they never read HF / RAPID_MLX dirs.
+      * The existing ``scheduler_config_stub`` fixture (NOT autouse) and the
+        ``_reset_global_parser_state_after_each_test`` autouse fixture are
+        unaffected — they never read HF / RAPID_MLX dirs.
       * Legacy ``HUGGINGFACE_HUB_CACHE`` (pre-``HF_HUB_CACHE`` spelling) is left
         alone; no codebase reader uses it and ``test_release_check_random.py``
         toggles it itself.
@@ -78,12 +82,52 @@ def _hermetic_hf_and_config_dirs(tmp_path, monkeypatch, request):
     # ``not list(tmp_path.glob("*"))``), and every reader resolves the cache
     # path lazily and tolerates a non-existent dir. Pointing the env at a
     # not-yet-created path is exactly right for hermeticity.
-    hf_dir = tmp_path / "hf-cache"
+    #
+    # Real huggingface hub layout: ``HF_HOME`` is the base, and the download
+    # cache lives at ``<HF_HOME>/hub``. Pointing both at the SAME dir is wrong
+    # (the hub looks for ``<HF_HUB_CACHE>/models--*`` nested under it), so we
+    # mirror the real ``HF_HOME=<base>`` + ``HF_HUB_CACHE=<base>/hub`` split.
+    hf_home = tmp_path / "hf-home"
+    hf_hub_cache = hf_home / "hub"
     for var in _HF_CACHE_ENV_VARS:
-        monkeypatch.setenv(var, str(hf_dir))
+        if var == "HF_HOME":
+            monkeypatch.setenv(var, str(hf_home))
+        elif var == "HF_HUB_CACHE":
+            monkeypatch.setenv(var, str(hf_hub_cache))
+        else:  # TRANSFORMERS_CACHE
+            monkeypatch.setenv(var, str(hf_hub_cache))
 
     for var in _RAPID_MLX_DIR_ENV_VARS:
         monkeypatch.setenv(var, str(tmp_path / var.lower()))
+
+    # Hermeticity for hub *readers*, not just env readers. huggingface_hub
+    # snapshots several of these paths into module constants at import time
+    # (``huggingface_hub.constants.HF_HUB_CACHE`` / ``HF_HOME`` and
+    # ``huggingface_hub.file_download.HF_HUB_CACHE``) and many callers
+    # (``scan_cache_dir``, ``snapshot_download``, ``try_to_load_from_cache``,
+    # and every default ``cache_dir=...`` path) read those constants — NOT
+    # ``os.environ`` — so a bare ``setenv`` still leaks the host cache to them.
+    # Patch the constants in place so the whole huggingface_hub surface sees the
+    # same temp layout. Guard by ``sys.modules.get`` because ``mock_hf_env`` /
+    # network markers import hub lazily and ``huggingface_hub`` may not be
+    # loaded yet for a given test.
+    import sys
+
+    for modname in (
+        "huggingface_hub",
+        "huggingface_hub.constants",
+        "huggingface_hub.file_download",
+    ):
+        mod = sys.modules.get(modname)
+        if mod is None:
+            continue
+        for attr, val in (
+            ("HF_HOME", str(hf_home)),
+            ("HF_HUB_CACHE", str(hf_hub_cache)),
+            ("HUGGINGFACE_HUB_CACHE", str(hf_hub_cache)),
+        ):
+            if hasattr(mod, attr):
+                monkeypatch.setattr(mod, attr, val)
 
     yield
 
