@@ -132,6 +132,8 @@ def test_fresh_install_proves_the_telemetry_boundary_with_a_loopback_sink():
     assert ".requests[0].bytes > 0" in positive_control
     assert '.requests[0].event == "session_start"' in positive_control
     assert ".requests[0].timestamp >= .not_before" in positive_control
+    assert 'sleep "$settling_seconds"' in positive_control
+    assert "loopback telemetry sink exited while settling" in positive_control
     assert "opt_in_not_before" in fresh_install
 
 

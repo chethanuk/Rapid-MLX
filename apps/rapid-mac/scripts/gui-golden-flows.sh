@@ -344,6 +344,7 @@ assert_one_telemetry_request() {
     local stage="$1"
     local not_before="$2"
     local evidence="$OUT/telemetry-$stage.json"
+    local settling_seconds=0.5
     local count=0
     for _ in {1..80}; do
         kill -0 "$TELEMETRY_SINK_PID" 2>/dev/null \
@@ -353,6 +354,14 @@ assert_one_telemetry_request() {
         [[ "$count" -gt 1 ]] && break
         sleep 0.05
     done
+    # Keep the sink open after the first request so a near-following duplicate
+    # or delayed pre-consent request is included in the final exact count.
+    if [[ "$count" == 1 ]]; then
+        sleep "$settling_seconds"
+        kill -0 "$TELEMETRY_SINK_PID" 2>/dev/null \
+            || die "loopback telemetry sink exited while settling $stage"
+        count="$(wc -l < "$TELEMETRY_SINK_LOG" | tr -d '[:space:]')"
+    fi
     jq -s --arg stage "$stage" --arg log "$TELEMETRY_SINK_LOG" \
         --arg not_before "$not_before" \
         '{stage: $stage, request_count: length, request_log: $log,
