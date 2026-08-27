@@ -117,6 +117,44 @@ Full step list, gating logic, and how to add steps: [`scripts/pr_validate/README
 
 It's still new. File an issue with `[pr_validate]` in the title and the artifacts under `/tmp/pr_validate/pr-<N>/` attached.
 
+## Training gates
+
+Before an engine change is **frozen** into a train, it must pass the same 5
+validation gates the hosted CI matrix runs — now reproducible locally on one
+machine:
+
+```bash
+scripts/train_gates.sh <merge-base-sha>
+```
+
+A PR is "frozen" for a train only when `scripts/train_gates.sh <merge-base>`
+prints `GATES OK <sha> <gates-hash>` on the exact head you intend to freeze.
+
+The 5 gates (and their hosted CI equivalents):
+
+| Gate | What it runs | Hosted equivalent |
+|---|---|---|
+| 1 | Linux no-MLX pytest (`pip install . --no-deps`, asserts `import mlx` fails, then the parsed Linux test roster) | `ci.yml` `test-matrix` |
+| 2 | Pinned mypy error budget (`config/mypy-requirements.txt` → `check_mypy_error_budget.py`) | `ci.yml` `type-check` |
+| 3 | Coverage union + `diff-cover --fail-under 100` against `<base-sha>` | `ci.yml` `changed-lines-coverage` |
+| 4 | Apple-MLX pytest (the parsed Apple test roster, in an mlx-capable venv) | `ci.yml` `test-apple-silicon` |
+| 5 | Desktop `swift test --no-parallel` (only if `apps/` changed vs base) | `rapid-mac-ci.yml` `build` |
+
+The gate definitions are **not hardcoded** in the script: they are parsed at
+runtime from `.github/workflows/ci.yml` and `.github/workflows/rapid-mac-ci.yml`
+by `scripts/train_gates_parser.py`. The drift test
+`tests/test_train_gates_matches_ci.py` (which runs in the Linux CI `test-matrix`
+job) fails if a CI-definition edit — a test added to a pytest roster, a mypy
+budget pin change, a diff-cover knob — drifts the local reproduction out of
+sync with the workflows. The printed `gates-hash` is a deterministic hash over
+the exact gate definitions, so a CI-definition change changes the hash.
+
+Environment knobs (all optional): `TRAIN_GATES_PYTHON` (an interpreter with
+`pyyaml` + `coverage` + `diff-cover` + `pytest`); `TRAIN_GATES_APPLE_VENV` /
+`TRAIN_GATES_ALLOW_APPLE_INSTALL=1` / `TRAIN_GATES_SKIP_APPLE=1` for the Apple
+gate; `TRAIN_GATES_SKIP_SWIFT=1` for the Desktop gate. `GATES OK` requires all
+5 gates to pass — a skip is not a pass.
+
 ## Ways to Contribute
 
 ### 🟢 Easy — No model download needed
