@@ -446,6 +446,45 @@ struct ModelResidencyTests {
         #expect(!server.isModelResident(targetAlias))
     }
 
+    @Test("A stale over-capacity confirmation cannot tear down a newer live model")
+    func staleOverCapacityConfirmationIsCancelled() async throws {
+        let gib = UInt64(1) << 30
+        let originalAlias = "qwen3.5-4b-4bit"
+        let newerAlias = "qwen3.5-9b-4bit"
+        let targetAlias = "qwen3.5-35b-8bit"
+        let server = ServerManager(
+            testingState: .ready(alias: originalAlias),
+            binaryPath: URL(fileURLWithPath: "/usr/bin/true"),
+            residency: residency(alias: originalAlias, measuredGB: 4, modality: "text")
+        )
+        server._testInstallChild(ProcessGroupChild.testStub())
+        defer { server._testClearChild() }
+        server.memorySnapshotProvider = {
+            MemoryProbe.Snapshot(totalBytes: 18 * gib, usedBytes: 8 * gib)
+        }
+
+        let load = Task {
+            await server.ensureServing(
+                alias: targetAlias,
+                hfPath: nil,
+                estimatedMemoryGB: 44,
+                replacementGroup: .assistant
+            )
+        }
+        for _ in 0 ..< 300 where server.pendingMemoryWarning == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let warning = try #require(server.pendingMemoryWarning)
+        #expect(warning.plannedReleaseAlias == originalAlias)
+
+        server._testSetState(.ready(alias: newerAlias))
+        server.confirmPendingMemoryLoad(warning)
+
+        #expect(await load.value == false)
+        #expect(server.state == .ready(alias: newerAlias))
+        #expect(server.pendingMemoryWarning == nil)
+    }
+
     @Test("Replacing a smaller chat model with 27B still warns")
     func smallerToLargerReplacementStillWarns() throws {
         let admission = try #require(ServerManager.memoryAdmissionForTransition(

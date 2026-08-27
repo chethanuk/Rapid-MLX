@@ -109,6 +109,15 @@ final class MemoryLoadConfirmationQueue {
         pending[0].phase = .awaitingDecision
     }
 
+    func cancelChecking(warningID: UUID) {
+        guard pending.first?.warning.id == warningID,
+              pending.first?.phase == .checkingDecision else { return }
+        if let requestID = pending[0].requestID {
+            decisions[requestID] = .cancelled
+        }
+        pending.removeFirst()
+    }
+
     func confirmChecking(
         warningID: UUID,
         sequence: Int
@@ -182,7 +191,8 @@ final class MemoryLoadConfirmationQueue {
             freeGB: Double(snapshot.totalBytes - projectedUsedBytes) / gib,
             totalGB: Double(snapshot.totalBytes) / Double(1 << 30),
             plannedReleaseGB: old.plannedReleaseGB,
-            plannedReleaseIsPending: old.plannedReleaseIsPending
+            plannedReleaseIsPending: old.plannedReleaseIsPending,
+            plannedReleaseAlias: old.plannedReleaseAlias
         )
     }
 }
@@ -1397,7 +1407,8 @@ final class ServerManager {
                         totalGB: Double(admission.snapshot.totalBytes) / Double(1 << 30),
                         plannedReleaseGB: Double(admission.plannedReleaseBytes)
                             / Double(1 << 30),
-                        plannedReleaseIsPending: true
+                        plannedReleaseIsPending: true,
+                        plannedReleaseAlias: currentAlias
                     ),
                     requestID: memoryRequestID
                 )
@@ -1918,6 +1929,18 @@ final class ServerManager {
             warningID: warning.id,
             snapshot: snapshot
         ) else { return }
+
+        let plannedReleaseChanged = latestWarning.plannedReleaseAlias.map { expectedAlias in
+            guard let liveAlias = launchedChildAlias else { return true }
+            return ModelSwitchDecision.requiresRevalidation(
+                validatedAlias: expectedAlias,
+                liveAlias: liveAlias
+            )
+        } ?? false
+        if plannedReleaseChanged {
+            memoryConfirmations.cancelChecking(warningID: warning.id)
+            return
+        }
 
         // Only the explicit unsafe action is a waiver. An ordinary Load that
         // became unsafe during this activation remains parked on the same
