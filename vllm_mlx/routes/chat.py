@@ -4868,6 +4868,11 @@ async def _create_chat_completion_impl(
                 )
                 if _mllm_schema_processor is not None:
                     chat_kwargs["grammar_logits_processor"] = _mllm_schema_processor
+                    # The schema grammar owns token zero, so the request cannot
+                    # also carry a processor that forces a ``</think>`` token
+                    # after a reasoning budget.  That token is outside the JSON
+                    # grammar and would make the constraint fail open.
+                    chat_kwargs.pop("reasoning_budget_logits_processor", None)
                     # The schema grammar owns the complete assistant payload
                     # from token zero, so it cannot admit a reasoning preamble.
                     # Keep prompt rendering and output classification aligned.

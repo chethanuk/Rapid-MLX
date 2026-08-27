@@ -237,6 +237,13 @@ def test_mllm_streaming_schema_stays_on_scheduler_with_request_processor(
         "build_json_schema_logits_processor",
         lambda _tokenizer, schema: marker if schema == _SCHEMA else None,
     )
+    from vllm_mlx.routes import chat as chat_route
+
+    monkeypatch.setattr(
+        chat_route,
+        "_build_reasoning_budget_processor",
+        lambda *_args, **_kwargs: object(),
+    )
     engine = _GuidedEngine(guided_text=_GUIDED_OUTPUT)
     engine.is_mllm = True
     engine.supports_guided_generation = False
@@ -260,6 +267,7 @@ def test_mllm_streaming_schema_stays_on_scheduler_with_request_processor(
     assert engine.guided_calls == []
     assert len(engine.stream_calls) == 1
     assert engine.stream_calls[0]["kwargs"]["grammar_logits_processor"] is marker
+    assert "reasoning_budget_logits_processor" not in engine.stream_calls[0]["kwargs"]
     assert engine.stream_calls[0]["kwargs"]["enable_thinking"] is False
     assert "data: [DONE]" in resp.text
 
