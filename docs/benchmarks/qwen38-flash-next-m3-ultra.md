@@ -7,6 +7,9 @@ Flash-Next MTP and vision are outside this measurement.
 > **Hardware boundary:** these results were measured on the 256 GB machine
 > described below. **128 GB hardware was not physically tested.** The catalog's
 > 128 GB minimum is an admission floor, not a benchmark claim for a 128 GB Mac.
+> With roughly 99 GB of quantized weights plus allocator and context-cache
+> headroom, 192 GB is the practical recommended tier; 128 GB is tight and
+> remains untested.
 
 ## Environment
 
@@ -155,40 +158,50 @@ fallback means the run does not establish token-level schema enforcement.
   first-token overhead.
 - Decode rate is completion tokens divided by elapsed time after TTFT.
 - RSS includes the server process and recursive children, sampled every 50 ms.
-  Tables report median TTFT/rates and maximum peak RSS across the three runs.
+  It does not include all Metal allocations on Apple unified memory.
+- MLX active memory is the maximum allocator-active footprint reported by the
+  serving engine during the three runs at that length. It is the relevant
+  unified-memory sizing figure. The Flash process also reported a 148.1 GB MLX
+  allocator peak inherited from model loading; the steady timed requests used
+  approximately 103--105 GB active memory.
+- Tables report median TTFT/rates and maximum RSS and MLX active memory across
+  the three runs.
 
 ## Results
 
 ### `qwen3.8-flash-next-4bit`
 
-| Target (server-reported) prompt tokens | Median TTFT | Median prefill tok/s | Median decode tok/s | Peak RSS |
-| ---: | ---: | ---: | ---: | ---: |
-| 128 (92) | 0.380 s | 241.8 | 25.73 | 54.46 GiB |
-| 2,048 (2,012) | 3.274 s | 614.6 | 22.28 | 54.74 GiB |
-| 8,192 (8,156) | 37.984 s | 214.7 | 20.64 | 54.62 GiB |
-| 32,768 (32,732) | 186.201 s | 175.8 | 19.65 | 54.64 GiB |
+| Target (server-reported) prompt tokens | Median TTFT | Median prefill tok/s | Median decode tok/s | Peak RSS | MLX active memory |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 (92) | 0.380 s | 241.8 | 25.73 | 54.46 GiB | 103.0 GB |
+| 2,048 (2,012) | 3.274 s | 614.6 | 22.28 | 54.74 GiB | 103.1 GB |
+| 8,192 (8,156) | 37.984 s | 214.7 | 20.64 | 54.62 GiB | 103.4 GB |
+| 32,768 (32,732) | 186.201 s | 175.8 | 19.65 | 54.64 GiB | 104.7 GB |
 
 ### `qwen3.8-27b-4bit` reference
 
-| Target (server-reported) prompt tokens | Median TTFT | Median prefill tok/s | Median decode tok/s | Peak RSS |
-| ---: | ---: | ---: | ---: | ---: |
-| 128 (92) | 0.429 s | 214.6 | 40.29 | 12.84 GiB |
-| 2,048 (2,012) | 5.904 s | 340.8 | 39.50 | 12.84 GiB |
-| 8,192 (8,156) | 24.246 s | 336.4 | 37.38 | 12.85 GiB |
-| 32,768 (32,732) | 107.244 s | 305.2 | 32.58 | 12.87 GiB |
+| Target (server-reported) prompt tokens | Median TTFT | Median prefill tok/s | Median decode tok/s | Peak RSS | MLX active memory |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 (92) | 0.429 s | 214.6 | 40.29 | 12.84 GiB | 15.6 GB |
+| 2,048 (2,012) | 5.904 s | 340.8 | 39.50 | 12.84 GiB | 16.0 GB |
+| 8,192 (8,156) | 24.246 s | 336.4 | 37.38 | 12.85 GiB | 17.6 GB |
+| 32,768 (32,732) | 107.244 s | 305.2 | 32.58 | 12.87 GiB | 24.1 GB |
 
 ## Interpretation
 
 Flash-Next reached the first visible token sooner at the 128- and 2K-target
 prompts. The 27B reference prefills faster at 8K and 32K and decodes faster at
 every measured length. At the 32K target, the reference's median TTFT is 42%
-lower and its median decode rate is 66% higher. Flash-Next's process peak RSS
-is about 4.2 times the reference in this configuration. These are serving
+lower and its median decode rate is 66% higher. Process RSS alone materially
+understates the unified-memory requirement: Flash-Next used 104.7 GB of MLX
+active memory at 32K despite a 54.64 GiB RSS measurement. These are serving
 measurements, not a comparison of answer quality.
 
-The Flash model completed the full 32K-target grid without OOM on the 256 GB
-machine. That observation does not establish behavior, headroom, or performance
-on a 128 GB Mac, which was not physically tested.
+The Flash model's quantized weights are approximately 99 GB before context
+cache and allocator headroom. It completed the full 32K-target grid without OOM
+on the 256 GB machine. **192 GB is therefore the practical recommended memory
+tier.** A 128 GB Mac would have tight headroom and was not physically tested;
+these results do not establish its behavior or performance.
 
 ## Appendix: contended Flash-Next run
 
