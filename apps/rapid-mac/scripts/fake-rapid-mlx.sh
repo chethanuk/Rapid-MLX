@@ -965,6 +965,14 @@ class Handler(BaseHTTPRequestHandler):
             user_payloads=user_payloads,
         )
 
+        # Some GUI journeys need a request that is observably in flight while
+        # the transcript remains visually stable. Hold before the first SSE
+        # byte only when explicitly requested; ACTIVE_CHAT_REQUESTS already
+        # includes this handler, so the residency endpoint still reports the
+        # same real request lifecycle the app uses for switch admission.
+        response_delay_ms = int(_setting("FAKE_CHAT_RESPONSE_DELAY_MS", "0") or "0")
+        if response_delay_ms > 0:
+            time.sleep(response_delay_ms / 1000)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

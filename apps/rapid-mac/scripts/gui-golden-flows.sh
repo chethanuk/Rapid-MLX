@@ -4804,6 +4804,7 @@ flow_dictation_rc2_upgrade() {
 flow_model_switch_active_request() {
     log "flow: model-switch-active-request"
     start_persona model-switch-active-request \
+        FAKE_CHAT_RESPONSE_DELAY_MS=10000 \
         FAKE_INTER_TOKEN_SLEEP_S=0.02 \
         FAKE_CONTENT_REPEAT=250
     dismiss_first_run
@@ -4824,11 +4825,13 @@ flow_model_switch_active_request() {
     [[ "$busy" == 1 ]] || die "fake residency never reported the active stream"
 
     see_main "$OUT/busy.json"
-    press "$OUT/busy.json" ModelPickerBar.ModelMenu "$OUT/model-menu-open.json" \
-        || die "model picker did not open during an active stream"
-    wait_identifier ModelPickerBar.Alias.fake-external-alias "$OUT/model-menu.json"
-    press "$OUT/model-menu.json" ModelPickerBar.Alias.fake-external-alias "$OUT/switch-requested.json" \
-        || die "alternate cached model could not be selected"
+    # SwiftUI bridges these rows into a transient native NSMenu, outside the
+    # window-only AX tree used for evidence dumps. Exercise the standard macOS
+    # type-to-select interaction, then let the switch guard prove it resolved
+    # the requested alternate alias.
+    "$AX_DRIVER" select-menu-title "$APP_PID" ModelPickerBar.ModelMenu \
+        fake-external-alias > "$OUT/switch-requested.json" \
+        || die "alternate cached model could not be selected during an active stream"
     wait_identifier ModelSwitchGuard.Cancel "$OUT/switch-guard.json"
     jq -e '.data.ui_elements[]?
            | select(.identifier == "ModelSwitchGuard.Cancel")' \
