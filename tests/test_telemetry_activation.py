@@ -56,8 +56,18 @@ def test_kinds_and_surfaces_are_the_allowlist():
         "first_inference",
         "model_pull",
         "agent_setup",
+        "first_chat_reply",
+        "first_vision_reply",
+        "first_dictation",
+        "first_image",
     } == spec.ACTIVATION_KINDS
-    assert {"cli", "api"} == spec.ACTIVATION_SURFACES
+    assert {
+        "first_chat_reply",
+        "first_vision_reply",
+        "first_dictation",
+        "first_image",
+    } == spec.DESKTOP_ACTIVATION_KINDS
+    assert {"cli", "api", "desktop"} == spec.ACTIVATION_SURFACES
 
 
 def test_health_and_models_are_not_inference_endpoints():

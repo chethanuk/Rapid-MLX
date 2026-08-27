@@ -15,25 +15,40 @@ from __future__ import annotations
 
 # Bump in lockstep with docs/telemetry-activation.md whenever what counts
 # as engaged/activated changes (new kind, changed success predicate, ...).
-ACTIVATION_SPEC_VERSION = 1
+ACTIVATION_SPEC_VERSION = 2
 
 # The funnel milestones. Each fires at most once per install (client_id).
 ACTIVATION_FIRST_INFERENCE = "first_inference"
 ACTIVATION_MODEL_PULL = "model_pull"
 ACTIVATION_AGENT_SETUP = "agent_setup"
+ACTIVATION_FIRST_CHAT_REPLY = "first_chat_reply"
+ACTIVATION_FIRST_VISION_REPLY = "first_vision_reply"
+ACTIVATION_FIRST_DICTATION = "first_dictation"
+ACTIVATION_FIRST_IMAGE = "first_image"
+DESKTOP_ACTIVATION_KINDS: frozenset[str] = frozenset(
+    {
+        ACTIVATION_FIRST_CHAT_REPLY,
+        ACTIVATION_FIRST_VISION_REPLY,
+        ACTIVATION_FIRST_DICTATION,
+        ACTIVATION_FIRST_IMAGE,
+    }
+)
 ACTIVATION_KINDS: frozenset[str] = frozenset(
     {
         ACTIVATION_FIRST_INFERENCE,
         ACTIVATION_MODEL_PULL,
         ACTIVATION_AGENT_SETUP,
     }
-)
+) | DESKTOP_ACTIVATION_KINDS
 
 # Where the milestone happened. ``cli`` = the interactive REPL / a CLI
 # subcommand; ``api`` = the HTTP server serving an external caller.
 SURFACE_CLI = "cli"
 SURFACE_API = "api"
-ACTIVATION_SURFACES: frozenset[str] = frozenset({SURFACE_CLI, SURFACE_API})
+SURFACE_DESKTOP = "desktop"
+ACTIVATION_SURFACES: frozenset[str] = frozenset(
+    {SURFACE_CLI, SURFACE_API, SURFACE_DESKTOP}
+)
 
 # ``rapid-mlx chat`` spawns its own ephemeral ``serve`` and drives it over
 # HTTP, so first_inference is emitted at the server-side success chokepoint
@@ -46,8 +61,9 @@ CHAT_SPAWN_ENV = "RAPID_MLX_CHAT_SPAWN"
 # Generative endpoints whose successful, non-empty completion counts as
 # engagement.
 #
-# Spec v1 DEFINES engagement as chat-completions engagement — this is an
-# explicit, versioned scope decision, not an accidental omission.
+# The engine inference scope remains chat-completions engagement in spec v2;
+# v2 adds Desktop milestone kinds and does not expand engine endpoints. This
+# is an explicit, versioned scope decision, not an accidental omission.
 # ``/v1/chat/completions`` (streaming + non-streaming) is the dominant surface
 # (all CLI ``chat`` traffic auto-spawns a server that loops through it, plus
 # the bulk of direct API usage) and is the single endpoint instrumented with
@@ -56,9 +72,9 @@ CHAT_SPAWN_ENV = "RAPID_MLX_CHAT_SPAWN"
 # ``/v1/completions`` (routes/completions.py) and ``/v1/messages``
 # (routes/anthropic.py) are separate, generative, and NOT part of the v1
 # engagement contract: an install that inferences exclusively through them is
-# out of scope for v1's engaged metric by definition. Listing them here without
+# out of scope for the engine's engaged metric by definition. Listing them here without
 # wiring would over-promise coverage the code doesn't deliver; wiring them is a
-# deliberate v2 item that MUST bump ``ACTIVATION_SPEC_VERSION`` and update the
+# deliberate future item that MUST bump ``ACTIVATION_SPEC_VERSION`` and update the
 # dashboard in lockstep. See docs/telemetry-activation.md.
 INFERENCE_ENDPOINTS: frozenset[str] = frozenset(
     {
