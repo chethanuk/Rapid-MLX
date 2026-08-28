@@ -544,11 +544,20 @@ struct MemoryProjectionInvariantTests {
     func test2444_typed507PreservesResident() async {
         let currentAlias = "qwen3.5-4b-4bit"
         let targetAlias = "qwen3.8-27b-4bit"
+        let child = ProcessGroupChild.testStub()
+        let initialResidency = residency(
+            alias: currentAlias,
+            measuredGB: 4,
+            modality: "text"
+        )
         let server = residencyServer(
             currentAlias: currentAlias,
             currentFootprintGB: 4,
             host: memorySnapshot(totalGB: 64, usedGB: 8),
-            session: MemoryInvariantProjectionRejectProtocol.session()
+            session: MemoryInvariantProjectionRejectProtocol.session(
+                initialSnapshot: initialResidency
+            ),
+            child: child
         )
         defer { server._testClearChild() }
 
@@ -560,11 +569,16 @@ struct MemoryProjectionInvariantTests {
         )
 
         #expect(!loaded)
+        #expect(
+            await server.refreshResidency(),
+            "post-rejection residency must remain observable from the engine"
+        )
         #expect(server.pendingMemoryWarning == nil,
                 "Desktop preflight is safe; this rejection must come from the typed 507")
         #expect(server.state == .ready(alias: currentAlias))
         #expect(server.servingAlias == currentAlias)
         #expect(server.isModelResident(currentAlias))
+        #expect(child.isRunning, "typed rejection must not stop the resident sidecar")
         let failure = server.residentLoadFailure(for: targetAlias)
         #expect(failure?.message.contains("release about 6 GB") == true)
         #expect(failure?.message.contains("26 GB") == true)
@@ -723,7 +737,7 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
 
     override func stopLoading() {}
 
-    private static func readBodyStream(_ stream: InputStream?) -> Data? {
+    fileprivate static func readBodyStream(_ stream: InputStream?) -> Data? {
         guard let stream else { return nil }
         stream.open()
         defer { stream.close() }
@@ -757,31 +771,59 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
 }
 
 private final class MemoryInvariantProjectionRejectProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var residentSnapshot: ModelResidencySnapshot?
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
-    static func session() -> URLSession {
+    static func session(initialSnapshot: ModelResidencySnapshot) -> URLSession {
+        lock.lock()
+        residentSnapshot = initialSnapshot
+        lock.unlock()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MemoryInvariantProjectionRejectProtocol.self]
         return URLSession(configuration: configuration)
     }
 
     override func startLoading() {
-        guard request.httpMethod == "POST", request.url?.path == "/v1/models/load" else {
-            let response = HTTPURLResponse(
-                url: request.url!, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(
-                self,
-                didLoad: Data(#"{"error":{"message":"unexpected request"}}"#.utf8)
+        if request.httpMethod == "GET", request.url?.path == "/v1/models/residency" {
+            Self.lock.lock()
+            let snapshot = Self.residentSnapshot
+            Self.lock.unlock()
+            respond(
+                statusCode: 200,
+                payload: try! JSONEncoder().encode(snapshot ?? .empty)
             )
-            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        guard request.httpMethod == "POST", request.url?.path == "/v1/models/load" else {
+            respond(
+                statusCode: 404,
+                payload: Data(#"{"error":{"message":"unexpected request"}}"#.utf8)
+            )
+            return
+        }
+        let body = request.httpBody
+            ?? MemoryInvariantLoadSuccessProtocol.readBodyStream(request.httpBodyStream)
+            ?? Data()
+        let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        guard object?["replace_group"] as? String == "assistant",
+              object?["memory_policy"] as? String == "evict_first_if_needed"
+        else {
+            respond(
+                statusCode: 400,
+                payload: Data(#"{"error":{"message":"invalid replacement policy"}}"#.utf8)
+            )
             return
         }
         let payload = Data(#"{"error":{"message":"insufficient capacity"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}"#.utf8)
+        respond(statusCode: 507, payload: payload)
+    }
+
+    private func respond(statusCode: Int, payload: Data) {
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: 507, httpVersion: "HTTP/1.1", headerFields: nil
+            url: request.url!, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: nil
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: payload)
