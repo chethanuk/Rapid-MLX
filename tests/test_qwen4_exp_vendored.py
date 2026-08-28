@@ -14,6 +14,10 @@ from mlx_lm.models.cache import ArraysCache, BatchKVCache, CacheList, KVCache
 import vllm_mlx.models.qwen4_exp as qwen4_exp
 from scripts import qwen38_streaming_convert as converter
 from scripts.qwen38_streaming_convert import quantized_tensor_names
+from vllm_mlx.kernels.qsa_block_sparse import (
+    block_sparse_attention,
+    should_use_block_sparse,
+)
 from vllm_mlx.models.qwen4_exp import (
     GatedDeltaNet,
     GatedResidual,
@@ -627,8 +631,9 @@ def test_qsa_vectorized_mask_preserves_budget_tail_and_causality():
         physical_kv_length=65,
     )
     assert selected is not None
-    mx.eval(selected)
-    mask = np.array(selected[0, 0])
+    mask_array = selected.dense_mask()
+    mx.eval(mask_array)
+    mask = np.array(mask_array[0, 0])
 
     expected_counts = []
     for position in range(65):
@@ -639,6 +644,240 @@ def test_qsa_vectorized_mask_preserves_budget_tail_and_causality():
     assert mask[0, 0]
     assert mask[-1, -1]
     assert not np.any(np.triu(mask, k=1))
+
+
+def test_qsa_block_sparse_selection_keeps_sorted_compact_blocks(monkeypatch):
+    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    monkeypatch.setenv("RAPID_MLX_QSA_BLOCK_SPARSE", "1")
+    selected = QSAIndexer(args)(
+        mx.zeros((1, 65, args.hidden_size)),
+        QSAIndexCache(compress_ratio=2),
+        physical_kv_length=65,
+    )
+    assert isinstance(selected, qwen4_exp._QSASelection)
+    mx.eval(selected.token_indices, selected.valid)
+    block_starts = np.array(selected.token_indices[0, :, :8:2])
+    block_valid = np.array(selected.valid[0, :, :8:2])
+    for row, valid in zip(block_starts, block_valid):
+        np.testing.assert_array_equal(row[valid], np.sort(row[valid]))
+    np.testing.assert_array_equal(
+        np.array(selected.dense_mask()[0, 0]).sum(axis=-1),
+        [
+            min((position + 1) // 2, 4) * 2 + (position + 1) % 2
+            for position in range(65)
+        ],
+    )
+
+
+def test_qsa_attention_routes_compact_selection_to_block_kernel(monkeypatch):
+    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    attention = QSAAttention(args)
+    observed = []
+    monkeypatch.setenv("RAPID_MLX_QSA_BLOCK_SPARSE", "1")
+
+    class FakeIndexer:
+        token_budget = 8
+        compress_ratio = 2
+        rope_theta = 10_000_000
+
+        def __call__(self, hidden_states, cache, *, physical_kv_length):
+            length = int(hidden_states.shape[1])
+            block_tokens = mx.broadcast_to(
+                mx.array([0, 1, 4, 5, 8, 9, 12, 13], dtype=mx.int32),
+                (1, length, 8),
+            )
+            tail = mx.broadcast_to(mx.array([16, 17], dtype=mx.int32), (1, length, 2))
+            return qwen4_exp._QSASelection(
+                token_indices=mx.concatenate([block_tokens, tail], axis=-1),
+                valid=mx.ones((1, length, 10), dtype=mx.bool_),
+                physical_kv_length=physical_kv_length,
+            )
+
+    class FakeKVCache:
+        offset = 16_384
+        _idx = 16_384
+
+        def size(self):
+            return self._idx
+
+        def update_and_fetch(self, keys, values):
+            return keys, values
+
+    def fake_sparse(
+        queries,
+        keys,
+        values,
+        block_starts,
+        block_counts,
+        tail_indices,
+        tail_counts,
+        *,
+        block_size,
+    ):
+        observed.append(
+            (
+                block_starts.shape,
+                np.array(block_counts),
+                tail_indices.shape,
+                np.array(tail_counts),
+                block_size,
+            )
+        )
+        return mx.zeros_like(queries)
+
+    attention.indexer = FakeIndexer()
+    monkeypatch.setattr(qwen4_exp, "block_sparse_attention", fake_sparse)
+    output = attention(
+        mx.zeros((1, 64, args.hidden_size)),
+        [FakeKVCache(), object()],
+        mask="causal",
+    )
+    mx.eval(output)
+
+    assert output.shape == (1, 64, args.hidden_size)
+    assert len(observed) == 1
+    block_shape, block_counts, tail_shape, tail_counts, block_size = observed[0]
+    assert block_shape == (1, 64, 4)
+    assert tail_shape == (1, 64, 2)
+    np.testing.assert_array_equal(block_counts, 4)
+    np.testing.assert_array_equal(tail_counts, 2)
+    assert block_size == 2
+
+
+@pytest.mark.skipif(
+    not mx.metal.is_available(), reason="QSA block-sparse kernel requires Metal"
+)
+def test_qsa_block_sparse_matches_dense_mask_with_tail_and_padding():
+    rng = np.random.default_rng(11)
+    batch = 2
+    query_heads = 24
+    kv_heads = 2
+    query_length = 3
+    key_length = 17
+    head_dim = 256
+    block_size = 4
+    topk = 3
+
+    queries = mx.array(
+        rng.normal(size=(batch, query_heads, query_length, head_dim)),
+        dtype=mx.float16,
+    )
+    keys = mx.array(
+        rng.normal(size=(batch, kv_heads, key_length, head_dim)),
+        dtype=mx.float16,
+    )
+    values = mx.array(
+        rng.normal(size=(batch, kv_heads, key_length, head_dim)),
+        dtype=mx.float16,
+    )
+    block_starts_np = np.array(
+        [
+            [[1, 9, 0], [1, 5, 9], [5, 9, 0]],
+            [[0, 8, 0], [4, 8, 12], [0, 0, 0]],
+        ],
+        dtype=np.int32,
+    )
+    block_counts_np = np.array([[2, 3, 2], [2, 3, 0]], dtype=np.int32)
+    tail_indices_np = np.array(
+        [
+            [[13, 14, 0, 0], [13, 0, 0, 0], [13, 14, 15, 0]],
+            [[16, 0, 0, 0], [16, 0, 0, 0], [0, 0, 0, 0]],
+        ],
+        dtype=np.int32,
+    )
+    tail_counts_np = np.array([[2, 1, 3], [1, 1, 0]], dtype=np.int32)
+
+    output = block_sparse_attention(
+        queries,
+        keys,
+        values,
+        mx.array(block_starts_np),
+        mx.array(block_counts_np),
+        mx.array(tail_indices_np),
+        mx.array(tail_counts_np),
+        block_size=block_size,
+    )
+
+    mask = np.zeros((batch, 1, query_length, key_length), dtype=np.bool_)
+    for row in range(batch):
+        for query_index in range(query_length):
+            for block_index in range(block_counts_np[row, query_index]):
+                start = block_starts_np[row, query_index, block_index]
+                mask[row, 0, query_index, start : start + block_size] = True
+            for tail_index in range(tail_counts_np[row, query_index]):
+                token = tail_indices_np[row, query_index, tail_index]
+                mask[row, 0, query_index, token] = True
+    additive = mx.where(
+        mx.array(mask),
+        mx.array(0.0, dtype=queries.dtype),
+        mx.array(-1e9, dtype=queries.dtype),
+    )
+    reference = mx.fast.scaled_dot_product_attention(
+        queries,
+        keys,
+        values,
+        scale=head_dim**-0.5,
+        mask=additive,
+    )
+    mx.eval(output, reference)
+
+    np.testing.assert_allclose(
+        np.array(output)[:, :, :2],
+        np.array(reference)[:, :, :2],
+        rtol=2e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_array_equal(np.array(output)[1, :, 2], 0)
+
+
+def test_qsa_block_sparse_rejects_incompatible_grouped_query_shapes():
+    queries = mx.zeros((1, 3, 1, 256), dtype=mx.float16)
+    keys = mx.zeros((1, 2, 4, 256), dtype=mx.float16)
+    with pytest.raises(ValueError, match="divisible"):
+        block_sparse_attention(
+            queries,
+            keys,
+            keys,
+            mx.zeros((1, 1, 1), dtype=mx.int32),
+            mx.ones((1, 1), dtype=mx.int32),
+            mx.zeros((1, 1, 4), dtype=mx.int32),
+            mx.zeros((1, 1), dtype=mx.int32),
+            block_size=4,
+        )
+
+    valid_queries = mx.zeros((1, 2, 1, 256), dtype=mx.float16)
+    with pytest.raises(ValueError, match="tail indices"):
+        block_sparse_attention(
+            valid_queries,
+            keys,
+            keys,
+            mx.zeros((1, 1, 1), dtype=mx.int32),
+            mx.ones((1, 1), dtype=mx.int32),
+            mx.zeros((1, 1, 3), dtype=mx.int32),
+            mx.zeros((1, 1), dtype=mx.int32),
+            block_size=4,
+        )
+
+    with pytest.raises(ValueError, match="same dtype"):
+        block_sparse_attention(
+            valid_queries,
+            keys,
+            keys.astype(mx.float32),
+            mx.zeros((1, 1, 1), dtype=mx.int32),
+            mx.ones((1, 1), dtype=mx.int32),
+            mx.zeros((1, 1, 4), dtype=mx.int32),
+            mx.zeros((1, 1), dtype=mx.int32),
+            block_size=4,
+        )
+
+
+def test_qsa_block_sparse_flag_is_opt_in_and_crossover_gated(monkeypatch):
+    monkeypatch.delenv("RAPID_MLX_QSA_BLOCK_SPARSE", raising=False)
+    assert not should_use_block_sparse(2_048, 32_768)
+    monkeypatch.setenv("RAPID_MLX_QSA_BLOCK_SPARSE", "true")
+    assert not should_use_block_sparse(63, 32_768)
+    assert not should_use_block_sparse(2_048, 16_383)
+    assert should_use_block_sparse(64, 16_384) == mx.metal.is_available()
 
 
 def test_qsa_batch_prefill_builds_mask_before_kv_update(monkeypatch):
@@ -728,7 +967,8 @@ def test_qsa_sparse_scores_use_one_reference_batched_matmul(monkeypatch):
         cache,
         physical_kv_length=6,
     )
-    mx.eval(selected)
+    assert selected is not None
+    mx.eval(selected.token_indices, selected.valid)
     assert shapes == [
         (
             (args.indexer_n_heads, 6, args.indexer_head_dim),

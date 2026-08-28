@@ -35,6 +35,10 @@ from mlx_lm.models.gated_delta import gated_delta_update  # noqa: E402
 from mlx_lm.models.rope_utils import initialize_rope  # noqa: E402
 from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
 
+from ..kernels.qsa_block_sparse import (  # noqa: E402
+    block_sparse_attention,
+    should_use_block_sparse,
+)
 from .qwen4_exp_cache import QSAIndexCache  # noqa: E402
 
 
@@ -624,7 +628,7 @@ class QSAIndexer(nn.Module):
         cache: QSAIndexCache,
         *,
         physical_kv_length: int,
-    ) -> mx.array | None:
+    ) -> _QSASelection | None:
         batch, length, _ = hidden_states.shape
         cache._ensure_batch(batch)
         offsets = list(cache._offsets)
@@ -726,6 +730,9 @@ class QSAIndexer(nn.Module):
                 selected_blocks,
                 dense_blocks,
             )
+            if should_use_block_sparse(length, physical_kv_length):
+                # The block-sparse kernel reduces in physical key order.
+                blocks = mx.sort(blocks, axis=-1)
             block_valid = mx.arange(self.block_topk)[None, :] < mx.minimum(
                 complete_counts[:, None], self.block_topk
             )
@@ -761,7 +768,7 @@ class QSAIndexer(nn.Module):
             valid=mx.stack(compact_valid),
             physical_kv_length=physical_kv_length,
         )
-        return selection.dense_mask()
+        return selection
 
 
 class QSAAttention(nn.Module):
@@ -869,23 +876,48 @@ class QSAAttention(nn.Module):
         )
         if kv_cache is not None:
             keys, values = kv_cache.update_and_fetch(keys, values)
-        additive_mask = (
-            mask
-            if selected is None
-            else mx.where(
-                selected,
-                mx.array(0.0, dtype=queries.dtype),
-                mx.array(-1e9, dtype=queries.dtype),
+        use_sparse_kernel = isinstance(
+            selected, _QSASelection
+        ) and should_use_block_sparse(length, physical_length)
+        if use_sparse_kernel:
+            block_slots = slice(
+                0, self.indexer.token_budget, self.indexer.compress_ratio
             )
-        )
-        output = scaled_dot_product_attention(
-            queries,
-            keys,
-            values,
-            cache=kv_cache,
-            scale=self.scale,
-            mask=additive_mask,
-        )
+            tail_slots = slice(self.indexer.token_budget, None)
+            block_starts = selected.token_indices[..., block_slots]
+            block_valid = selected.valid[..., block_slots]
+            tail_indices = selected.token_indices[..., tail_slots]
+            tail_valid = selected.valid[..., tail_slots]
+            output = block_sparse_attention(
+                queries,
+                keys,
+                values,
+                block_starts,
+                mx.sum(block_valid, axis=-1).astype(mx.int32),
+                tail_indices,
+                mx.sum(tail_valid, axis=-1).astype(mx.int32),
+                block_size=self.indexer.compress_ratio,
+            )
+        else:
+            if isinstance(selected, _QSASelection):
+                selected = selected.dense_mask()
+            additive_mask = (
+                mask
+                if selected is None
+                else mx.where(
+                    selected,
+                    mx.array(0.0, dtype=queries.dtype),
+                    mx.array(-1e9, dtype=queries.dtype),
+                )
+            )
+            output = scaled_dot_product_attention(
+                queries,
+                keys,
+                values,
+                cache=kv_cache,
+                scale=self.scale,
+                mask=additive_mask,
+            )
         output = output.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         return self.o_proj(output * mx.sigmoid(gate))
 
