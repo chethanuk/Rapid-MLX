@@ -189,6 +189,16 @@ def test_below_minimum_tier_keeps_the_conservative_hard_warning(monkeypatch, cap
     assert "100% projected utilization" in out
 
 
+def test_lower_tier_pick_keeps_measured_policy_on_a_larger_mac(monkeypatch, capsys):
+    """A 24 GB pick remains supported when launched on a 32 GB host."""
+    _patch_size_bytes(monkeypatch, size_gb=8.0)
+    with patch.dict("sys.modules", {"psutil": _fake_psutil(32.0, used_gb=15.0)}):
+        _check_memory_capacity(
+            "/resolved/bonsai", alias="bonsai-27b-2bit"
+        )
+    assert capsys.readouterr().out == ""
+
+
 def test_silent_when_psutil_unavailable(monkeypatch, capsys):
     """Best-effort: if psutil can't be imported, fall through silently
     rather than blocking startup.

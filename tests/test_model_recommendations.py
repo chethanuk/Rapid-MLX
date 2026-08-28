@@ -35,6 +35,9 @@ def test_tier_rounds_down_and_clamps() -> None:
 def test_recommended_alias_requires_the_host_to_reach_the_minimum_tier() -> None:
     assert not is_recommended_alias("lfm2.5-2.6b-4bit", 4)
     assert is_recommended_alias("lfm2.5-2.6b-4bit", 8)
+    assert not is_recommended_alias("bonsai-27b-2bit", 18)
+    assert is_recommended_alias("bonsai-27b-2bit", 24)
+    assert is_recommended_alias("bonsai-27b-2bit", 32)
 
 
 def test_repeated_aliases_have_one_working_set_footprint() -> None:

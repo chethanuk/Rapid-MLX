@@ -111,12 +111,13 @@ def recommendation_footprint_gb(alias: str) -> float | None:
 
 
 def is_recommended_alias(alias: str, ram_gb: float) -> bool:
-    """Whether ``alias`` is a curated pick for this physical-RAM tier."""
-    tiers = load_recommendation_tiers()
-    if not tiers or ram_gb < tiers[0].floor_gb:
-        return False
+    """Whether ``alias`` is a curated pick supported by this host's RAM."""
     wanted = alias.casefold()
-    return any(pick.alias.casefold() == wanted for pick in recommendation_tier(ram_gb).picks)
+    return any(
+        tier.floor_gb <= ram_gb
+        and any(pick.alias.casefold() == wanted for pick in tier.picks)
+        for tier in load_recommendation_tiers()
+    )
 
 
 def recommendation_payload(ram_gb: float) -> dict[str, Any]:
