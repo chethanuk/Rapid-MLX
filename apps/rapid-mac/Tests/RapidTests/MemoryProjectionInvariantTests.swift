@@ -136,11 +136,17 @@ struct MemoryProjectionInvariantTests {
             // Exercise the production wiring too: ensureServing must choose
             // releaseModel(currentAlias), apply the admission snapshot, avoid
             // parking on a false warning, and reach the resident-load client.
+            let child = ProcessGroupChild.testStub()
             let server = residencyServer(
                 currentAlias: row.smart.alias,
                 currentFootprintGB: row.smart.footprintGB,
                 host: memorySnapshot(totalGB: totalGB, usedGB: usedWithSmart),
-                session: MemoryInvariantLoadSuccessProtocol.session()
+                session: MemoryInvariantLoadSuccessProtocol.session(initialSnapshot: residency(
+                    alias: row.smart.alias,
+                    measuredGB: row.smart.footprintGB,
+                    modality: "text"
+                )),
+                child: child
             )
             let loaded = await server.ensureServing(
                 alias: row.fast.alias,
@@ -151,8 +157,11 @@ struct MemoryProjectionInvariantTests {
             #expect(loaded, "tier \(row.floorGB): production resident load must proceed")
             #expect(server.pendingMemoryWarning == nil)
             #expect(server.state == .ready(alias: row.fast.alias))
-            #expect(server.isModelResident(row.smart.alias),
-                    "in-process replacement rejection/success must not stop the live sidecar")
+            #expect(child.isRunning, "in-process replacement must keep the sidecar alive")
+            #expect(!server.isModelResident(row.smart.alias),
+                    "post-load residency must evict the replaced assistant")
+            #expect(server.isModelResident(row.fast.alias),
+                    "post-load residency must contain only the replacement assistant")
             server._testClearChild()
         }
     }
@@ -358,6 +367,89 @@ struct MemoryProjectionInvariantTests {
         ) == nil)
     }
 
+    /// Production-wiring proof for the sibling-residency part of the invariant.
+    /// On an 18 GB host, releasing only the 6.3 GB assistant leaves the 6 GB
+    /// audio lane charged, so a 7 GB replacement still projects to 18.7 GB and
+    /// MUST park. If ``ensureServing`` ever passes ``releaseResidentModels``
+    /// instead, it would over-credit the audio lane and incorrectly load.
+    @Test("2472: ensureServing keeps sibling residency charged", .timeLimit(.minutes(1)))
+    func test2472_ensureServingKeepsSiblingResidencyCharged() async throws {
+        let currentAlias = "qwen3.5-9b-4bit"
+        let targetAlias = "replacement-7gb"
+        let audioAlias = "qwen3-asr"
+        let host = memorySnapshot(totalGB: 18, usedGB: 18)
+        let current = residentStatus(
+            alias: currentAlias,
+            measuredGB: 6.3,
+            modality: "text"
+        )
+        let audio = residentStatus(
+            alias: audioAlias,
+            measuredGB: 6,
+            modality: "audio",
+            primary: false
+        )
+        let snapshot = ModelResidencySnapshot(
+            memoryLimitBytes: UInt64(18 * gib),
+            memoryUsedBytes: UInt64(12.3 * gib),
+            memoryAvailableBytes: nil,
+            idleTTLSeconds: 0,
+            loadsTotal: 2,
+            evictionsTotal: 0,
+            models: [current, audio],
+            audioLanes: [
+                ResidentAudioLaneStatus(
+                    lane: "speech",
+                    model: audioAlias,
+                    state: "resident"
+                ),
+            ]
+        )
+        let child = ProcessGroupChild.testStub()
+        var client = ServerResidencyClient()
+        client.session = MemoryInvariantLoadSuccessProtocol.session(initialSnapshot: snapshot)
+        let server = ServerManager(
+            testingState: .ready(alias: currentAlias),
+            residency: snapshot,
+            activeBearer: "memory-invariant-test"
+        )
+        server._testSetResidencyClient(client)
+        server._testInstallChild(child)
+        server.memorySnapshotProvider = { host }
+        defer { server._testClearChild() }
+
+        let load = Task { @MainActor in
+            await server.ensureServing(
+                alias: targetAlias,
+                hfPath: nil,
+                estimatedMemoryGB: 7,
+                replacementGroup: .assistant
+            )
+        }
+        var warning: ModelSizing.MemoryWarning?
+        for _ in 0 ..< 300 where warning == nil {
+            try await Task.sleep(for: .milliseconds(10))
+            warning = server.pendingMemoryWarning
+        }
+        let parked = try #require(
+            warning,
+            "assistant replacement must not over-credit the resident audio lane"
+        )
+        #expect(parked.severity == .unsafe)
+        #expect(parked.alias == targetAlias)
+        #expect(parked.plannedReleaseAlias == currentAlias)
+        #expect(abs(parked.plannedReleaseGB - 6.3) < 0.01)
+        #expect(server.state == .ready(alias: currentAlias))
+        #expect(server.isModelResident(audioAlias), "sibling audio lane must remain charged")
+
+        server.cancelPendingMemoryLoad(parked)
+        #expect(await load.value == false)
+        #expect(server.state == .ready(alias: currentAlias))
+        #expect(server.isModelResident(currentAlias))
+        #expect(server.isModelResident(audioAlias))
+        #expect(child.isRunning, "Cancel must preserve the resident sidecar")
+    }
+
     /// An engine reported as ``evicting`` is already being torn down - it is
     /// not memory we can further free, so it contributes exactly zero to the
     /// release plan. Over-crediting an evicting model would overstate the
@@ -491,7 +583,8 @@ struct MemoryProjectionInvariantTests {
     private func residentStatus(
         alias: String,
         measuredGB: Double,
-        modality: String
+        modality: String,
+        primary: Bool = true
     ) -> ResidentModelStatus {
         let bytes = UInt64(measuredGB * gib)
         return ResidentModelStatus(
@@ -501,7 +594,7 @@ struct MemoryProjectionInvariantTests {
             modality: modality,
             state: "resident",
             pinned: false,
-            primary: true,
+            primary: primary,
             activeRequests: 0,
             estimatedBytes: bytes,
             measuredBytes: bytes,
@@ -532,7 +625,8 @@ struct MemoryProjectionInvariantTests {
         currentAlias: String,
         currentFootprintGB: Double,
         host: MemoryProbe.Snapshot,
-        session: URLSession
+        session: URLSession,
+        child: ProcessGroupChild = .testStub()
     ) -> ServerManager {
         var client = ServerResidencyClient()
         client.session = session
@@ -546,24 +640,57 @@ struct MemoryProjectionInvariantTests {
             activeBearer: "memory-invariant-test"
         )
         server._testSetResidencyClient(client)
-        server._testInstallChild(ProcessGroupChild.testStub())
+        server._testInstallChild(child)
         server.memorySnapshotProvider = { host }
         return server
     }
 }
 
 private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var residentSnapshot: ModelResidencySnapshot?
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
-    static func session() -> URLSession {
+    static func session(initialSnapshot: ModelResidencySnapshot) -> URLSession {
+        lock.lock()
+        residentSnapshot = initialSnapshot
+        lock.unlock()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MemoryInvariantLoadSuccessProtocol.self]
         return URLSession(configuration: configuration)
     }
 
     override func startLoading() {
-        let payload = Data(#"{"id":"loaded-model","model_path":"repo/loaded-model","aliases":[],"modality":"text","state":"resident","pinned":false,"primary":true,"active_requests":0,"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}"#.utf8)
+        let path = request.url?.path
+        let payload: Data
+        if path == "/v1/models/load" {
+            let body = request.httpBody ?? Data()
+            let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let alias = object?["model"] as? String ?? "missing-load-alias"
+            let estimatedGB = object?["estimated_size_gb"] as? Double ?? 0
+            let estimatedBytes = UInt64(estimatedGB * Double(UInt64(1) << 30))
+            let status = Self.status(alias: alias, estimatedBytes: estimatedBytes)
+            Self.lock.lock()
+            let previous = Self.residentSnapshot
+            Self.residentSnapshot = ModelResidencySnapshot(
+                memoryLimitBytes: previous?.memoryLimitBytes ?? UInt64(64) << 30,
+                memoryUsedBytes: status.displayBytes,
+                memoryAvailableBytes: previous?.memoryAvailableBytes,
+                idleTTLSeconds: previous?.idleTTLSeconds ?? 0,
+                loadsTotal: (previous?.loadsTotal ?? 0) + 1,
+                evictionsTotal: (previous?.evictionsTotal ?? 0) + 1,
+                models: [status]
+            )
+            Self.lock.unlock()
+            payload = try! JSONEncoder().encode(status)
+        } else {
+            Self.lock.lock()
+            let snapshot = Self.residentSnapshot
+            Self.lock.unlock()
+            payload = try! JSONEncoder().encode(snapshot ?? .empty)
+        }
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
         )!
@@ -573,6 +700,22 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
     }
 
     override func stopLoading() {}
+
+    private static func status(alias: String, estimatedBytes: UInt64) -> ResidentModelStatus {
+        ResidentModelStatus(
+            id: alias,
+            modelPath: "repo/\(alias)",
+            aliases: [alias],
+            modality: "text",
+            state: "resident",
+            pinned: false,
+            primary: true,
+            activeRequests: 0,
+            estimatedBytes: estimatedBytes,
+            measuredBytes: estimatedBytes,
+            idleSeconds: 0
+        )
+    }
 }
 
 private final class MemoryInvariantProjectionRejectProtocol: URLProtocol, @unchecked Sendable {
