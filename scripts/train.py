@@ -258,7 +258,15 @@ def _conflicted_files(output: str) -> str:
 
 
 def open_train_pr(branch: str, title: str, merged: list[dict]) -> int:
-    """Push the train branch and open the train PR; return its number."""
+    """Push the train branch and open the train PR; return its number.
+
+    The train PR is created with BOTH the ``train`` and ``full-ci`` labels from
+    the start. Applying ``full-ci`` at creation (before CI launches) keeps the
+    required ``tests``/``desktop-tests`` merge gates running as the ACTIVE runs,
+    instead of landing on the label-gate after a first (unlabelled) set of runs
+    was already cancelled/superseded — which otherwise shows up as a false-red
+    facade on the train head.
+    """
     run(["git", "push", "-u", "origin", branch])
     body_lines = [
         f"train: {branch} departure {title}",
@@ -289,6 +297,8 @@ def open_train_pr(branch: str, title: str, merged: list[dict]) -> int:
             body,
             "--label",
             "train",
+            "--label",
+            "full-ci",
         ]
     )
     return int(out["number"])
