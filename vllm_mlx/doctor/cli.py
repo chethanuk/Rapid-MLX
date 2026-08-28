@@ -55,6 +55,14 @@ def doctor_command(args: Any) -> None:
         sys.exit(2)
 
     verbose = bool(getattr(args, "verbose", False))
+
+    # Surface the staleness nudge before the report. doctor has no ``--json``
+    # form, so there is no machine-readable mode whose stderr must stay clean.
+    if not getattr(args, "json", False):
+        from vllm_mlx._version_check import print_staleness_warning_if_any
+
+        print_staleness_warning_if_any()
+
     report = run_all()
     render(report, verbose=verbose)
     sys.exit(report.exit_code)
