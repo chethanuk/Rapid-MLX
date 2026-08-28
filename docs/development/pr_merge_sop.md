@@ -233,15 +233,33 @@ Before merge, the PR description must accurately reflect actual current state:
 ## Step 12 — Merge
 
 - Re-run the Step 10 `statusCheckRollup` query after the final push and directly
-  before invoking `gh pr merge`. Stop on `QUEUED`, `IN_PROGRESS`, `PENDING`,
+  before queueing. Stop on `QUEUED`, `IN_PROGRESS`, `PENDING`,
   `FAILURE`, `CANCELLED`, or `TIMED_OUT` for any relevant check.
 
-- **Squash-merge** for clean main history:
+- For an ordinary pull request, apply exactly one integration authorization
+  label and let the matching managed queue combine and revalidate it. Use
+  `merge-ready` only when both `merge-lane-no-mac` is green and
+  `merge-lane-mac` is skipped. Use `merge-ready-mac` when
+  `merge-lane-mac` is green; this includes engine-only, Desktop-only, and
+  cross-cutting changes. Do not manually rebase after queue entry and do not
+  click GitHub's merge button:
 
   ```bash
-  gh pr merge <PR#> --repo raullenchai/Rapid-MLX --squash --delete-branch
+  # No Desktop/GUI lane:
+  gh pr edit <PR#> --repo raullenchai/Rapid-MLX --add-label merge-ready
+
+  # Desktop/GUI lane required:
+  gh pr edit <PR#> --repo raullenchai/Rapid-MLX --add-label merge-ready-mac
   ```
 
+- The no-Mac queue waits up to five minutes; the Mac-required queue waits up to
+  15 minutes. Each collects as many as four same-class pull requests, runs the
+  affected full lanes once on the combined tree, and then squash-merges each
+  original. A failed batch is split to identify the blocking member; do not add
+  an independent rerun.
+- Version bumps and human-authorized hotfixes do not enter the general batch.
+  Follow their explicit release/hotfix contract and use a direct squash merge
+  only when that contract authorizes it.
 - If version was bumped: verify `Auto-release on version bump` workflow triggers post-merge.
 - If the squash subject contains `(#NN)` GitHub auto-suffix on a `chore: bump version to X.Y.Z` commit, override with `--subject` — the regex in `auto-release.yml` is strict.
 - After merge, verify `git log raullenchai/main --oneline -1` shows your squash commit.

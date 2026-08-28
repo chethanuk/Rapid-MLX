@@ -3,7 +3,7 @@
 
 These tests intentionally inspect the workflows: ordinary PRs must keep their
 fast product checks while release-grade model/GUI lanes are reserved for a
-``full-ci`` promotion or an integration candidate.
+an integration candidate.
 """
 
 import os
@@ -122,15 +122,16 @@ def _workflow_strings(workflow: Path) -> dict[str, object]:
     return yaml.load(workflow.read_text(), Loader=yaml.BaseLoader)
 
 
-def test_product_promotion_keeps_diff_scope_and_accepts_train_heads():
+def test_product_promotion_keeps_diff_scope_and_accepts_integration_heads():
     for workflow, job_name, step_name in (
         (ENGINE_WORKFLOW, "changes", "Classify validation lanes"),
         (DESKTOP_WORKFLOW, "changes", "Classify desktop lane"),
     ):
         run = _step_run(workflow, job_name, step_name)
         assert 'git diff --no-renames --name-only "$PR_BASE_SHA" "$GITHUB_SHA"' in run
-        assert '[ "$FULL_CI" = true ] ||' in run
-        assert '[[ "$HEAD_REF" == train/* ]] && [ "$HEAD_REPO" = "$REPO" ]' in run
+        assert '[ "$HEAD_REPO" = "$REPO" ] &&' in run
+        assert '[[ "$HEAD_REF" == train/* ]] ||' in run
+        assert '[[ "$HEAD_REF" =~ ^mergify/merge-queue/[0-9a-f]{10}$ ]]' in run
         assert 'echo "full_gate=$full_gate"' in run
 
 
@@ -158,7 +159,6 @@ def test_fork_cannot_claim_train_branch_promotion(tmp_path):
         )
     ):
         common = {
-            "FULL_CI": "false",
             "HEAD_REF": "train/spoofed",
             "REPO": "owner/repo",
         }
@@ -186,6 +186,40 @@ def test_fork_cannot_claim_train_branch_promotion(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("head_ref", "head_repo", "expected"),
+    (
+        ("mergify/merge-queue/a76b1f3d25", "owner/repo", "full_gate=true"),
+        ("mergify/merge-queue/A76B1F3D25", "owner/repo", "full_gate=false"),
+        ("mergify/merge-queue/a76b1f3d2", "owner/repo", "full_gate=false"),
+        ("mergify/merge-queue/a76b1f3d25-extra", "owner/repo", "full_gate=false"),
+        ("tmp-mergify/merge-queue/a76b1f3d25", "owner/repo", "full_gate=false"),
+        ("mergify/merge-queue/a76b1f3d25", "attacker/fork", "full_gate=false"),
+    ),
+)
+def test_only_exact_internal_mergify_batch_heads_promote_full_ci(
+    tmp_path, head_ref, head_repo, expected
+):
+    for index, (workflow, job_name, step_name) in enumerate(
+        (
+            (ENGINE_WORKFLOW, "changes", "Classify validation lanes"),
+            (DESKTOP_WORKFLOW, "changes", "Classify desktop lane"),
+        )
+    ):
+        assert (
+            _execute_promotion(
+                workflow,
+                job_name,
+                step_name,
+                GITHUB_OUTPUT=str(tmp_path / f"mergify-{index}"),
+                HEAD_REF=head_ref,
+                HEAD_REPO=head_repo,
+                REPO="owner/repo",
+            )
+            == expected
+        )
+
+
 def test_only_promoted_heads_allocate_expensive_lanes():
     l1 = str(_job(ENGINE_WORKFLOW, "l1-smoke")["if"])
     assert "needs.changes.outputs.engine == 'true'" in l1
@@ -195,6 +229,36 @@ def test_only_promoted_heads_allocate_expensive_lanes():
         condition = str(_job(DESKTOP_WORKFLOW, job_name)["if"])
         assert "needs.changes.outputs.desktop == 'true'" in condition
         assert "needs.changes.outputs.full_gate == 'true'" in condition
+
+
+def test_merge_authorization_labels_do_not_retrigger_product_ci():
+    expected = ["opened", "synchronize", "reopened", "ready_for_review"]
+    for workflow in (ENGINE_WORKFLOW, DESKTOP_WORKFLOW):
+        triggers = _workflow_strings(workflow)["on"]["pull_request"]
+        assert triggers["types"] == expected
+        assert "labeled" not in triggers["types"]
+        assert "unlabeled" not in triggers["types"]
+
+
+def test_merge_lane_checks_partition_all_classifier_states():
+    no_mac = _job(ENGINE_WORKFLOW, "merge-lane-no-mac")
+    mac = _job(ENGINE_WORKFLOW, "merge-lane-mac")
+
+    assert no_mac["needs"] == "changes"
+    assert mac["needs"] == "changes"
+    assert no_mac["runs-on"] == "ubuntu-latest"
+    assert mac["runs-on"] == "ubuntu-latest"
+
+    no_mac_condition = str(no_mac["if"])
+    assert "needs.changes.result == 'success'" in no_mac_condition
+    assert "needs.changes.outputs.engine != 'true'" in no_mac_condition
+    assert "needs.changes.outputs.desktop != 'true'" in no_mac_condition
+
+    mac_condition = str(mac["if"])
+    assert "needs.changes.result == 'success'" in mac_condition
+    assert "needs.changes.outputs.engine == 'true'" in mac_condition
+    assert "needs.changes.outputs.desktop == 'true'" in mac_condition
+    assert "||" in mac_condition
 
 
 def test_unpromoted_engine_aggregate_requires_fast_linux_and_apple_lanes():

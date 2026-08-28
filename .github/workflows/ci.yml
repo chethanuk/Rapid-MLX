@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   # Merge queue candidates are synthetic commits.  They need their own trigger
   # or GitHub waits forever for the required `tests` check.
   merge_group:
@@ -40,11 +40,10 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REPO: ${{ github.repository }}
-          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            # Classify the actual diff even during full-ci promotion. Promotion
+            # Classify the actual diff before integration promotion. Promotion
             # broadens coverage inside the affected lane; it must not turn an
             # engine-only PR into a full Desktop run (or vice versa).
             # Disable rename folding so both the removed source path and the
@@ -54,8 +53,9 @@ jobs:
               --paths-file /tmp/changed-paths \
               --github-output "$GITHUB_OUTPUT"
             full_gate=false
-            if [ "$FULL_CI" = true ] || \
-              { [[ "$HEAD_REF" == train/* ]] && [ "$HEAD_REPO" = "$REPO" ]; }; then
+            if [ "$HEAD_REPO" = "$REPO" ] && \
+              { [[ "$HEAD_REF" == train/* ]] || \
+                [[ "$HEAD_REF" =~ ^mergify/merge-queue/[0-9a-f]{10}$ ]]; }; then
               full_gate=true
             fi
             echo "full_gate=$full_gate" >> "$GITHUB_OUTPUT"
@@ -76,6 +76,28 @@ jobs:
               echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"}]}'
             } >> "$GITHUB_OUTPUT"
           fi
+
+  merge-lane-no-mac:
+    needs: changes
+    if: >-
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.engine != 'true' &&
+      needs.changes.outputs.desktop != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark no-Mac merge lane
+        run: echo "This head requires neither the engine nor Desktop lane."
+
+  merge-lane-mac:
+    needs: changes
+    if: >-
+      needs.changes.result == 'success' &&
+      (needs.changes.outputs.engine == 'true' ||
+       needs.changes.outputs.desktop == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark Mac-required merge lane
+        run: echo "This head requires the engine, Desktop, or both lanes."
 
   lint:
     runs-on: ubuntu-latest
@@ -167,10 +189,14 @@ jobs:
             bash "$t"
           done
 
-      # Parser microbench — catches >10x regressions in tool-call
-      # extraction. Pure Python (parsers don't import mlx); thresholds
-      # are intentionally generous (3-5x measured M3 numbers) to
-      # absorb ubuntu-latest's shared-hardware variance.
+      # Parser microbench — reports order-of-magnitude (>12x) regressions in
+      # tool-call extraction. Pure Python (parsers don't import mlx). The
+      # relative budget scales parser μs/call by a same-run control workload;
+      # interleaved rounds and a median reduce uniform machine-speed noise and
+      # isolated scheduler pauses. Different operations do not necessarily
+      # scale together across hosted architectures, so this shared-runner lane
+      # is intentionally ADVISORY (#2344). The serial M3 release check runs the
+      # same script without `--report` and remains the enforced timing gate.
       #
       # PYTHONPATH=. so `from vllm_mlx.tool_parsers...` resolves
       # without installing the package — pytest auto-adds rootdir but
@@ -181,7 +207,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pip install pydantic transformers jsonschema openai-harmony
-          python scripts/microbench_parsers.py
+          python scripts/microbench_parsers.py --report
 
   mlx-bound-guard:
     # #1248 — a change to an mlx / mlx-lm / mlx-vlm version bound can re-open the
@@ -358,6 +384,7 @@ jobs:
             tests/test_pr_validate_merge_base.py \
             tests/test_pr_validate_diff_coverage.py \
             tests/test_pr_validate_codex.py \
+            tests/test_pr_validate_cl_description_quality.py \
             tests/test_release_baselines.py \
             tests/test_sidecar_distribution_constraints.py \
             tests/test_sidecar_vision_smoke.py \
@@ -374,6 +401,7 @@ jobs:
             tests/test_desktop_manifest.py \
             tests/test_classify_ci_changes.py \
             tests/test_ci_lane_promotion.py \
+            tests/test_mergify_batch_queue.py \
             tests/test_ci_apple_coverage_union.py \
             tests/test_check_mlx_upstream_calls.py \
             tests/test_no_out_of_band_routing.py \
@@ -466,6 +494,13 @@ jobs:
         run: |
           python -c "import platform; assert platform.machine() == 'arm64', 'Not ARM64'"
           python -c "import mlx.core as mx; print(f'MLX OK: {mx.default_device()}')"
+
+      # Shared Linux runners only report this timing signal because their
+      # allocation varies enough to false-fail unchanged parsers (#2344).
+      # Keep the relative budget enforced automatically on the existing
+      # Apple-Silicon lane; this adds no runner allocation or model load.
+      - name: Enforce parser relative-budget gate
+        run: python scripts/microbench_parsers.py
 
       - name: Run MLX-dependent tests
         # SimpleEngine was removed in PR #156 — test_simple_engine.py,
