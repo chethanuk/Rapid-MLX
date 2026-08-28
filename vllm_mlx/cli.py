@@ -1189,6 +1189,8 @@ def _apply_mtp_cli_model_type_reconciliation(
     scheduler_config,
     hf_cfg_eligibility,
     logger=None,
+    requested_depth: int | None = None,
+    explicit_depth: bool = False,
 ) -> None:
     """Thread the eligibility gate's ``model_type`` down into
     ``SchedulerConfig.mtp_model_type``.
@@ -1270,6 +1272,17 @@ def _apply_mtp_cli_model_type_reconciliation(
         else:
             print(_msg % (_prior, _eligibility_model_type), file=sys.stderr)
     scheduler_config.mtp_model_type = _eligibility_model_type
+    if requested_depth is None:
+        return
+    try:
+        scheduler_config.mtp_max_k = _resolve_mtp_depth_for_model(
+            _eligibility_model_type,
+            requested_depth,
+            explicit=explicit_depth,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _resolve_mtp_depth_for_model(
@@ -4267,27 +4280,21 @@ def serve_command(args):
         # block cannot be exercised without spinning up
         # ``serve_command``, which lets the test pass even if the
         # production block is later deleted).
-        _apply_mtp_cli_model_type_reconciliation(
+        _apply_mtp_cli_model_type_reconciliation(  # pragma: no cover - serve boundary
             scheduler_config=scheduler_config,
             hf_cfg_eligibility=hf_cfg_eligibility,
             logger=logger,
+            requested_depth=int(getattr(scheduler_config, "mtp_max_k", 1)),
+            explicit_depth=(
+                getattr(
+                    getattr(args, "_speculative_config", None),
+                    "num_speculative_tokens",
+                    None,
+                )
+                is not None
+            ),
         )
-        _spec_config = getattr(args, "_speculative_config", None)
-        _explicit_mtp_depth = bool(
-            _spec_config is not None
-            and getattr(_spec_config, "num_speculative_tokens", None) is not None
-        )
-        try:
-            _effective_mtp_depth = _resolve_mtp_depth_for_model(
-                scheduler_config.mtp_model_type,
-                int(getattr(scheduler_config, "mtp_max_k", 1)),
-                explicit=_explicit_mtp_depth,
-            )
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            sys.exit(2)
-        scheduler_config.mtp_max_k = _effective_mtp_depth
-        args.mtp_max_k = _effective_mtp_depth
+        args.mtp_max_k = scheduler_config.mtp_max_k  # pragma: no cover - serve boundary
 
         sidecar_note = (
             f" +sidecar={getattr(args, 'mtp_sidecar', None)}" if has_sidecar else ""

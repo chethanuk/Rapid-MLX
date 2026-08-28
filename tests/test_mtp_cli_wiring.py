@@ -1436,10 +1436,12 @@ def test_install_mtp_vendored_uses_inner_language_model_surface(monkeypatch):
             pass
 
     inner = _StubModel()
+    inner.mtp_max_speculative_tokens = 1
     outer = SimpleNamespace(language_model=inner)
 
     def _recording_mtp_generate_step(*args, **kwargs):
         seen["model"] = kwargs["model"]
+        seen["max_k"] = kwargs["max_k"]
         return _FakeGen()
 
     monkeypatch.setattr(_gen_mod, "mtp_generate_step", _recording_mtp_generate_step)
@@ -1455,11 +1457,13 @@ def test_install_mtp_vendored_uses_inner_language_model_surface(monkeypatch):
         model=outer,
         requests={"req-42": request_stub},
         uid_to_request_id={42: "req-42"},
+        max_k=3,
     )
     assert ok is True
 
     gb._step()
     assert seen["model"] is inner
+    assert seen["max_k"] == 1
 
 
 def _make_batch_gen_with_gb():
@@ -2858,6 +2862,43 @@ def test_apply_mtp_cli_model_type_reconciliation_prefers_eligibility_on_disagree
         "the round-I contract: on skew, the eligibility gate's read "
         "wins because it's what decided the accept/reject."
     )
+
+
+def test_apply_mtp_cli_reconciliation_caps_qwen4_default_depth():
+    from vllm_mlx.cli import _apply_mtp_cli_model_type_reconciliation
+    from vllm_mlx.scheduler import SchedulerConfig
+
+    sc = SchedulerConfig(spec_decode="mtp", mtp_max_k=3)
+    _apply_mtp_cli_model_type_reconciliation(
+        scheduler_config=sc,
+        hf_cfg_eligibility={"model_type": "qwen4_exp", "mtp_num_hidden_layers": 1},
+        logger=None,
+        requested_depth=3,
+        explicit_depth=False,
+    )
+
+    assert sc.mtp_model_type == "qwen4_exp"
+    assert sc.mtp_max_k == 1
+
+
+def test_apply_mtp_cli_reconciliation_rejects_explicit_qwen4_depth(capsys):
+    from vllm_mlx.cli import _apply_mtp_cli_model_type_reconciliation
+    from vllm_mlx.scheduler import SchedulerConfig
+
+    sc = SchedulerConfig(spec_decode="mtp", mtp_max_k=3)
+    with pytest.raises(SystemExit, match="2"):
+        _apply_mtp_cli_model_type_reconciliation(
+            scheduler_config=sc,
+            hf_cfg_eligibility={
+                "model_type": "qwen4_exp",
+                "mtp_num_hidden_layers": 1,
+            },
+            logger=None,
+            requested_depth=2,
+            explicit_depth=True,
+        )
+
+    assert "num_speculative_tokens=1 only" in capsys.readouterr().err
 
 
 def test_install_mtp_vendored_uid_reuse_clears_stale_state(monkeypatch):

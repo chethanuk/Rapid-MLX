@@ -257,20 +257,6 @@ class QSAIndexCache(ArraysCache):
     def restore_trim_checkpoint(self, state):
         self._offsets, self._compressed_counts = state
 
-    def speculative_checkpoint(self):
-        """Capture QSA state that a multi-token verify can overwrite."""
-        raw_ring = None
-        if self.raw_ring is not None:
-            raw_ring = self.raw_ring + mx.zeros_like(self.raw_ring)
-            mx.eval(raw_ring)
-        return raw_ring, list(self._offsets), list(self._compressed_counts)
-
-    def restore_speculative_checkpoint(self, state):
-        raw_ring, offsets, compressed_counts = state
-        self.raw_ring = raw_ring
-        self._offsets = list(offsets)
-        self._compressed_counts = list(compressed_counts)
-
     def _can_trim_row(self, offset: int, n: int) -> bool:
         if n < 0 or n > offset:
             return False

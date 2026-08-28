@@ -840,6 +840,15 @@ def _install_mtp_vendored(
     from .spec_decode.mtp.draft_k_controller_v2 import derive_controller_key
     from .spec_decode.mtp.generator import mtp_generate_step
 
+    model_max_k = getattr(mtp_model, "mtp_max_speculative_tokens", max_k)
+    if max_k > model_max_k:
+        logger.warning(
+            "[MTP-vendored] checkpoint caps speculative depth at K=%d (requested K=%d)",
+            model_max_k,
+            max_k,
+        )
+        max_k = model_max_k
+
     # Derive the structural controller key ONCE at install. It walks the model
     # tree to discover quantization, so recomputing it per generation request
     # (the unnamed-model fallback in ``_mtp_step`` below) would put
@@ -3787,25 +3796,13 @@ class Scheduler:
                     mtp_model_type,
                 )
             else:
-                requested_max_k = getattr(self.config, "mtp_max_k", 3)
-                model_max_k = getattr(
-                    self.model, "mtp_max_speculative_tokens", requested_max_k
-                )
-                effective_max_k = min(requested_max_k, model_max_k)
-                if effective_max_k != requested_max_k:
-                    logger.warning(
-                        "[MTP-vendored] checkpoint caps speculative depth at "
-                        "K=%d (requested K=%d)",
-                        effective_max_k,
-                        requested_max_k,
-                    )
                 _install_mtp_vendored(
                     bg,
                     model=self.model,
                     requests=self.requests,
                     uid_to_request_id=self.uid_to_request_id,
                     # 0.9.13 PR-B: EV depth controller knobs.
-                    max_k=effective_max_k,
+                    max_k=getattr(self.config, "mtp_max_k", 3),
                     disable_auto_k=getattr(self.config, "mtp_disable_auto_k", False),
                     # Preferred (named) identity for the controller
                     # registry. The previous spelling ended in a bare

@@ -433,10 +433,6 @@ def mtp_generate_step(
         for c in model_cache:
             restore = getattr(c, "restore_rollback", None)
             if callable(restore) and getattr(c, "rollback_state", None) is not None:
-                if verify_size is None:
-                    raise AssertionError(
-                        "verify_size is required for model-specific rollback"
-                    )
                 restore(n_to_drop, verify_size)
             elif hasattr(c, "rollback_state") and c.rollback_state is not None:
                 snapshots = c.rollback_state

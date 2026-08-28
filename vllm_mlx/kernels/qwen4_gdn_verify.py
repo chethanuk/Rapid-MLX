@@ -27,7 +27,7 @@ def _compute_g_beta(a_log, alpha, beta, dt_bias):
 
 @cache
 def _kernel(has_mask: bool):
-    if not mx.metal.is_available():
+    if not mx.metal.is_available():  # pragma: no cover - Apple-only module
         return None
     mask_source = "mask[b_idx * T + t]" if has_mask else "true"
     source = f"""
