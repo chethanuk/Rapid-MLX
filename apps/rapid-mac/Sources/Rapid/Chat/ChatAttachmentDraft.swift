@@ -25,15 +25,52 @@ struct ChatAttachmentDraft: Equatable {
     var hasAttachments: Bool { !images.isEmpty || !files.isEmpty }
     var isImportingFiles: Bool { fileImportID != nil || imageImportID != nil }
 
-    mutating func appendImage(_ image: ChatImageAttachment, sourceURL: URL? = nil) {
+    /// Appends a single image only when it fits the per-message image budget
+    /// (count and combined bytes). Returns `false` (and appends nothing) when
+    /// the budget is already exhausted, so a caller can surface a notice. This
+    /// is the draft-level companion to ``ChatImageAttachment/importCandidates``:
+    /// the pre-read gate bounds the picker/drop, and this bounds the direct
+    /// paste path and any late import completion.
+    @discardableResult
+    mutating func appendImage(
+        _ image: ChatImageAttachment,
+        sourceURL: URL? = nil
+    ) -> Bool {
+        guard Self.canAppend(image, to: images) else { return false }
         images.append(image)
         if let sourceURL { sourcePaths[image.id] = Self.attachmentKey(for: sourceURL) }
+        return true
     }
 
+    /// Appends each imported image that still fits the per-message image budget,
+    /// preserving order and source identity, and returns how many were rejected
+    /// for exceeding it. Mirrors how file imports apply their fitted budget;
+    /// the existing, already-fitted images always precede the imported ones, so
+    /// the shared gate keeps only the imported subset that still fits.
+    @discardableResult
     mutating func appendImages(
         _ imported: [(attachment: ChatImageAttachment, sourceURL: URL)]
-    ) {
-        for item in imported { appendImage(item.attachment, sourceURL: item.sourceURL) }
+    ) -> Int {
+        let fitted = ChatImageAttachment.fittedForMessage(
+            images + imported.map(\.attachment)
+        )
+        let kept = imported.filter { attachment, _ in
+            fitted.contains { $0.id == attachment.id }
+        }
+        for item in kept {
+            images.append(item.attachment)
+            sourcePaths[item.attachment.id] = Self.attachmentKey(for: item.sourceURL)
+        }
+        return imported.count - kept.count
+    }
+
+    private static func canAppend(
+        _ image: ChatImageAttachment,
+        to images: [ChatImageAttachment]
+    ) -> Bool {
+        guard images.count < ChatImageAttachment.maxImagesPerMessage else { return false }
+        let existingBytes = images.reduce(0) { $0 + $1.data.count }
+        return existingBytes + image.data.count <= ChatImageAttachment.maxCombinedImageBytes
     }
 
     mutating func beginImageImport() -> UUID? {

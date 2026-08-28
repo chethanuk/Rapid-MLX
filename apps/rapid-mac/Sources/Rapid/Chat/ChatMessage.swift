@@ -4,6 +4,15 @@ import UniformTypeIdentifiers
 
 struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable {
     static let maxBytes = 20 * 1024 * 1024
+    /// Per-message image budget, mirroring the document attachment budget
+    /// (``ChatFileAttachment/maxAttachmentsPerMessage`` and friends). The
+    /// per-file 20 MB cap is not enough on its own: a multi-select or drop can
+    /// present dozens of individually valid images, and decoding every one and
+    /// base64-encoding the whole set into a single request would freeze or
+    /// exhaust the Desktop process. `maxImagesPerMessage` bounds the count and
+    /// `maxCombinedImageBytes` bounds the aggregate encoded bytes.
+    static let maxImagesPerMessage = 4
+    static let maxCombinedImageBytes = 20 * 1024 * 1024
     /// Keep image preprocessing below the embedded engine's per-request
     /// vision-token budget. A 2048 × 1536 image is roughly 4K vision tokens
     /// on the recommended model, leaving useful margin below its 8K cap.
@@ -29,6 +38,51 @@ struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable
             max(1, Int((Double(width) * scale).rounded())),
             max(1, Int((Double(height) * scale).rounded()))
         )
+    }
+
+    /// Bound work before reading any selected image. The per-file 20 MB cap
+    /// is enforced at read time; this pre-read gate stops the count and the
+    /// aggregate bytes from growing unbounded across a multi-select/drop, which
+    /// would otherwise decode and retain every image and base64 them all into a
+    /// single request. Accepted order matches the selection; each candidate's
+    /// on-disk file size is the pre-read estimate for the aggregate byte gate.
+    static func importCandidates(
+        _ urls: [URL],
+        existingCount: Int,
+        existingBytes: Int
+    ) -> (accepted: [URL], rejectedCount: Int) {
+        var accepted: [URL] = []
+        var remainingCount = max(0, maxImagesPerMessage - max(0, existingCount))
+        var remainingBytes = max(0, maxCombinedImageBytes - max(0, existingBytes))
+        for url in urls {
+            guard remainingCount > 0 else { break }
+            let size = (
+                try? url.resourceValues(forKeys: [.fileSizeKey])
+            )?.fileSize ?? 0
+            guard size <= remainingBytes else { continue }
+            accepted.append(url)
+            remainingCount -= 1
+            remainingBytes -= size
+        }
+        return (accepted, max(0, urls.count - accepted.count))
+    }
+
+    /// Returns the ordered subset that fits the per-message image budget (count
+    /// and combined bytes). Images cannot be truncated the way document text is
+    /// (``ChatFileAttachment/fittedForMessage(_:)``), so an image that does not
+    /// fit is dropped rather than reduced.
+    static func fittedForMessage(
+        _ attachments: [ChatImageAttachment]
+    ) -> [ChatImageAttachment] {
+        var result: [ChatImageAttachment] = []
+        var remainingBytes = maxCombinedImageBytes
+        for attachment in attachments {
+            guard result.count < maxImagesPerMessage,
+                  attachment.data.count <= remainingBytes else { continue }
+            result.append(attachment)
+            remainingBytes -= attachment.data.count
+        }
+        return result
     }
 
     let id: UUID
