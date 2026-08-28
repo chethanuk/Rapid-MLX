@@ -73,10 +73,17 @@ def classify_worktree(repo: Path, row: dict[str, object], cutoff: float) -> str:
     if command("git", "status", "--porcelain", cwd=path).strip():
         return "dirty"
     upstream = command(
-        "git", "rev-parse", "--abbrev-ref", "@{upstream}", cwd=path, check=False
+        "git",
+        "rev-parse",
+        "--symbolic-full-name",
+        "@{upstream}",
+        cwd=path,
+        check=False,
     ).strip()
     if not upstream:
         return "no-upstream"
+    if not upstream.startswith("refs/remotes/"):
+        return "non-remote-upstream"
     ahead = command("git", "rev-list", "--count", f"{upstream}..HEAD", cwd=path)
     if int(ahead) != 0:
         return "unpushed"
@@ -131,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-age-hours", type=float, default=6)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
+    if args.min_age_hours <= 0:
+        parser.error("min-age-hours must be positive")
     repo = args.repo.resolve()
     scratch = args.scratch.resolve()
     if scratch == Path("/") or str(scratch).startswith("/Volumes/Extreme SSD"):
@@ -185,7 +194,10 @@ def main(argv: list[str] | None = None) -> int:
             current = next(
                 (row for row in worktrees(repo) if Path(row["path"]) == path), None
             )
-            if current is None or classify_worktree(repo, current, cutoff) != "eligible":
+            if (
+                current is None
+                or classify_worktree(repo, current, cutoff) != "eligible"
+            ):
                 raise RuntimeError(f"worktree changed after planning; refusing: {path}")
             subprocess.run(
                 ["git", "worktree", "remove", str(path)], cwd=repo, check=True
