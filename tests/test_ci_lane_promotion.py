@@ -278,13 +278,105 @@ def test_metadata_gate_settles_only_live_exact_head_successful_full_ci():
     run = settle["steps"][0]["run"]
     assert 'LIVE_HEAD_SHA" != "$RUN_SHA' in run
     assert 'FULL_CI" != true' in run
-    assert 'WORKFLOW_CONCLUSION" != success' in run
     assert 'JOB_CONCLUSION" != success' in run
-    assert 'LATEST_RUN_ID" != "$RUN_ID' in run
+    assert '.conclusion == "success"' in run
+    assert "actions/runs/${EVIDENCE_RUN_ID}/jobs" in run
     assert "actions/workflows/${WORKFLOW_FILE}/runs" in run
-    assert "actions/runs/${RUN_ID}/jobs" in run
     assert 'state: "success"' in run
     assert "statuses/${RUN_SHA}" in run
+
+
+def test_metadata_gate_uses_success_before_higher_cancelled_duplicate(tmp_path):
+    run = _step_run(
+        LABEL_GATE_WORKFLOW,
+        "settle-completed-gate",
+        "Settle an exact-head full-CI status",
+    )
+    mock_bin = tmp_path / "bin"
+    mock_bin.mkdir()
+    mock_gh = mock_bin / "gh"
+    mock_gh.write_text(
+        """#!/bin/bash
+set -euo pipefail
+case "$*" in
+  "api repos/test/repo/pulls/7") cat "$MOCK_PR_JSON" ;;
+  *"/actions/workflows/rapid-mac-ci.yml/runs?"*) cat "$MOCK_RUNS_JSON" ;;
+  *"/actions/runs/90/jobs?"*) cat "$MOCK_JOBS_JSON" ;;
+  *"--method POST"*) cat > "$MOCK_POST" ;;
+  *) echo "unexpected gh invocation: $*" >&2; exit 91 ;;
+esac
+"""
+    )
+    mock_gh.chmod(0o755)
+
+    head_sha = "b" * 40
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"workflow_run": {"pull_requests": [{"number": 7}]}}))
+    pr_json = tmp_path / "mock-pr.json"
+    pr_json.write_text(
+        json.dumps(
+            {
+                "state": "open",
+                "base": {"ref": "main"},
+                "head": {"sha": head_sha},
+                "labels": [{"name": "full-ci"}],
+            }
+        )
+    )
+    runs_json = tmp_path / "runs.json"
+    runs_json.write_text(
+        json.dumps(
+            {
+                "workflow_runs": [
+                    {
+                        "id": 91,
+                        "head_sha": head_sha,
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "html_url": "https://example.invalid/run/91",
+                    },
+                    {
+                        "id": 90,
+                        "head_sha": head_sha,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "html_url": "https://example.invalid/run/90",
+                    },
+                ]
+            }
+        )
+    )
+    jobs_json = tmp_path / "mock-jobs.json"
+    jobs_json.write_text(
+        json.dumps([{"jobs": [{"name": "desktop-tests", "conclusion": "success"}]}])
+    )
+    post = tmp_path / "post.json"
+    env = os.environ | {
+        "GH_TOKEN": "test-token",
+        "GITHUB_EVENT_PATH": str(event),
+        "MOCK_JOBS_JSON": str(jobs_json),
+        "MOCK_POST": str(post),
+        "MOCK_PR_JSON": str(pr_json),
+        "MOCK_RUNS_JSON": str(runs_json),
+        "PATH": f"{mock_bin}:{os.environ['PATH']}",
+        "REPO": "test/repo",
+        "RUN_NAME": "rapid-mac CI",
+        "RUN_SHA": head_sha,
+        "RUNNER_TEMP": str(tmp_path),
+        "TRIGGER_RUN_ID": "91",
+    }
+
+    completed = subprocess.run(
+        ["bash", "-c", run], check=True, env=env, capture_output=True, text=True
+    )
+    assert post.exists(), completed.stdout + completed.stderr
+    payload = json.loads(post.read_text())
+    assert payload == {
+        "state": "success",
+        "context": "desktop-tests",
+        "description": "Exact-head full-CI merge gate passed",
+        "target_url": "https://example.invalid/run/90",
+    }
 
 
 def test_all_strict_required_workflows_emit_on_merge_group():
