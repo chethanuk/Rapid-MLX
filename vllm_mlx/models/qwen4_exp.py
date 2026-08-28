@@ -876,10 +876,9 @@ class QSAAttention(nn.Module):
         )
         if kv_cache is not None:
             keys, values = kv_cache.update_and_fetch(keys, values)
-        use_sparse_kernel = isinstance(
-            selected, _QSASelection
-        ) and should_use_block_sparse(length, physical_length)
-        if use_sparse_kernel:
+        if isinstance(selected, _QSASelection) and should_use_block_sparse(
+            length, physical_length
+        ):
             block_slots = slice(
                 0, self.indexer.token_budget, self.indexer.compress_ratio
             )
