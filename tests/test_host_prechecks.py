@@ -74,7 +74,12 @@ def test_two_large_loads_serialize_on_one_host_lock(tmp_path: Path) -> None:
         str(ledger),
     ]
     first = subprocess.Popen([*base, "a"], env=env)
-    time.sleep(0.05)
+    deadline = time.monotonic() + 2
+    while (
+        not ledger.exists() or "a-start" not in ledger.read_text()
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ledger.exists() and "a-start" in ledger.read_text()
     second = subprocess.Popen([*base, "b"], env=env)
     assert first.wait(timeout=10) == 0
     assert second.wait(timeout=10) == 0
