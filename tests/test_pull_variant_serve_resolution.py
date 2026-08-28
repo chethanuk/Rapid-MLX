@@ -97,12 +97,17 @@ def test_clear_missing_marker_is_a_noop(marker_path):
 
 
 @pytest.mark.parametrize(
-    "invalid", ["../escape", "/absolute", "C:/drive", "4bit\\escape", "*", "4bit/"]
+    "invalid", ["../escape", "/absolute", "C:/drive", "4bit\\escape", "4bit/"]
 )
 def test_invalid_marker_values_fail_closed(marker_path, invalid):
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_text(invalid)
     assert _download_gate.pulled_variant(RAW_REPO) is None
+
+
+def test_glob_metacharacters_round_trip_as_literal_variant(marker_path):
+    _download_gate.persist_pulled_variant(RAW_REPO, "quant[4]*?")
+    assert _download_gate.pulled_variant(RAW_REPO) == "quant[4]*?"
 
 
 def test_missing_marker_returns_none_without_error(marker_path):
@@ -269,6 +274,47 @@ def test_serve_uses_format_marker_folder(monkeypatch, tmp_path, marker_path):
     assert _resolve_subfolder_checkpoint(RAW_REPO) == os.path.join(
         str(snapshot), "mxfp4"
     )
+
+
+def test_serve_escapes_format_marker_glob_metacharacters(
+    monkeypatch, tmp_path, marker_path
+):
+    """A literal format survives the real pull-to-serve marker transition."""
+    import argparse
+
+    from vllm_mlx import cli
+
+    variant = "quant[4]*?"
+    snapshot = tmp_path / "snap" / "def"
+    (snapshot / variant).mkdir(parents=True)
+    (snapshot / variant / "config.json").write_text("{}")
+    (snapshot / variant / "model.safetensors").write_bytes(b"\x00" * 16)
+    seen_patterns: list[object] = []
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        seen_patterns.append(kwargs.get("allow_patterns"))
+        return str(snapshot)
+
+    args = argparse.Namespace(
+        model=RAW_REPO,
+        bits=None,
+        format=variant,
+        _original_alias=RAW_REPO,
+    )
+    with (
+        patch(
+            "huggingface_hub.HfApi.list_repo_tree",
+            return_value=[RepoFolder(path=variant, oid="variant")],
+        ),
+        patch("huggingface_hub.snapshot_download", fake_snapshot_download),
+    ):
+        cli.pull_command(args)
+        resolved = _resolve_subfolder_checkpoint(RAW_REPO)
+
+    escaped = ["quant[[]4[]][*][?]/*"]
+    assert _download_gate.pulled_variant(RAW_REPO) == variant
+    assert resolved == os.path.join(str(snapshot), variant)
+    assert seen_patterns == [escaped, escaped]
 
 
 def test_no_marker_resolves_repo_root_as_before(monkeypatch, tmp_path):

@@ -6794,10 +6794,9 @@ def _escape_glob_literal(name: str) -> str:
     (``4bit``, ``mxfp4``) never hit this, but the selector claims to handle
     arbitrary multi-variant repos, so it must not corrupt their folder names.
     """
-    out: list[str] = []
-    for ch in name:
-        out.append(f"[{ch}]" if ch in "[]*?" else ch)
-    return "".join(out)
+    from ._download_gate import _escape_variant_glob_literal
+
+    return _escape_variant_glob_literal(name)
 
 
 def _resolve_variant_allow_patterns(

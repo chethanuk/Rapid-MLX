@@ -1026,7 +1026,11 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     # is consistent, not a new failure mode.
     from huggingface_hub import snapshot_download
 
-    from .._download_gate import _snapshot_is_complete, pulled_variant
+    from .._download_gate import (
+        _escape_variant_glob_literal,
+        _snapshot_is_complete,
+        pulled_variant,
+    )
     from ..model_aliases import resolve_model, resolve_subfolder
 
     repo_id = resolve_model(model_name)
@@ -1052,7 +1056,7 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     # programmatic callers reach with a bare alias, skipping the CLI's
     # pre-resolution, so normalize here instead of assuming someone
     # upstream already did.
-    patterns = [f"{subfolder}/*"]
+    patterns = [f"{_escape_variant_glob_literal(subfolder)}/*"]
 
     # Offline-first: a warm, COMPLETE cache resolves with zero network. The
     # online call used to run first and, on a poisoned-DNS network, hangs in

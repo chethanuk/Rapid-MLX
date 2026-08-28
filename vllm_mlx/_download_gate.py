@@ -406,11 +406,18 @@ def pulled_variant(repo_id: str) -> str | None:
         return None
 
 
+def _escape_variant_glob_literal(name: str) -> str:
+    """Escape one validated variant folder for an HF allow-pattern glob."""
+    out: list[str] = []
+    for char in name:
+        out.append(f"[{char}]" if char in "[]*?" else char)
+    return "".join(out)
+
+
 def _valid_variant_subfolder(variant: object) -> bool:
-    """Whether a marker is a relative, downward, non-glob repo subfolder."""
+    """Whether a marker is a relative, downward repo subfolder."""
     if not isinstance(variant, str) or not variant:
         return False
-    glob_meta = set("*?[]!")
     drive_qualified = len(variant) >= 2 and variant[1] == ":"
     return not (
         variant.startswith("/")
@@ -419,7 +426,6 @@ def _valid_variant_subfolder(variant: object) -> bool:
         or "\\" in variant
         or ".." in variant.split("/")
         or variant.endswith("/")
-        or glob_meta & set(variant)
     )
 
 
