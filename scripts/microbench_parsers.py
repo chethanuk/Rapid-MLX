@@ -268,6 +268,9 @@ def bench_one(
     ``runner_factor`` overrides the calibration when provided (unit tests);
     when ``None`` (production), each round's factor is measured live.
     """
+    if iters < 1:
+        raise ValueError("iters must be at least 1")
+
     # Every parser the bench knows about must carry an explicit ``BASE_US``
     # entry; silently defaulting an unknown name to a magic 5.0 would mask a
     # wiring mistake (new parser added to the loop but forgotten in BASE_US)
@@ -335,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Print timing and exit 0 even if thresholds exceeded.",
     )
     args = p.parse_args(argv)
+    if args.iters < 1:
+        p.error("--iters must be at least 1")
 
     parsers = _build_parsers()
     if not parsers:

@@ -288,6 +288,20 @@ def test_report_mode_returns_zero_even_with_failures(mb):
     assert rc == 0
 
 
+@pytest.mark.parametrize("iters", ["0", "-1"])
+def test_main_rejects_non_positive_iterations(mb, iters):
+    """A release gate must not report zero iterations while executing one."""
+    with pytest.raises(SystemExit) as error:
+        mb.main(["--iters", iters])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("iters", [0, -1])
+def test_bench_one_rejects_non_positive_iterations(mb, iters):
+    with pytest.raises(ValueError, match="iters must be at least 1"):
+        mb.bench_one("hermes", lambda _text: None, "sample", iters)
+
+
 def test_main_fails_when_no_parsers_load(mb, monkeypatch):
     """An empty parser registry is a broken benchmark, not a green run."""
     monkeypatch.setattr(mb, "_build_parsers", lambda: {})
@@ -317,10 +331,11 @@ def test_enforced_gate_returns_nonzero_without_report(mb, monkeypatch):
     assert mb.main(["--iters", "5", "--report"]) == 0
 
 
-def test_hosted_ci_is_advisory_and_m3_release_check_is_enforced():
-    """Shared hosted timing must not block a PR, while the serial M3 release
-    check retains the non-reporting hard-gate invocation."""
+def test_linux_ci_is_advisory_while_apple_and_m3_are_enforced():
+    """Linux reports timing; Apple CI and the serial M3 gate enforce it."""
     ci = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
     release = (_REPO_ROOT / "scripts" / "release_check_m3.sh").read_text()
     assert "python scripts/microbench_parsers.py --report" in ci
+    assert "- name: Enforce parser relative-budget gate" in ci
+    assert "run: python scripts/microbench_parsers.py\n" in ci
     assert '"$PY" scripts/microbench_parsers.py\n' in release

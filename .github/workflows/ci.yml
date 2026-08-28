@@ -467,6 +467,13 @@ jobs:
           python -c "import platform; assert platform.machine() == 'arm64', 'Not ARM64'"
           python -c "import mlx.core as mx; print(f'MLX OK: {mx.default_device()}')"
 
+      # Shared Linux runners only report this timing signal because their
+      # allocation varies enough to false-fail unchanged parsers (#2344).
+      # Keep the relative budget enforced automatically on the existing
+      # Apple-Silicon lane; this adds no runner allocation or model load.
+      - name: Enforce parser relative-budget gate
+        run: python scripts/microbench_parsers.py
+
       - name: Run MLX-dependent tests
         # SimpleEngine was removed in PR #156 — test_simple_engine.py,
         # test_llm.py, test_deltanet_snapshot.py went with it.
