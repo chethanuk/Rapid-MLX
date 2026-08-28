@@ -66,3 +66,26 @@ def test_release_bumps_cannot_enter_the_general_batch_queue():
     assert exclusions <= set(queue_rule["queue_conditions"])
     assert exclusions <= set(enqueue_rule["conditions"])
     assert queue_rule["merge_method"] == "squash"
+
+
+def test_head_updates_revoke_merge_ready_authorization():
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/revoke-merge-ready.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+
+    assert workflow["on"] == {"pull_request_target": {"types": ["synchronize"]}}
+    assert workflow["permissions"] == {}
+
+    job = workflow["jobs"]["revoke-merge-ready"]
+    assert job["if"] == (
+        "contains(github.event.pull_request.labels.*.name, 'merge-ready')"
+    )
+    assert job["permissions"] == {"pull-requests": "write"}
+
+    (step,) = job["steps"]
+    assert step["uses"].startswith("actions/github-script@")
+    script = step["with"]["script"]
+    assert "github.rest.issues.removeLabel" in script
+    assert 'name: "merge-ready"' in script
+    assert "checkout" not in script.lower()

@@ -219,6 +219,12 @@ contain the recorded candidate heads, and its `tests`, `desktop-tests`, and
 original pull requests are admission evidence, not a substitute for the
 combined result.
 
+Every `synchronize` event removes `merge-ready` before the updated head can be
+admitted. A new commit therefore requires a fresh review and an explicit new
+authorization after its own required checks pass. The revocation workflow uses
+`pull_request_target` without checking out or executing pull-request code, and
+holds only `pull-requests: write` permission.
+
 Do not enable batching while strict up-to-date protection remains on, and do
 not weaken or remove any required context to make a batch move. A missing,
 cancelled, or failed aggregate is a queue failure.
