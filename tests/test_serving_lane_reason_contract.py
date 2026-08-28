@@ -210,6 +210,17 @@ _VALIDATED_REASON_KEYWORD_PASSTHROUGHS = frozenset(
     }
 )
 
+# Dictionary-literal forwarding sites whose values come from a live engine
+# that already validated its serving-lane reason at construction/ingestion.
+_VALIDATED_REASON_DICT_PASSTHROUGHS = frozenset(
+    {
+        (
+            "runtime/resident_models.py",
+            "getattr(engine, 'serving_lane_reason', None)",
+        ),
+    }
+)
+
 
 def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
     """Static reason values assigned to reason fields anywhere in the engine tree."""
@@ -320,6 +331,66 @@ def _keyword_reason_values() -> set[str]:
     return found
 
 
+def _dict_reason_values() -> set[str]:
+    """Static values emitted under a dictionary ``serving_lane_reason`` key."""
+    found: set[str] = set()
+    seen_passthroughs: set[tuple[str, str]] = set()
+    for path in ENGINE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        constants = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                items = zip(node.keys, node.values, strict=True)
+            elif isinstance(node, ast.DictComp):
+                items = ((node.key, node.value),)
+            else:
+                continue
+            for key, value in items:
+                key_name = (
+                    key.value
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    else constants.get(key.id)
+                    if isinstance(key, ast.Name)
+                    else None
+                )
+                if key_name != "serving_lane_reason":
+                    continue
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue
+                if (
+                    isinstance(value, ast.Constant) and isinstance(value.value, str)
+                ) or (isinstance(value, ast.Name) and value.id in constants):
+                    found.add(
+                        _string_value(
+                            value,
+                            constants,
+                            context=(
+                                f"serving_lane_reason dict value at "
+                                f"{path}:{node.lineno}"
+                            ),
+                        )
+                    )
+                    continue
+                passthrough = (
+                    path.relative_to(ENGINE).as_posix(),
+                    ast.unparse(value),
+                )
+                assert passthrough in _VALIDATED_REASON_DICT_PASSTHROUGHS, (
+                    "unvalidated dynamic serving_lane_reason dictionary value: "
+                    f"{passthrough}. Route the value through the shared "
+                    "invariant, then add only that exact pass-through here."
+                )
+                seen_passthroughs.add(passthrough)
+    assert seen_passthroughs == _VALIDATED_REASON_DICT_PASSTHROUGHS, (
+        "validated serving_lane_reason dictionary roster drifted:\n"
+        f"missing: "
+        f"{sorted(_VALIDATED_REASON_DICT_PASSTHROUGHS - seen_passthroughs)}\n"
+        f"unexpected: "
+        f"{sorted(seen_passthroughs - _VALIDATED_REASON_DICT_PASSTHROUGHS)}"
+    )
+    return found
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -339,13 +410,25 @@ def test_dynamic_reason_assignment_scanner_fails_closed(
         _literal_assignments()
 
 
-def test_subscript_reason_assignment_reaches_exhaustive_ssot_check(
+@pytest.mark.parametrize(
+    "emission",
+    [
+        'payload["serving_lane_reason"] = "unknown_reason"',
+        'payload = {"serving_lane_reason": "unknown_reason"}',
+        ('payload = {"serving_lane_reason": "unknown_reason" for _ in range(1)}'),
+        (
+            'REASON_FIELD = "serving_lane_reason"\n'
+            'payload = {REASON_FIELD: "unknown_reason"}'
+        ),
+    ],
+)
+def test_literal_reason_emission_reaches_exhaustive_ssot_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    emission: str,
 ):
-    (tmp_path / "subscript.py").write_text(
-        'decision = ServingLaneDecision(False, "text_checkpoint")\n'
-        'payload["serving_lane_reason"] = "unknown_reason"\n',
+    (tmp_path / "emission.py").write_text(
+        f'decision = ServingLaneDecision(False, "text_checkpoint")\n{emission}\n',
         encoding="utf-8",
     )
     monkeypatch.setitem(globals(), "ENGINE", tmp_path)
@@ -355,9 +438,33 @@ def test_subscript_reason_assignment_reaches_exhaustive_ssot_check(
         "_VALIDATED_REASON_KEYWORD_PASSTHROUGHS",
         frozenset(),
     )
+    monkeypatch.setitem(
+        globals(),
+        "_VALIDATED_REASON_DICT_PASSTHROUGHS",
+        frozenset(),
+    )
 
     with pytest.raises(AssertionError, match="unknown_reason"):
         _assert_ssot_matches_engine()
+
+
+def test_dynamic_dict_reason_scanner_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "dict_value.py").write_text(
+        'payload = {"serving_lane_reason": local_reason}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "ENGINE", tmp_path)
+    monkeypatch.setitem(
+        globals(),
+        "_VALIDATED_REASON_DICT_PASSTHROUGHS",
+        frozenset(),
+    )
+
+    with pytest.raises(AssertionError, match="unvalidated dynamic"):
+        _dict_reason_values()
 
 
 def test_qualified_decision_constructor_is_scanned(
@@ -423,6 +530,11 @@ def _engine_reasons() -> dict[str, bool]:
     # exhaustive engine roster; audited dynamic forwarding sites add no new
     # value of their own.
     for reason in _keyword_reason_values():
+        reasons.setdefault(reason, False)
+    # Response dictionaries can emit the field without an assignment target
+    # or call keyword. Scan their literal keys separately; audited dynamic
+    # forwarding contributes no new reason value of its own.
+    for reason in _dict_reason_values():
         reasons.setdefault(reason, False)
     # An assignment to the instance attribute is the engine downgrading
     # itself mid-load: after a failed vision load its own warning calls this
