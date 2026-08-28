@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from vllm_mlx import cli
 from vllm_mlx.model_aliases import list_aliases
@@ -50,6 +53,23 @@ def test_repeated_aliases_have_one_working_set_footprint() -> None:
             assert recommendation_footprint_gb(pick.alias) == pick.footprint_gb
     assert recommendation_footprint_gb("qwen3.8-27b-4bit") == 20.0
     assert recommendation_footprint_gb("private/model") is None
+
+
+def test_conflicting_repeated_footprints_fail_closed(monkeypatch) -> None:
+    from vllm_mlx import recommendations
+
+    tiers = list(load_recommendation_tiers())
+    repeated = tiers[0].picks[1]
+    conflicting_pick = replace(repeated, footprint_gb=repeated.footprint_gb + 0.1)
+    conflicting_tier = replace(tiers[1], picks=(conflicting_pick, *tiers[1].picks[1:]))
+    monkeypatch.setattr(
+        recommendations,
+        "load_recommendation_tiers",
+        lambda: (tiers[0], conflicting_tier),
+    )
+
+    with pytest.raises(ValueError, match="conflicting recommendation footprints"):
+        recommendation_footprint_gb(repeated.alias)
 
 
 def test_recipe_json_is_stable_and_has_two_picks(monkeypatch, capsys) -> None:

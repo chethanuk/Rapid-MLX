@@ -239,6 +239,19 @@ def test_silent_when_size_lookup_fails(monkeypatch, capsys):
     assert out == "", f"unresolvable size must be silent; got: {out!r}"
 
 
+def test_silent_when_size_lookup_returns_an_empty_manifest(monkeypatch, capsys):
+    """A successful metadata lookup with no sized siblings is also unknown."""
+    monkeypatch.setattr("os.path.isdir", lambda _path: False)
+    with (
+        patch("huggingface_hub.try_to_load_from_cache", return_value=None),
+        patch("huggingface_hub.model_info", return_value=MagicMock(siblings=[])),
+        patch.dict("sys.modules", {"psutil": _fake_psutil(24.0)}),
+    ):
+        _check_memory_capacity("mlx-community/Empty-Manifest")
+
+    assert capsys.readouterr().out == ""
+
+
 def test_never_calls_sys_exit(monkeypatch):
     """Defensive: the memory check is advisory, must never abort startup
     even on a catastrophic mismatch (212 GB model on 8 GB machine)."""
