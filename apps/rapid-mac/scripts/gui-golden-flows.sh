@@ -115,25 +115,16 @@ die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 # harness tests. Keeping the failure inside these helpers means changing a
 # journey guard from ``die`` to logging can no longer leave the unit contract
 # green: the helper is exercised with both allowed and forbidden fixtures.
-assert_no_fake_server_start() {
-    local events="$1" alias="$2" phase="$3" query_status=0
-    [[ -s "$events" ]] || return 0
-    if [[ -n "$alias" ]]; then
-        jq -e -s --arg alias "$alias" \
-            'any(.[]; .event == "server_started" and .alias == $alias)' \
-            "$events" >/dev/null || query_status=$?
-    else
-        jq -e -s 'any(.[]; .event == "server_started")' \
-            "$events" >/dev/null || query_status=$?
-    fi
+assert_fake_server_starts() {
+    local events="$1" expected_count="$2" expected_alias="$3" phase="$4" query_status=0
+    jq -e -s --argjson count "$expected_count" --arg alias "$expected_alias" \
+        '[.[] | select(.event == "server_started")] as $starts
+         | (($starts | length) == $count
+            and ($alias == "" or all($starts[]; .alias == $alias)))' \
+        "$events" >/dev/null || query_status=$?
     case "$query_status" in
-        0)
-            if [[ -n "$alias" ]]; then
-                die "$phase unexpectedly started $alias"
-            fi
-            die "$phase unexpectedly started a model"
-            ;;
-        1) return 0 ;; # valid JSONL with no matching event
+        0) return 0 ;;
+        1) die "$phase observed an unexpected sidecar start set" ;;
         *) die "$phase could not validate the sidecar event log" ;;
     esac
 }
@@ -4710,8 +4701,8 @@ flow_audio_readiness() {
     # loading everywhere else; the default Audio pane is the easiest place for
     # it to creep back in, because dictation *does* load a model — just later,
     # when the user actually presses the hotkey.
-    assert_no_fake_server_start \
-        "$OUT/fake-events.jsonl" "" "Opening Audio before any user action"
+    assert_fake_server_starts \
+        "$OUT/fake-events.jsonl" 0 "" "Opening Audio before any user action"
 
     press "$OUT/dictation.json" Audio.Mode.Speech "$OUT/speech-tab-press.json" \
         || die "Audio Speech segment is not pressable from Dictation"
@@ -4759,8 +4750,8 @@ flow_audio_readiness() {
     done
     [[ "$speech_downloading" == 1 ]] \
         || die "Speech never exposed Downloading after Download"
-    assert_no_fake_server_start \
-        "$OUT/fake-events.jsonl" "fake-qwen3-tts" "Speech before pull completion"
+    assert_fake_server_starts \
+        "$OUT/fake-events.jsonl" 0 "" "Speech before pull completion"
 
     local speech_start_ready=0
     for ((i=0; i<120; i++)); do
@@ -4775,8 +4766,8 @@ flow_audio_readiness() {
     done
     [[ "$speech_start_ready" == 1 ]] \
         || die "Speech did not become Start-ready after its download completed"
-    assert_no_fake_server_start \
-        "$OUT/fake-events.jsonl" "fake-qwen3-tts" "Speech after download-only action"
+    assert_fake_server_starts \
+        "$OUT/fake-events.jsonl" 0 "" "Speech after download-only action"
     press "$OUT/speech-downloaded.json" Readiness.Action "$OUT/speech-start.json" \
         || die "Speech Start is not pressable after download"
     wait_fake_event \
@@ -5008,8 +4999,8 @@ flow_audio_readiness() {
     # rows render a grant button only while the permission is missing, so its
     # tree legitimately differs between a fresh runner and a developer machine.
     # A snapshot would encode the runner's TCC state as the contract.
-    assert_no_fake_server_start \
-        "$OUT/fake-events.jsonl" "fake-whisper-small" "Opening Dictation"
+    assert_fake_server_starts \
+        "$OUT/fake-events.jsonl" 1 "fake-qwen3-tts" "Opening Dictation"
 
     press "$OUT/dictation-return.json" Readiness.Action "$OUT/dictation-download.json" \
         || die "Dictation Download is not pressable"
@@ -5028,8 +5019,8 @@ flow_audio_readiness() {
     done
     [[ "$dictation_downloaded" == 1 ]] \
         || die "Dictation banner did not clear after the download landed"
-    assert_no_fake_server_start \
-        "$OUT/fake-events.jsonl" "fake-whisper-small" "Dictation after Download"
+    assert_fake_server_starts \
+        "$OUT/fake-events.jsonl" 1 "fake-qwen3-tts" "Dictation after Download"
 
     jq -n '{success: true,
             assertion: "Dictation is privacy-safe and inert on open, exposes the shared explicit Download lifecycle for an uncached model, and Speech keeps its explicit Download and Start"}' \

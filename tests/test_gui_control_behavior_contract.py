@@ -119,17 +119,17 @@ def test_audio_download_and_start_actions_have_ordered_outcomes():
         flow,
         'press "$OUT/speech.json" Readiness.Action',
         '.subcommand == "pull" and .alias == "fake-qwen3-tts"',
-        '"fake-qwen3-tts" "Speech before pull completion"',
-        '"fake-qwen3-tts" "Speech after download-only action"',
+        '0 "" "Speech before pull completion"',
+        '0 "" "Speech after download-only action"',
         'press "$OUT/speech-downloaded.json" Readiness.Action',
         '.event == "server_started" and .alias == "fake-qwen3-tts"',
     )
     _assert_in_order(
         flow,
-        '"fake-whisper-small" "Opening Dictation"',
+        '1 "fake-qwen3-tts" "Opening Dictation"',
         'press "$OUT/dictation-return.json" Readiness.Action',
         '.subcommand == "pull" and .alias == "fake-whisper-small"',
-        '"fake-whisper-small" "Dictation after Download"',
+        '1 "fake-qwen3-tts" "Dictation after Download"',
     )
 
 
@@ -137,34 +137,43 @@ def test_audio_readiness_never_auto_starts_a_model():
     """Download-only actions must not start a model; only Start may.
 
     Previously pinned by grepping five exact `die` message strings. The
-    behavioural contract is structural: the flow contains a negative guard
-    (die when a `server_started` fake-event is observed prematurely) for
-    EACH model path — the Speech/TTS alias and the Dictation/transcription
-    alias — and a positive `wait_fake_event` that asserts `server_started`
-    only after the explicit Start gesture.
+    behavioural contract is structural: the flow pins the complete set of
+    `server_started` events before and after the explicit Start gesture, so an
+    unrelated stale model or a duplicate start fails as well.
     """
     flow = _harness_flow_body("flow_audio_readiness")
 
-    # The executable failure helper must control all five inert phases: opening
-    # Audio, before/after the TTS download, and before/after Dictation download.
-    assert flow.count("assert_no_fake_server_start") == 5
-    assert flow.count('"fake-qwen3-tts"') >= 2
-    assert flow.count('"fake-whisper-small"') >= 2
+    # The executable helper pins the complete start-event set in all five
+    # phases: none before the explicit Start, then exactly one TTS sidecar.
+    assert flow.count("assert_fake_server_starts") == 5
+    assert flow.count('"$OUT/fake-events.jsonl" 0 ""') == 3
+    assert flow.count('"$OUT/fake-events.jsonl" 1 "fake-qwen3-tts"') == 2
     # The one allowed start is asserted as a waited post-condition after Start.
     assert '"server_started" and .alias == "fake-qwen3-tts"' in flow
 
 
-@pytest.mark.parametrize("guarded_alias", ["", "fake-qwen3-tts", "fake-whisper-small"])
-def test_auto_start_guard_fails_on_forbidden_event(tmp_path: Path, guarded_alias: str):
+@pytest.mark.parametrize(
+    ("events_payload", "expected_count", "expected_alias"),
+    [
+        ({"event": "server_started", "alias": "other"}, "0", ""),
+        ({"event": "server_started", "alias": "other"}, "1", "fake-qwen3-tts"),
+    ],
+)
+def test_start_set_guard_rejects_unexpected_event(
+    tmp_path: Path,
+    events_payload: dict[str, str],
+    expected_count: str,
+    expected_alias: str,
+):
     events = tmp_path / "events.jsonl"
-    started_alias = guarded_alias or "some-model"
-    events.write_text(json.dumps({"event": "server_started", "alias": started_alias}))
+    events.write_text(json.dumps(events_payload))
 
     result = _run_harness_helper(
         tmp_path,
-        "assert_no_fake_server_start",
+        "assert_fake_server_starts",
         str(events),
-        guarded_alias,
+        expected_count,
+        expected_alias,
         "test phase",
     )
 
@@ -172,35 +181,56 @@ def test_auto_start_guard_fails_on_forbidden_event(tmp_path: Path, guarded_alias
     assert "FAIL:" in result.stderr
 
 
-def test_alias_guard_allows_unrelated_or_empty_events(tmp_path: Path):
+def test_start_set_guard_accepts_exact_empty_and_singleton_sets(tmp_path: Path):
     events = tmp_path / "events.jsonl"
-    events.write_text(json.dumps({"event": "server_started", "alias": "other"}))
-    unrelated = _run_harness_helper(
-        tmp_path,
-        "assert_no_fake_server_start",
-        str(events),
-        "fake-qwen3-tts",
-        "test phase",
-    )
     events.write_text("")
     empty = _run_harness_helper(
         tmp_path,
-        "assert_no_fake_server_start",
+        "assert_fake_server_starts",
         str(events),
+        "0",
+        "",
+        "test phase",
+    )
+    events.write_text(
+        json.dumps({"event": "server_started", "alias": "fake-qwen3-tts"})
+    )
+    singleton = _run_harness_helper(
+        tmp_path,
+        "assert_fake_server_starts",
+        str(events),
+        "1",
         "fake-qwen3-tts",
         "test phase",
     )
-    assert unrelated.returncode == 0
     assert empty.returncode == 0
+    assert singleton.returncode == 0
 
 
-def test_auto_start_guard_fails_closed_on_partial_jsonl(tmp_path: Path):
+def test_start_set_guard_rejects_duplicate_expected_alias(tmp_path: Path):
+    events = tmp_path / "events.jsonl"
+    event = json.dumps({"event": "server_started", "alias": "fake-qwen3-tts"})
+    events.write_text(f"{event}\n{event}\n")
+    result = _run_harness_helper(
+        tmp_path,
+        "assert_fake_server_starts",
+        str(events),
+        "1",
+        "fake-qwen3-tts",
+        "test phase",
+    )
+    assert result.returncode == 1
+    assert "FAIL:" in result.stderr
+
+
+def test_start_set_guard_fails_closed_on_partial_jsonl(tmp_path: Path):
     events = tmp_path / "events.jsonl"
     events.write_text('{"event":"server_started"')
     result = _run_harness_helper(
         tmp_path,
-        "assert_no_fake_server_start",
+        "assert_fake_server_starts",
         str(events),
+        "0",
         "fake-qwen3-tts",
         "test phase",
     )
