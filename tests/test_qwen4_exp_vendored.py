@@ -826,7 +826,7 @@ def test_qsa_block_sparse_selection_keeps_sorted_compact_blocks(monkeypatch):
     selected = QSAIndexer(args)(
         mx.zeros((1, 65, args.hidden_size)),
         QSAIndexCache(compress_ratio=2),
-        physical_kv_length=65,
+        physical_kv_length=16_384,
     )
     assert isinstance(selected, qwen4_exp._QSASelection)
     mx.eval(selected.token_indices, selected.valid)
