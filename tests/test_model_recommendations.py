@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from vllm_mlx import cli
 from vllm_mlx.model_aliases import list_aliases
 from vllm_mlx.recommendations import (
+    is_recommended_alias,
     load_recommendation_tiers,
     recommendation_footprint_gb,
     recommendation_tier,
@@ -29,6 +30,11 @@ def test_tier_rounds_down_and_clamps() -> None:
     assert recommendation_tier(4).floor_gb == 8
     assert recommendation_tier(20).floor_gb == 18
     assert recommendation_tier(256).floor_gb == 96
+
+
+def test_recommended_alias_requires_the_host_to_reach_the_minimum_tier() -> None:
+    assert not is_recommended_alias("lfm2.5-2.6b-4bit", 4)
+    assert is_recommended_alias("lfm2.5-2.6b-4bit", 8)
 
 
 def test_repeated_aliases_have_one_working_set_footprint() -> None:

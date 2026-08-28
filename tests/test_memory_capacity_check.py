@@ -177,6 +177,18 @@ def test_32gb_recommendation_warning_quotes_the_same_20gb_when_pressure_is_real(
     assert "97% projected utilization" in out
 
 
+def test_below_minimum_tier_keeps_the_conservative_hard_warning(monkeypatch, capsys):
+    """A catalog alias is not a host recommendation below the 8 GB floor."""
+    _patch_size_bytes(monkeypatch, size_gb=2.0)
+    with patch.dict("sys.modules", {"psutil": _fake_psutil(4.0, used_gb=1.0)}):
+        _check_memory_capacity(
+            "/resolved/lfm", alias="lfm2.5-2.6b-4bit"
+        )
+    out = capsys.readouterr().out
+    assert "likely too large" in out
+    assert "100% projected utilization" in out
+
+
 def test_silent_when_psutil_unavailable(monkeypatch, capsys):
     """Best-effort: if psutil can't be imported, fall through silently
     rather than blocking startup.
