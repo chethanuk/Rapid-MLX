@@ -164,6 +164,11 @@ ALLOWED_RAPID_MLX_ENV_VARS: frozenset[str] = frozenset(
         # loads, which parser fires, which tier engages — none of that
         # changes. Read by ``gdn_in_proj_fusion.fuse_gdn_in_proj()`` only.
         "RAPID_MLX_GDN_IN_PROJ_FUSION",
+        # Opt-out of batched QSA compressed-key cache updates. This chooses
+        # between numerically identical cache-update implementations after
+        # the Qwen4 model and QSA layer are already selected; it cannot change
+        # model, parser, tier, or engine routing.
+        "RAPID_MLX_QSA_VECTORIZED_CACHE",
         # Opt-in re-quantization of the lm_head when serving fp8-block
         # checkpoints through the load-time mxfp8 repack
         # (vllm_mlx/fp8_repack.py). A precision/speed knob on an
