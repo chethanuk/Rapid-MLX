@@ -29,6 +29,25 @@ struct ChatImageAttachment: Codable, Equatable, Hashable, Identifiable, Sendable
         return String(format: "%.1f MB", mb)
     }
 
+    /// User-facing explanation for attachments rejected by the per-message
+    /// image budget. Keeping this copy beside the limits lets both the pre-read
+    /// picker gate and the authoritative post-normalization gate report the
+    /// same count and binding reason.
+    static func budgetNotice(
+        rejectedCount: Int = 0,
+        limit: ImageBudgetLimit = .count
+    ) -> String {
+        let budget = formattedCombinedImageBudget
+        let base = "Attach up to \(maxImagesPerMessage) images or \(budget) of images per message."
+        guard rejectedCount > 0 else { return base }
+        let reason: String = switch limit {
+        case .count: "too many images"
+        case .bytes: "their combined size exceeds the \(budget) budget"
+        }
+        let plural = rejectedCount == 1 ? "image was" : "images were"
+        return "\(base) \(rejectedCount) \(plural) not added — \(reason)."
+    }
+
     /// Why ``importCandidates(_:existingCount:existingBytes:)`` dropped a
     /// candidate. Kept distinct so a notice can tell the user whether the
     /// count or the combined-byte budget was the binding limit.

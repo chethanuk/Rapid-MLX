@@ -1034,7 +1034,7 @@ struct ChatView: View {
             existingBytes: existing.reduce(0) { $0 + $1.encodedDataURLByteCount }
         )
         guard !selection.accepted.isEmpty else {
-            attachmentDraft.notice = imageBudgetNotice(
+            attachmentDraft.notice = ChatImageAttachment.budgetNotice(
                 rejectedCount: selection.rejectedCount,
                 limit: selection.limit
             )
@@ -1053,7 +1053,7 @@ struct ChatView: View {
             // notice keeps both, and names how many and why.
             var notice = outcome.rejection
             if selection.rejectedCount > 0 {
-                let budget = imageBudgetNotice(
+                let budget = ChatImageAttachment.budgetNotice(
                     rejectedCount: selection.rejectedCount,
                     limit: selection.limit
                 )
@@ -1066,24 +1066,6 @@ struct ChatView: View {
             )
         }
         return true
-    }
-
-    /// Notice for the per-message image budget. Names the rejected count and
-    /// which budget (count vs combined bytes) was the binding limit; the
-    /// paste path, which has no count detail, uses the base message only.
-    private func imageBudgetNotice(
-        rejectedCount: Int = 0,
-        limit: ChatImageAttachment.ImageBudgetLimit = .count
-    ) -> String {
-        let budget = ChatImageAttachment.formattedCombinedImageBudget
-        let base = "Attach up to \(ChatImageAttachment.maxImagesPerMessage) images or \(budget) of images per message."
-        guard rejectedCount > 0 else { return base }
-        let reason: String = switch limit {
-        case .count: "too many images"
-        case .bytes: "their combined size exceeds the \(budget) budget"
-        }
-        let plural = rejectedCount == 1 ? "image was" : "images were"
-        return "\(base) \(rejectedCount) \(plural) not added — \(reason)."
     }
 
     @discardableResult
@@ -1204,7 +1186,7 @@ struct ChatView: View {
                 if attachmentDraft.appendImage(pasted) {
                     attachmentDraft.notice = nil
                 } else {
-                    attachmentDraft.notice = imageBudgetNotice()
+                    attachmentDraft.notice = ChatImageAttachment.budgetNotice()
                 }
             } catch { attachmentDraft.notice = error.localizedDescription }
         }

@@ -92,12 +92,27 @@ struct ChatAttachmentDraft: Equatable {
         notice: String?
     ) -> Bool {
         guard imageImportID == id else { return false }
-        appendImages(imported)
-        if let notice {
-            if let current = self.notice, current != notice {
-                self.notice = "\(current) \(notice)"
+        let combinedCount = images.count + imported.count
+        let budgetRejectedCount = appendImages(imported)
+        var mergedNotice = notice
+        if budgetRejectedCount > 0 {
+            // The on-disk pre-read estimate can differ from the normalized
+            // PNG/JPEG payload. This is the authoritative post-normalization
+            // gate, so its late rejection must be visible rather than silently
+            // dropping an image that the picker initially admitted.
+            let limit: ChatImageAttachment.ImageBudgetLimit =
+                combinedCount > ChatImageAttachment.maxImagesPerMessage ? .count : .bytes
+            let budgetNotice = ChatImageAttachment.budgetNotice(
+                rejectedCount: budgetRejectedCount,
+                limit: limit
+            )
+            mergedNotice = mergedNotice.map { "\(budgetNotice) \($0)" } ?? budgetNotice
+        }
+        if let mergedNotice {
+            if let current = self.notice, current != mergedNotice {
+                self.notice = "\(current) \(mergedNotice)"
             } else {
-                self.notice = notice
+                self.notice = mergedNotice
             }
         }
         imageImportID = nil

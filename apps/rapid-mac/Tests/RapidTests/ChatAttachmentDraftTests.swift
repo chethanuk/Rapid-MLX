@@ -323,6 +323,31 @@ struct ChatAttachmentDraftTests {
         #expect(draft.sourcePaths[second.id] == nil)
     }
 
+    @Test("post-normalization budget rejection reports its count and reason")
+    func finishImageImportReportsLateBudgetRejection() throws {
+        let budget = ChatImageAttachment.maxCombinedEncodedImageBytes
+        let almostHalf = rawBytesForEncoded(Int(budget * 6 / 10))
+        let first = try makeImage(name: "first.png", bytes: almostHalf)
+        let second = try makeImage(name: "second.png", bytes: almostHalf)
+        var draft = ChatAttachmentDraft()
+        let startedImportID = draft.beginImageImport()
+        let importID = try #require(startedImportID)
+
+        let accepted = draft.finishImageImport(
+            id: importID,
+            [
+                (first, URL(fileURLWithPath: "/tmp/first.png")),
+                (second, URL(fileURLWithPath: "/tmp/second.png")),
+            ],
+            notice: nil
+        )
+
+        #expect(accepted)
+        #expect(draft.images == [first])
+        #expect(draft.notice?.contains("1 image was not added") == true)
+        #expect(draft.notice?.contains("combined size exceeds") == true)
+    }
+
     @Test("duplicate paths are filtered before the budget gate so they consume budget once")
     func duplicatesAreDedupedBeforeBudgetGate() throws {
         let root = FileManager.default.temporaryDirectory
