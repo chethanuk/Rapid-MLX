@@ -23,6 +23,7 @@ from vllm_mlx.models.qwen4_exp import (
     PLELayer,
     QSAAttention,
     QSAIndexer,
+    Qwen4ExpStateCache,
     ShardedEmbedding,
     TextModelArgs,
     ZeroCenteredRMSNorm,
@@ -930,6 +931,61 @@ def test_complete_synthetic_text_model_prefill_and_decode():
     assert next_logits.shape == (1, 1, args.vocab_size)
     assert cache[1][0].offset == 4
     assert cache[1][1].offset == 4
+
+
+def test_return_hidden_exposes_pre_final_mixer_multistream():
+    args = _ple_args()
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
+    logits, hidden = model(mx.array([[1, 2, 3]]), return_hidden=True)
+    mx.eval(logits, hidden)
+
+    assert logits.shape == (1, 3, args.vocab_size)
+    assert hidden.shape == (1, 3, args.hc_count * args.hidden_size)
+
+
+def test_speculative_reject_restores_gdn_ple_and_qsa_state():
+    args = _ple_args()
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
+    baseline_cache = model.make_cache()
+    verify_cache = model.make_cache()
+    prompt = mx.array([[1, 2, 3]])
+    mx.eval(model(prompt, cache=baseline_cache), model(prompt, cache=verify_cache))
+
+    mx.eval(model(mx.array([[4]]), cache=baseline_cache))
+    baseline_logits = model(mx.array([[6]]), cache=baseline_cache)
+
+    verify_logits, verify_hidden = model(
+        mx.array([[4, 5]]),
+        cache=verify_cache,
+        return_hidden=True,
+        n_confirmed=1,
+    )
+    mx.eval(verify_logits, verify_hidden)
+    for layer_cache in verify_cache:
+        if isinstance(layer_cache, Qwen4ExpStateCache):
+            layer_cache.restore_rollback(1, 2)
+        elif layer_cache.is_trimmable():
+            assert layer_cache.trim(1) == 1
+    restored_logits = model(mx.array([[6]]), cache=verify_cache)
+    mx.eval(
+        baseline_logits,
+        restored_logits,
+        [cache.state for cache in baseline_cache],
+        [cache.state for cache in verify_cache],
+    )
+
+    np.testing.assert_allclose(
+        np.array(restored_logits), np.array(baseline_logits), rtol=0, atol=0
+    )
+    for baseline, restored in zip(baseline_cache, verify_cache):
+        if isinstance(baseline, Qwen4ExpStateCache):
+            for expected, actual in zip(baseline.state, restored.state):
+                np.testing.assert_allclose(
+                    np.array(actual), np.array(expected), rtol=0, atol=0
+                )
+        else:
+            assert baseline[0].offset == restored[0].offset
+            assert baseline[1].offset == restored[1].offset
 
 
 def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():

@@ -97,6 +97,7 @@ class TextModelArgs(BaseModelArgs):
     split_ngram_parts: int = 128
     seed: int = 1234
     eos_token_id: int | list[int] | None = None
+    mtp_num_hidden_layers: int = 0
 
     def __post_init__(self):
         rope = dict(self.rope_parameters or {})
@@ -1245,7 +1246,9 @@ class Qwen4ExpTextModel(nn.Module):
         inputs: mx.array,
         cache: list[Any] | None = None,
         input_embeddings: mx.array | None = None,
-    ) -> mx.array:
+        *,
+        return_hidden: bool = False,
+    ) -> mx.array | tuple[mx.array, mx.array]:
         hidden_states = (
             input_embeddings
             if input_embeddings is not None
@@ -1280,7 +1283,38 @@ class Qwen4ExpTextModel(nn.Module):
                 mask=linear_mask if layer.is_linear else attention_mask,
                 cache=layer_cache,
             )
-        return self.hyper_connection_mixer(hidden_states)
+        output = self.hyper_connection_mixer(hidden_states)
+        return (output, hidden_states) if return_hidden else output
+
+
+class Qwen4ExpStateCache(ArraysCache):
+    """Recurrent Qwen4 state with speculative-verify restore points.
+
+    The four-slot PLE layer cache couples GDN convolution/state with PLE
+    convolution/ngram history.  A rejected speculative token must restore all
+    four slots to the same accepted boundary; restoring GDN alone silently
+    desynchronizes later PLE inputs.
+    """
+
+    rollback_state: list[list[mx.array | None]] | None = None
+
+    def record_rollback_state(self) -> None:
+        if self.rollback_state is None:
+            self.rollback_state = []
+        self.rollback_state.append(list(self.cache))
+
+    def restore_rollback(self, n_to_drop: int, verify_size: int) -> None:
+        snapshots = self.rollback_state
+        if not snapshots:
+            raise AssertionError("Qwen4 verify rollback has no saved boundary")
+        keep = verify_size - n_to_drop
+        if keep < 1 or keep > len(snapshots):
+            raise AssertionError(
+                f"invalid Qwen4 rollback boundary: keep={keep}, "
+                f"snapshots={len(snapshots)}"
+            )
+        self.cache = list(snapshots[keep - 1])
+        self.rollback_state = None
 
 
 class TextModel(nn.Module):
@@ -1297,11 +1331,49 @@ class TextModel(nn.Module):
         inputs: mx.array,
         cache: list[Any] | None = None,
         input_embeddings: mx.array | None = None,
-    ) -> mx.array:
-        hidden = self.model(inputs, cache, input_embeddings)
+        return_hidden: bool = False,
+        n_confirmed: int = 0,
+    ) -> mx.array | tuple[mx.array, mx.array]:
+        if n_confirmed > 0 and inputs.shape[1] > 1:
+            logits_parts = []
+            hidden_parts = []
+            for position in range(inputs.shape[1]):
+                embeddings = (
+                    None
+                    if input_embeddings is None
+                    else input_embeddings[:, position : position + 1]
+                )
+                logits, hidden = self(
+                    inputs[:, position : position + 1],
+                    cache=cache,
+                    input_embeddings=embeddings,
+                    return_hidden=True,
+                )
+                logits_parts.append(logits)
+                hidden_parts.append(hidden)
+                if position < inputs.shape[1] - 1 and cache is not None:
+                    for layer_cache in cache:
+                        if isinstance(layer_cache, Qwen4ExpStateCache):
+                            layer_cache.record_rollback_state()
+            logits = mx.concatenate(logits_parts, axis=1)
+            hidden = mx.concatenate(hidden_parts, axis=1)
+            return (logits, hidden) if return_hidden else logits
+
+        hidden_result = self.model(
+            inputs,
+            cache,
+            input_embeddings,
+            return_hidden=return_hidden,
+        )
+        if return_hidden:
+            hidden, mtp_hidden = cast(tuple[mx.array, mx.array], hidden_result)
+        else:
+            hidden = cast(mx.array, hidden_result)
         if self.args.tie_word_embeddings:
-            return self.model.embed_tokens.as_linear(hidden)
-        return self.lm_head(hidden)
+            logits = self.model.embed_tokens.as_linear(hidden)
+        else:
+            logits = self.lm_head(hidden)
+        return (logits, mtp_hidden) if return_hidden else logits
 
     @property
     def layers(self):
@@ -1311,7 +1383,9 @@ class TextModel(nn.Module):
         caches = []
         for layer in self.layers:
             if layer.is_linear:
-                caches.append(ArraysCache(size=4 if layer.ple is not None else 2))
+                caches.append(
+                    Qwen4ExpStateCache(size=4 if layer.ple is not None else 2)
+                )
             else:
                 caches.append(
                     CacheList(
@@ -1391,8 +1465,21 @@ class Model(nn.Module):
         self.model_type = args.model_type
         self.language_model = TextModel(TextModelArgs.from_dict(args.text_config))
 
-    def __call__(self, inputs: mx.array, cache=None, input_embeddings=None):
-        return self.language_model(inputs, cache, input_embeddings)
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache=None,
+        input_embeddings=None,
+        return_hidden: bool = False,
+        n_confirmed: int = 0,
+    ):
+        return self.language_model(
+            inputs,
+            cache,
+            input_embeddings,
+            return_hidden=return_hidden,
+            n_confirmed=n_confirmed,
+        )
 
     @property
     def model(self):
