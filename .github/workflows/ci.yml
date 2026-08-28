@@ -37,7 +37,9 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
@@ -52,7 +54,8 @@ jobs:
               --paths-file /tmp/changed-paths \
               --github-output "$GITHUB_OUTPUT"
             full_gate=false
-            if [ "$FULL_CI" = true ] || [[ "$HEAD_REF" == train/* ]]; then
+            if [ "$FULL_CI" = true ] || \
+              { [[ "$HEAD_REF" == train/* ]] && [ "$HEAD_REPO" = "$REPO" ]; }; then
               full_gate=true
             fi
             echo "full_gate=$full_gate" >> "$GITHUB_OUTPUT"

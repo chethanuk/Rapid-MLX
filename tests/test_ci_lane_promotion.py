@@ -6,6 +6,8 @@ fast product checks while release-grade model/GUI lanes are reserved for a
 ``full-ci`` promotion or an integration candidate.
 """
 
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -38,8 +40,61 @@ def test_product_promotion_keeps_diff_scope_and_accepts_train_heads():
     ):
         run = _step_run(workflow, job_name, step_name)
         assert 'git diff --no-renames --name-only "$PR_BASE_SHA" "$GITHUB_SHA"' in run
-        assert '[ "$FULL_CI" = true ] || [[ "$HEAD_REF" == train/* ]]' in run
+        assert '[ "$FULL_CI" = true ] ||' in run
+        assert '[[ "$HEAD_REF" == train/* ]] && [ "$HEAD_REPO" = "$REPO" ]' in run
         assert 'echo "full_gate=$full_gate"' in run
+
+
+def _execute_promotion(
+    workflow: Path, job_name: str, step_name: str, **env: str
+) -> str:
+    run = _step_run(workflow, job_name, step_name)
+    start = run.index("full_gate=false")
+    end = run.index('echo "full_gate=$full_gate"', start)
+    snippet = run[start : end + len('echo "full_gate=$full_gate" >> "$GITHUB_OUTPUT"')]
+    output = Path(env.pop("GITHUB_OUTPUT"))
+    subprocess.run(
+        ["bash", "-c", snippet],
+        check=True,
+        env=os.environ | env | {"GITHUB_OUTPUT": str(output)},
+    )
+    return output.read_text().strip()
+
+
+def test_fork_cannot_claim_train_branch_promotion(tmp_path):
+    for index, (workflow, job_name, step_name) in enumerate(
+        (
+            (ENGINE_WORKFLOW, "changes", "Classify validation lanes"),
+            (DESKTOP_WORKFLOW, "changes", "Classify desktop lane"),
+        )
+    ):
+        common = {
+            "FULL_CI": "false",
+            "HEAD_REF": "train/spoofed",
+            "REPO": "owner/repo",
+        }
+        assert (
+            _execute_promotion(
+                workflow,
+                job_name,
+                step_name,
+                GITHUB_OUTPUT=str(tmp_path / f"fork-{index}"),
+                HEAD_REPO="attacker/fork",
+                **common,
+            )
+            == "full_gate=false"
+        )
+        assert (
+            _execute_promotion(
+                workflow,
+                job_name,
+                step_name,
+                GITHUB_OUTPUT=str(tmp_path / f"internal-{index}"),
+                HEAD_REPO="owner/repo",
+                **common,
+            )
+            == "full_gate=true"
+        )
 
 
 def test_only_promoted_heads_allocate_expensive_lanes():
