@@ -243,6 +243,78 @@ allocation but made it 1.8x slower because MLX had to materialize the gathered
 rows. A future direct sparse-attention kernel can consume the compact indices
 without that copy; the rejected gather path is not included in the candidate.
 
+## Direct block-sparse QSA kernel follow-up
+
+The next candidate makes QSA's selected blocks first-class inputs to attention
+instead of rebuilding a dense mask and asking dense SDPA to visit every
+physical key. A fused Metal kernel reads only the selected four-token blocks,
+shares each K/V block across the 12 grouped-query heads, and performs QK,
+online softmax, and PV accumulation in FP32. Selected blocks are sorted into
+physical-key order before dispatch, and the incomplete causal tail is handled
+separately.
+
+The feature is default-off behind `RAPID_MLX_QSA_BLOCK_SPARSE=1`. It is eligible
+only for prefill calls with at least 64 query tokens and 16,384 physical KV
+tokens. Decode, short contexts, unsupported head layouts, and non-Metal systems
+retain the existing dense path.
+
+The comparison below rebased the baseline from the published 0.13.1 binary to
+current `main` at `05b896eaebafed00f33998491669bdde36a692a4`, which already
+contains the vectorized QSA mask builder measured above. The candidate kernel
+is commit `2e6e91244d3a5a483ca403e83ea5385752eb47b0`. Both sides used the
+same M3 Ultra, immutable artifact, BF16 KV cache, dependency versions, prompt
+builder, prefix-cache clearing, one-sequence batch limits, and three-run / 256
+decode-token method.
+
+```bash
+# Candidate only: set this in the shell; leave it unset for the baseline.
+export RAPID_MLX_QSA_BLOCK_SPARSE=1
+
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+PYTHONPATH=/path/to/baseline-or-candidate \
+/private/tmp/rapid-flash-pypi-0131/bin/rapid-mlx serve \
+  /path/to/dcf657e4acda2aae72da99cde65b6c491cd96998 \
+  --served-model-name rapid-mlx/Qwen3.8-Flash-Next-4bit \
+  --host 127.0.0.1 --port 8464 --disable-prefix-cache \
+  --max-num-seqs 1 --prefill-batch-size 1 --completion-batch-size 1
+
+/private/tmp/rapid-flash-pypi-0131/bin/python \
+  .orca/flash-next-eval/benchmark.py \
+  --url http://127.0.0.1:8464/v1 \
+  --model rapid-mlx/Qwen3.8-Flash-Next-4bit \
+  --tokenizer-path /path/to/dcf657e4acda2aae72da99cde65b6c491cd96998 \
+  --server-pid SERVER_PID --label LABEL --runs 3 --decode-tokens 256 \
+  --prompt-tokens 128,2048,8192,32768 \
+  --artifact-revision dcf657e4acda2aae72da99cde65b6c491cd96998 \
+  --rapid-sha RAPID_SHA --output OUTPUT.json --timeout 3600
+```
+
+For the baseline process, the feature variable was omitted. For the candidate,
+it was set to `1` as shown.
+
+| Target (reported) | Baseline TTFT | Candidate TTFT | TTFT change | Baseline prefill | Candidate prefill | Prefill change | Baseline decode | Candidate decode |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 (92) | 0.366 s | 0.374 s | +2.1% | 251.2 tok/s | 246.0 tok/s | -2.1% | 25.58 tok/s | 25.55 tok/s |
+| 2,048 (2,012) | 3.306 s | 3.360 s | +1.6% | 608.5 tok/s | 598.8 tok/s | -1.6% | 24.10 tok/s | 23.89 tok/s |
+| 8,192 (8,156) | 13.534 s | 13.492 s | -0.3% | 602.6 tok/s | 604.5 tok/s | +0.3% | 23.24 tok/s | 23.19 tok/s |
+| 32,768 (32,732) | 62.539 s | **56.516 s** | **-9.6%** | 523.4 tok/s | **579.2 tok/s** | **+10.7%** | 21.61 tok/s | 21.59 tok/s |
+
+The 128, 2K, and 8K rows do not cross the kernel's physical-KV threshold in
+the server's prefill schedule, so their small differences are run-to-run
+noise. At 32K, the direct kernel removes 6.02 seconds from median TTFT while
+decode remains unchanged, as expected for a prefill-only optimization. Both
+processes stayed at approximately 103--104 GB MLX active memory and 54.1--54.4
+GiB process RSS; the candidate did not increase the model's practical memory
+requirement.
+
+Five deterministic user-path comparisons passed and produced byte-identical
+normalized outputs between baseline and candidate: multi-turn exact text,
+Chinese exact text, strict JSON schema, a forced tool call, and 32K needle
+recall. The outputs were `BLUE-LANTERN`, `测试通过`,
+`{"point": {"x": 3, "y": -2}}`, the `get_weather` tool name, and
+`ZEPHYR-9135`, respectively. The 32K needle request fell from 63.884 to 57.428
+seconds end to end.
+
 ## Interpretation
 
 Flash-Next reached the first visible token sooner at the 128- and 2K-target
