@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 ENABLE_ENV = "RAPID_MLX_QSA_BLOCK_SPARSE"
 MIN_QUERY_LENGTH = 64
 MIN_PHYSICAL_KV_LENGTH = 16_384
+MAX_GQA_HEADS = 32
+MAX_THREADGROUP_MEMORY_BYTES = 32 * 1024
 
 _SOURCE = r"""
     constexpr int VALUES_PER_LANE = HEAD_DIM / 32;
@@ -166,6 +168,28 @@ def should_use_block_sparse(query_length: int, physical_kv_length: int) -> bool:
     return enabled and mx.metal.is_available()
 
 
+def block_sparse_layout_supported(
+    *,
+    query_heads: int,
+    kv_heads: int,
+    head_dim: int,
+    block_size: int,
+    dtype: mx.Dtype,
+) -> bool:
+    """Return whether the layout fits the kernel and Metal threadgroup limits."""
+    if kv_heads <= 0 or block_size <= 0 or head_dim <= 0:
+        return False
+    if head_dim % 32 or query_heads % kv_heads:
+        return False
+    gqa_heads = query_heads // kv_heads
+    if not 0 < gqa_heads <= MAX_GQA_HEADS:
+        return False
+    if dtype not in {mx.float16, mx.bfloat16, mx.float32}:
+        return False
+    threadgroup_bytes = 2 * block_size * head_dim * int(dtype.size)
+    return threadgroup_bytes <= MAX_THREADGROUP_MEMORY_BYTES
+
+
 @lru_cache(maxsize=1)
 def _log_activation() -> None:
     logger.info(
@@ -210,11 +234,23 @@ def block_sparse_attention(
         raise ValueError("QSA query/K/V arrays must have the same dtype")
     if head_dim % 32:
         raise ValueError("QSA head dimension must be divisible by 32")
+    if kv_heads <= 0:
+        raise ValueError("QSA requires at least one KV head")
     if query_heads % kv_heads:
         raise ValueError("QSA query heads must be divisible by KV heads")
     gqa_heads = query_heads // kv_heads
-    if gqa_heads > 32:
-        raise ValueError("QSA supports at most 32 query heads per KV head")
+    if gqa_heads > MAX_GQA_HEADS:
+        raise ValueError(
+            f"QSA supports at most {MAX_GQA_HEADS} query heads per KV head"
+        )
+    if not block_sparse_layout_supported(
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        head_dim=head_dim,
+        block_size=block_size,
+        dtype=queries.dtype,
+    ):
+        raise ValueError("QSA query/KV layout is unsupported by the sparse kernel")
     block_starts = block_starts.astype(mx.int32)
     block_counts = block_counts.astype(mx.int32)
     tail_indices = tail_indices.astype(mx.int32)
