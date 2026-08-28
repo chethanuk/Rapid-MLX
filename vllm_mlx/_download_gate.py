@@ -347,24 +347,25 @@ def _variant_marker_path(repo_id: str) -> str:
     )
 
 
-def persist_pulled_variant(repo_id: str, variant: str) -> None:
+def persist_pulled_variant(repo_id: str, variant: str) -> bool:
     """Atomically record the subfolder a narrowed ``pull --bits/--format`` fetched.
 
     Called only on the narrowed pull path (after the variant was validated to
-    exist and its files were fetched). Best-effort: a failure to write leaves
-    the pull valid and merely means the serve path falls back to (honest)
-    whole-repo-root resolution for that repo.
+    exist and its files were fetched). Returns whether the marker was updated.
+    On failure, removes any older marker when possible so a successful 8-bit
+    pull cannot silently leave a stale 4-bit serving choice behind. The caller
+    must surface ``False`` because cleanup can also fail on an unwritable cache.
     """
     if not _valid_variant_subfolder(variant):
-        return
+        return False
+    target = _variant_marker_path(repo_id)
     try:
         import tempfile
 
-        refs_dir = os.path.dirname(_variant_marker_path(repo_id))
-        os.makedirs(refs_dir, exist_ok=True)
-        target = _variant_marker_path(repo_id)
+        marker_dir = os.path.dirname(target)
+        os.makedirs(marker_dir, exist_ok=True)
         fd, temporary = tempfile.mkstemp(
-            dir=refs_dir,
+            dir=marker_dir,
             prefix=".rapidmlx-variant.",
             suffix=".tmp",
         )
@@ -378,7 +379,16 @@ def persist_pulled_variant(repo_id: str, variant: str) -> None:
             except FileNotFoundError:
                 pass
     except OSError:
-        pass
+        # A previous variant is actively worse than no metadata: serving the
+        # repo would confidently load the wrong checkpoint. Best-effort
+        # invalidation plus a False return lets the CLI warn even when cache
+        # permissions also prevent cleanup.
+        try:
+            os.remove(target)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def clear_pulled_variant(repo_id: str) -> None:

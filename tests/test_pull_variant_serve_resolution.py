@@ -65,7 +65,7 @@ def marker_path(tmp_path, monkeypatch):
 
 def test_persist_and_read_round_trip(marker_path):
     assert _download_gate.pulled_variant(RAW_REPO) is None
-    _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
+    assert _download_gate.persist_pulled_variant(RAW_REPO, "4bit") is True
     assert _download_gate.pulled_variant(RAW_REPO) == "4bit"
     assert marker_path.read_text() == "4bit"
 
@@ -77,7 +77,7 @@ def test_persist_overwrites_a_previous_variant(marker_path):
 
 
 def test_persist_empty_is_a_noop(marker_path):
-    _download_gate.persist_pulled_variant(RAW_REPO, "")
+    assert _download_gate.persist_pulled_variant(RAW_REPO, "") is False
     assert _download_gate.pulled_variant(RAW_REPO) is None
     assert not marker_path.exists()
 
@@ -423,8 +423,24 @@ def test_persist_swallows_a_write_oserror(monkeypatch, marker_path):
         _os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(OSError("full"))
     )
     # Must not raise.
-    _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
+    assert _download_gate.persist_pulled_variant(RAW_REPO, "4bit") is False
     assert _download_gate.pulled_variant(RAW_REPO) is None
+
+
+def test_failed_variant_update_invalidates_previous_marker(monkeypatch, marker_path):
+    """A failed 8-bit update must never leave an authoritative 4-bit choice."""
+    _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
+    assert _download_gate.pulled_variant(RAW_REPO) == "4bit"
+
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *args: (_ for _ in ()).throw(OSError("read-only cache")),
+    )
+
+    assert _download_gate.persist_pulled_variant(RAW_REPO, "8bit") is False
+    assert _download_gate.pulled_variant(RAW_REPO) is None
+    assert not marker_path.exists()
 
 
 def test_persist_read_swallows_an_unreadable_marker(monkeypatch, marker_path):
@@ -468,6 +484,8 @@ def test_pull_persist_failure_still_completes_the_pull(capsys):
         cli.pull_command(args)  # must not raise
     out = capsys.readouterr().out
     assert "R2 mirror skipped" in out
+    assert "could not record that serving choice" in out
+    assert "may select an older or default checkpoint" in out
 
 
 def test_successful_ordinary_hf_pull_clears_previous_variant(marker_path):

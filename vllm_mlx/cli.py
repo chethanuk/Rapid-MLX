@@ -7068,19 +7068,34 @@ def _pull_repository(args, *, allow_patterns_override: list[str] | None = None):
         # #2340: persist the pulled variant so a later ``serve <repo>`` can
         # join the same subfolder. A later successful ordinary pull clears an
         # older marker so stale cache metadata cannot override that newer
-        # choice. Best-effort — the pull itself is already done and valid.
-        try:
-            if variant_allow is not None:
-                _variant_name = f"{_bits}bit" if _bits else (_fmt or "")
+        # choice. The pull itself is already done and valid, so metadata I/O
+        # does not turn it into a failed download; a narrowed-pull metadata
+        # failure is surfaced loudly because serving could otherwise reuse an
+        # older choice.
+        if variant_allow is not None:
+            _variant_name = f"{_bits}bit" if _bits else (_fmt or "")
+            _marker_updated = False
+            try:
                 from vllm_mlx._download_gate import persist_pulled_variant
 
-                persist_pulled_variant(repo_id, _variant_name)
-            else:
+                _marker_updated = persist_pulled_variant(repo_id, _variant_name)
+            except Exception:
+                pass
+            if not _marker_updated:
+                print(
+                    f"  Warning: downloaded {_variant_name}/, but could not "
+                    "record that serving choice in the model cache. "
+                    f"`rapid-mlx serve {repo_id}` may select an older or "
+                    "default checkpoint. Fix the cache permissions and "
+                    "re-run this pull."
+                )
+        else:
+            try:
                 from vllm_mlx._download_gate import clear_pulled_variant
 
                 clear_pulled_variant(repo_id)
-        except Exception:
-            pass
+            except Exception:
+                pass
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a
