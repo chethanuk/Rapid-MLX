@@ -250,6 +250,178 @@ struct SessionModelRestoreTests {
         )
     }
 
+    @Test(
+        "Cat 2364: removing the alias in a newer authoritative catalog invalidates its retained chat fallback"
+    )
+    func provenanceInvalidatedWhenAuthoritativeCatalogRemovesAlias() {
+        let fallback = ServerManager.CatalogProvenStart(
+            entry: chat, generation: 7
+        )
+        let retained = [chat.alias.lowercased(): fallback]
+
+        // A newer authoritative snapshot no longer lists the alias at all.
+        let reconciled = ServerManager.reconcilingProvenance(
+            retained,
+            against: [stt, tts],
+            generation: 7
+        )
+
+        #expect(reconciled.isEmpty)
+    }
+
+    @Test(
+        "Cat 2364: reclassifying the alias to audio in a newer authoritative catalog invalidates its retained chat fallback"
+    )
+    func provenanceInvalidatedWhenAuthoritativeCatalogReclassifiesLane() {
+        let fallback = ServerManager.CatalogProvenStart(
+            entry: chat, generation: 7
+        )
+        let retained = [chat.alias.lowercased(): fallback]
+
+        // Same generation — the engine moved the alias from the chat section to
+        // the audio registry without any on-disk change, so cacheGeneration
+        // never bumped. Content reconciliation must still drop the fallback.
+        let audioOnly = ModelEntry(
+            alias: chat.alias,
+            hfRepo: chat.hfRepo,
+            sizeOnDisk: chat.sizeOnDisk,
+            cached: true,
+            kind: .audio,
+            audioCapability: .transcription
+        )
+        let reconciled = ServerManager.reconcilingProvenance(
+            retained,
+            against: [audioOnly, stt],
+            generation: 7
+        )
+
+        #expect(reconciled.isEmpty)
+    }
+
+    @Test(
+        "Cat 2364: a chat fallback survives while the authoritative catalog still classifies it as chat"
+    )
+    func provenanceSurvivesUnchangedAuthoritativeCatalog() {
+        let fallback = ServerManager.CatalogProvenStart(
+            entry: chat, generation: 7
+        )
+        let retained = [chat.alias.lowercased(): fallback]
+
+        // No on-disk change and the alias is still chat: the retained proof the
+        // memory-confirmation re-entry relies on must survive.
+        let reconciled = ServerManager.reconcilingProvenance(
+            retained,
+            against: [chat, stt],
+            generation: 7
+        )
+
+        #expect(reconciled[chat.alias.lowercased()]?.entry == chat)
+        #expect(reconciled[chat.alias.lowercased()]?.generation == 7)
+    }
+
+    @Test(
+        "Cat 2364: a catalog-epoch change bounds the fallback lifecycle even when the alias stays chat"
+    )
+    func provenanceIsBoundedToItsCatalogEpoch() {
+        let fallback = ServerManager.CatalogProvenStart(
+            entry: chat, generation: 7
+        )
+        let retained = [chat.alias.lowercased(): fallback]
+
+        // The authoritative catalog advanced to generation 8 (e.g. a download
+        // finished). A fallback derived from generation 7 is stale by
+        // definition and must be re-derived before it is trusted.
+        let reconciled = ServerManager.reconcilingProvenance(
+            retained,
+            against: [chat, stt],
+            generation: 8
+        )
+
+        #expect(reconciled.isEmpty)
+    }
+
+    @Test(
+        "Cat 2364: a failed (empty) catalog probe does not wipe retained provenance"
+    )
+    func provenanceSurvivesEmptyProbe() {
+        let fallback = ServerManager.CatalogProvenStart(
+            entry: chat, generation: 7
+        )
+        let retained = [chat.alias.lowercased(): fallback]
+
+        // An empty array is ModelCatalog's subprocess-failure sentinel — no
+        // authority, so the retained proof must not be cancelled by it.
+        let reconciled = ServerManager.reconcilingProvenance(
+            retained,
+            against: [],
+            generation: 7
+        )
+
+        #expect(reconciled.count == 1)
+    }
+
+    @Test(
+        "Cat 2364: after a reclassified authoritative snapshot, a later failed probe cannot rewrite the chat key",
+        .timeLimit(.minutes(1))
+    )
+    @MainActor
+    func chatSelectionKeyIsSafeAfterReclassificationThenFailedProbe() async throws {
+        let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // The user's chat choice is already on disk.
+        defaults.set(chat.alias, forKey: SessionModelRestore.chatAliasStorageKey)
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fakeServer = packageRoot.appendingPathComponent("scripts/fake-rapid-mlx.sh")
+        let server = ServerManager(
+            testingState: .idle,
+            binaryPath: fakeServer,
+            sessionDefaults: defaults
+        )
+
+        // A chat-proven start was retained under catalog generation 7.
+        server._testSetCatalogProvenStart([
+            chat.alias.lowercased(): ServerManager.CatalogProvenStart(
+                entry: chat, generation: 7
+            ),
+        ])
+
+        // A newer authoritative snapshot reclassifies the alias to audio.
+        let audioOnly = ModelEntry(
+            alias: chat.alias,
+            hfRepo: chat.hfRepo,
+            sizeOnDisk: chat.sizeOnDisk,
+            cached: true,
+            kind: .audio,
+            audioCapability: .transcription
+        )
+        server._testReconcileCatalogProvenStart(
+            against: [audioOnly, stt],
+            generation: 7
+        )
+
+        // The stale chat fallback is gone.
+        #expect(server._testCatalogProvenStartEntries[chat.alias.lowercased()] == nil)
+
+        // A later start's catalog probe fails (no hint, no retained fallback):
+        // the ready decision is nil, so the audio-only model cannot rewrite the
+        // user's chat selection.
+        let readyEntry = ServerManager.readyCatalogEntry(
+            alias: chat.alias,
+            probed: nil,
+            hint: server._testCatalogProvenStartEntries[chat.alias.lowercased()]?.entry
+        )
+        #expect(readyEntry == nil)
+
+        server.recordReadySelection(alias: chat.alias, catalogEntry: readyEntry)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        await server.stop()
+    }
+
     @Test("A catalog-proven chat ready transition owns the chat-lane key")
     @MainActor
     func chatReadyUpdatesPersistedChat() throws {

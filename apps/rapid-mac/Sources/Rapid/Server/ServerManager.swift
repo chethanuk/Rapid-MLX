@@ -757,10 +757,27 @@ final class ServerManager {
     /// standard defaults; lifecycle tests inject an isolated suite while still
     /// driving the real spawn/health transition.
     private let sessionDefaults: UserDefaults?
-    /// Catalog provenance supplied by UI start paths. Retained by alias so a
+    /// Catalog provenance supplied by UI start paths, tied to the authoritative
+    /// catalog generation it was derived from. Retained by alias so a
     /// memory-confirmation re-entry does not lose the proof carried by the
-    /// original Start action when a later catalog subprocess fails.
-    private var catalogProvenStartEntries: [String: ModelEntry] = [:]
+    /// original Start action when a later catalog subprocess fails — but only
+    /// while the alias still resolves to the chat lane within the generating
+    /// catalog epoch (#2364).
+    ///
+    /// A newer authoritative snapshot that removes the alias or reclassifies
+    /// its lane drops the retained entry, so a model now audio-only can never
+    /// be persisted into the chat-selection key. ``generation`` is the
+    /// ``DownloadManager`` cacheGeneration in force when the UI read the entry
+    /// from the catalog — the same identity ``ModelCatalogCache`` keys snapshots
+    /// on. It bounds the fallback's lifecycle so a record derived from an older
+    /// catalog epoch is re-derived from the authoritative catalog before it may
+    /// be trusted again.
+    struct CatalogProvenStart: Equatable, Sendable {
+        let entry: ModelEntry
+        let generation: UInt
+    }
+
+    private var catalogProvenStartEntries: [String: CatalogProvenStart] = [:]
 
     /// v0.6 audit P1 (ServerManager — silent-crash detection):
     /// once the child has reported ready, continue polling /healthz
@@ -1108,6 +1125,76 @@ final class ServerManager {
         return hint
     }
 
+    /// Drop retained catalog provenance that a newer authoritative snapshot has
+    /// removed or reclassified, or that belongs to an earlier catalog epoch.
+    ///
+    /// ``catalog`` is the authoritative snapshot (already correctly keyed to
+    /// ``generation`` by ``ModelCatalogCache``). An empty ``catalog`` carries
+    /// no authority, so nothing is dropped — a transient probe failure must not
+    /// cancel the retained proof the memory-confirmation re-entry relies on.
+    /// A retained entry survives only while its alias still resolves to the
+    /// chat lane in this epoch and the entry was derived from this same
+    /// generation. Pure (``nonisolated``) so the lifecycle is unit-testable
+    /// without a sidecar or a main-actor context.
+    nonisolated static func reconcilingProvenance(
+        _ store: [String: CatalogProvenStart],
+        against catalog: [ModelEntry],
+        generation: UInt
+    ) -> [String: CatalogProvenStart] {
+        guard !store.isEmpty, !catalog.isEmpty else { return store }
+        return store.filter { _, record in
+            // A fallback derived from an earlier catalog epoch is stale by
+            // definition: it must be re-derived from this authoritative
+            // snapshot before it may be trusted.
+            guard record.generation == generation else { return false }
+            // The authoritative snapshot removes the alias (no row) or
+            // reclassifies its lane (no longer chat): the chat fallback must
+            // not survive it.
+            guard let current = catalog.first(where: {
+                $0.alias.caseInsensitiveCompare(record.entry.alias) == .orderedSame
+            }) else { return false }
+            return current.kind == .chat
+        }
+    }
+
+    /// Instance wrapper over ``reconcilingProvenance`` — reconcile the retained
+    /// fallback against every authoritative catalog observation so a stale chat
+    /// classification cannot survive to be reused on a later failed probe.
+    private func reconcileCatalogProvenStart(
+        against catalog: [ModelEntry],
+        generation: UInt
+    ) {
+        catalogProvenStartEntries = Self.reconcilingProvenance(
+            catalogProvenStartEntries,
+            against: catalog,
+            generation: generation
+        )
+    }
+
+    /// Issue #2364 test seam — seed the retained chat-lane provenance so a
+    /// lifecycle test can drive reclassification invalidation without a live
+    /// sidecar. Production code never calls this.
+    internal func _testSetCatalogProvenStart(_ entries: [String: CatalogProvenStart]) {
+        catalogProvenStartEntries = entries
+    }
+
+    /// Issue #2364 test seam — observe the retained chat-lane provenance after
+    /// a reconciliation, and exercise the instance reconcile against an
+    /// authoritative snapshot exactly as ``start`` does.
+    internal var _testCatalogProvenStartEntries: [String: CatalogProvenStart] {
+        catalogProvenStartEntries
+    }
+
+    /// Issue #2364 test seam — run the instance reconcile against a supplied
+    /// authoritative snapshot so a test can assert the retained fallback was
+    /// invalidated without spawning a sidecar.
+    internal func _testReconcileCatalogProvenStart(
+        against catalog: [ModelEntry],
+        generation: UInt
+    ) {
+        reconcileCatalogProvenStart(against: catalog, generation: generation)
+    }
+
     /// Issue #1838 test seam — swap in a ``ServerResidencyClient`` whose
     /// transport reads from a ``URLProtocol`` stub, so a test can drive the
     /// in-process resident-load path and observe the published rejection
@@ -1292,13 +1379,21 @@ final class ServerManager {
         // authoritatively. This probe is needed only to decide whether an
         // already-running text-lane sidecar can accept a resident load.
         if child != nil, let binary = binaryPath {
-            let entry = await ModelCatalogCache.shared.entries(
+            let catalogGeneration = downloads?.cacheGeneration ?? 0
+            let catalogSnapshot = await ModelCatalogCache.shared.entries(
                 binary: binary,
-                generation: downloads?.cacheGeneration ?? 0
-            ).first {
+                generation: catalogGeneration
+            )
+            if Task.isCancelled || didSignalShutdown { return false }
+            // Reconcile the retained chat-lane fallback against this
+            // authoritative snapshot just like ``start`` does (#2364).
+            reconcileCatalogProvenStart(
+                against: catalogSnapshot,
+                generation: catalogGeneration
+            )
+            let entry = catalogSnapshot.first {
                 $0.alias.caseInsensitiveCompare(trimmed) == .orderedSame
             }
-            if Task.isCancelled || didSignalShutdown { return false }
             probedCatalogEntry = entry
             requestedCatalogSupportsImageInput = ModelBrandStyle.supportsImageInput(
                 forAlias: trimmed,
@@ -2056,7 +2151,12 @@ final class ServerManager {
             probed: nil,
             hint: catalogEntryHint
         ) {
-            catalogProvenStartEntries[trimmedAlias.lowercased()] = hintedEntry
+            // Retain with the catalog generation the entry was derived from
+            // so a later authoritative snapshot can invalidate it (#2364).
+            catalogProvenStartEntries[trimmedAlias.lowercased()] = CatalogProvenStart(
+                entry: hintedEntry,
+                generation: downloads?.cacheGeneration ?? 0
+            )
         }
 
         // Pre-load memory guard (#324). Loading a model whose footprint,
@@ -2196,17 +2296,27 @@ final class ServerManager {
         // launch a visual checkpoint in its text lane. Keeping this await
         // before `isOperating = true` preserves the cancellable startup
         // contract; re-check every entry guard after actor reentrancy.
-        let probedCatalogEntry = await ModelCatalogCache.shared.entries(
+        let catalogGeneration = downloads?.cacheGeneration ?? 0
+        let catalogSnapshot = await ModelCatalogCache.shared.entries(
             binary: binary,
-            generation: downloads?.cacheGeneration ?? 0
-        ).first {
+            generation: catalogGeneration
+        )
+        // #2364: a newer authoritative snapshot may have removed the alias or
+        // reclassified it out of the chat lane between this start and the
+        // previous one. Reconcile the retained fallback against it NOW, so a
+        // stale chat classification cannot be reused when a later probe fails.
+        reconcileCatalogProvenStart(
+            against: catalogSnapshot,
+            generation: catalogGeneration
+        )
+        let probedCatalogEntry = catalogSnapshot.first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
             probed: probedCatalogEntry,
             hint: catalogEntryHint
-                ?? catalogProvenStartEntries[trimmedAlias.lowercased()]
+                ?? catalogProvenStartEntries[trimmedAlias.lowercased()]?.entry
         )
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }
