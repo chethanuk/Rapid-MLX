@@ -1129,12 +1129,20 @@ def test_qwen4_verify_block_matches_tokenwise_forward():
 
 
 def test_qwen4_mtp_target_verify_matches_synthetic_greedy(monkeypatch):
+    import importlib
+
     import mlx.nn as nn
     from mlx_lm.generate import generate_step
 
     from vllm_mlx.spec_decode.mtp import MTPAcceptCounter, dispatch_mtp_inject
     from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
 
+    # Earlier executor tests may leave MLX's process-global default tagged to
+    # a worker-owned stream. Rebind this real-device test to the current
+    # thread before its random model parameters are allocated.
+    current_stream = mx.new_stream(mx.default_device())
+    mx.set_default_stream(current_stream)
+    importlib.import_module("mlx_lm.generate").generation_stream = current_stream
     args = _ple_args()
     args.mtp_num_hidden_layers = 1
     model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
