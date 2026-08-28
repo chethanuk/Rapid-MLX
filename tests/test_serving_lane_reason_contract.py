@@ -106,10 +106,14 @@ def _decision_reasons() -> dict[str, tuple[bool, bool]]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            if (
-                not isinstance(node.func, ast.Name)
-                or node.func.id != "ServingLaneDecision"
-            ):
+            constructor_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
+            if constructor_name != "ServingLaneDecision":
                 continue
             lane_node = _call_argument(node, 0, "is_mllm")
             reason_node = _call_argument(node, 1, "reason")
@@ -173,6 +177,27 @@ _VALIDATED_REASON_PASSTHROUGHS = frozenset(
     }
 )
 
+# Constructor/response keyword forwarding sites whose values have already
+# crossed ``ServingLaneDecision`` or ``BatchedEngine`` validation. Any new
+# dynamic keyword emission fails closed until its exact source is audited.
+_VALIDATED_REASON_KEYWORD_PASSTHROUGHS = frozenset(
+    {
+        ("server.py", "BatchedEngine", "_serving_lane_reason"),
+        ("server.py", "BatchedEngine", "serving_lane_reason"),
+        (
+            "routes/chat.py",
+            "e.openai_detail",
+            "getattr(engine, 'serving_lane_reason', None)",
+        ),
+        (
+            "routes/responses.py",
+            "e.openai_detail",
+            "getattr(engine, 'serving_lane_reason', None)",
+        ),
+        ("routes/models.py", "ModelInfo", "serving_lane_reason"),
+    }
+)
+
 
 def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
     """Static reason values assigned to reason fields anywhere in the engine tree."""
@@ -232,6 +257,57 @@ def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
     return found
 
 
+def _keyword_reason_values() -> set[str]:
+    """Static values passed through any ``serving_lane_reason=`` keyword."""
+    found: set[str] = set()
+    seen_passthroughs: set[tuple[str, str, str]] = set()
+    for path in ENGINE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        constants = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "serving_lane_reason":
+                    continue
+                value = keyword.value
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue
+                if (
+                    isinstance(value, ast.Constant) and isinstance(value.value, str)
+                ) or (isinstance(value, ast.Name) and value.id in constants):
+                    found.add(
+                        _string_value(
+                            value,
+                            constants,
+                            context=(
+                                f"serving_lane_reason keyword at {path}:{node.lineno}"
+                            ),
+                        )
+                    )
+                    continue
+                relative_path = path.relative_to(ENGINE).as_posix()
+                passthrough = (
+                    relative_path,
+                    ast.unparse(node.func),
+                    ast.unparse(value),
+                )
+                assert passthrough in _VALIDATED_REASON_KEYWORD_PASSTHROUGHS, (
+                    "unvalidated dynamic serving_lane_reason keyword: "
+                    f"{passthrough}. Route the value through the shared "
+                    "invariant, then add only that exact pass-through here."
+                )
+                seen_passthroughs.add(passthrough)
+    assert seen_passthroughs == _VALIDATED_REASON_KEYWORD_PASSTHROUGHS, (
+        "validated serving_lane_reason keyword roster drifted:\n"
+        f"missing: "
+        f"{sorted(_VALIDATED_REASON_KEYWORD_PASSTHROUGHS - seen_passthroughs)}\n"
+        f"unexpected: "
+        f"{sorted(seen_passthroughs - _VALIDATED_REASON_KEYWORD_PASSTHROUGHS)}"
+    )
+    return found
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -251,6 +327,50 @@ def test_dynamic_reason_assignment_scanner_fails_closed(
         _literal_assignments()
 
 
+def test_qualified_decision_constructor_is_scanned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "qualified.py").write_text(
+        'decision = api.ServingLaneDecision(False, "qualified_reason")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "ENGINE", tmp_path)
+
+    assert _decision_reasons() == {"qualified_reason": (False, False)}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ('"literal_reason"', {"literal_reason"}),
+        ("local_reason", None),
+    ],
+)
+def test_reason_keyword_scanner_is_exhaustive_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: set[str] | None,
+):
+    (tmp_path / "keyword.py").write_text(
+        f"response = Response(serving_lane_reason={value})\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "ENGINE", tmp_path)
+    monkeypatch.setitem(
+        globals(),
+        "_VALIDATED_REASON_KEYWORD_PASSTHROUGHS",
+        frozenset(),
+    )
+
+    if expected is None:
+        with pytest.raises(AssertionError, match="unvalidated dynamic"):
+            _keyword_reason_values()
+    else:
+        assert _keyword_reason_values() == expected
+
+
 def _engine_reasons() -> dict[str, bool]:
     """``{reason: auto_text_fallback}`` across the whole engine tree.
 
@@ -264,6 +384,12 @@ def _engine_reasons() -> dict[str, bool]:
     # video-gen modalities and passes it straight through. Those models have
     # no vision lane to lose, so the generic copy is not misleading for them.
     for reason in _literal_assignments():
+        reasons.setdefault(reason, False)
+    # Response/model constructors can emit the field without assigning it to
+    # a named target first. Include every static keyword literal in the same
+    # exhaustive engine roster; audited dynamic forwarding sites add no new
+    # value of their own.
+    for reason in _keyword_reason_values():
         reasons.setdefault(reason, False)
     # An assignment to the instance attribute is the engine downgrading
     # itself mid-load: after a failed vision load its own warning calls this
