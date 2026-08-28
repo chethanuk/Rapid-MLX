@@ -65,7 +65,7 @@ Examples:
 
 ## Author
 
-X handle (optional, external contributors): @
+X handle (optional, external contributors):
 
 <!--
 Leave blank if you prefer not to be credited publicly when this merges.
