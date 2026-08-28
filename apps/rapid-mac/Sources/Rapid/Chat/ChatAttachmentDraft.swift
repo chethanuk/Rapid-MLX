@@ -69,8 +69,9 @@ struct ChatAttachmentDraft: Equatable {
         to images: [ChatImageAttachment]
     ) -> Bool {
         guard images.count < ChatImageAttachment.maxImagesPerMessage else { return false }
-        let existingBytes = images.reduce(0) { $0 + $1.data.count }
-        return existingBytes + image.data.count <= ChatImageAttachment.maxCombinedImageBytes
+        let existingBytes = images.reduce(0) { $0 + $1.encodedDataURLByteCount }
+        return existingBytes + image.encodedDataURLByteCount
+            <= ChatImageAttachment.maxCombinedEncodedImageBytes
     }
 
     mutating func beginImageImport() -> UUID? {

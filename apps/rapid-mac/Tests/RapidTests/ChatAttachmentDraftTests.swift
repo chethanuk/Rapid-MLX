@@ -287,14 +287,16 @@ struct ChatAttachmentDraftTests {
         #expect(!countRejected)
         #expect(draft.images.count == ChatImageAttachment.maxImagesPerMessage)
 
-        // Byte budget exhausted: each image is individually under the per-file
-        // 20 MB cap, but two that together exceed the 20 MB aggregate cannot
-        // both be appended.
+        // Byte budget exhausted (measured in exact encoded data-URL bytes):
+        // each image individually fits the combined budget, but two that
+        // together exceed it cannot both be appended.
+        let budget = ChatImageAttachment.maxCombinedEncodedImageBytes
+        let almostHalf = rawBytesForEncoded(Int(budget * 6 / 10))
         var byteDraft = ChatAttachmentDraft()
-        let large = try makeImage(name: "big.png", bytes: 20 * 1024 * 1024 - 1)
+        let large = try makeImage(name: "big.png", bytes: almostHalf)
         let largeAccepted = byteDraft.appendImage(large)
         #expect(largeAccepted)
-        let another = try makeImage(name: "another.png", bytes: 20 * 1024 * 1024 - 1)
+        let another = try makeImage(name: "another.png", bytes: almostHalf)
         let byteRejected = byteDraft.appendImage(another)
         #expect(!byteRejected)
         #expect(byteDraft.images == [large])
@@ -303,10 +305,12 @@ struct ChatAttachmentDraftTests {
     @Test("appendImages keeps only the batch that fits and reports the rejected count")
     func appendImagesGatesMixedBatch() throws {
         var draft = ChatAttachmentDraft()
-        // The first image alone fits; together the pair exceeds 20 MB aggregate,
-        // so the second is dropped and counted as rejected.
-        let first = try makeImage(name: "first.png", bytes: 12 * 1024 * 1024)
-        let second = try makeImage(name: "second.png", bytes: 12 * 1024 * 1024)
+        // The first image alone fits the encoded byte budget; together the pair
+        // exceeds it, so the second is dropped and counted as rejected.
+        let budget = ChatImageAttachment.maxCombinedEncodedImageBytes
+        let almostHalf = rawBytesForEncoded(Int(budget * 6 / 10))
+        let first = try makeImage(name: "first.png", bytes: almostHalf)
+        let second = try makeImage(name: "second.png", bytes: almostHalf)
 
         let rejectedCount = draft.appendImages([
             (first, URL(fileURLWithPath: "/tmp/first.png")),
@@ -366,8 +370,8 @@ struct ChatAttachmentDraftTests {
         }
         let submission = draft.takeSubmission()
         #expect(submission.images.count == ChatImageAttachment.maxImagesPerMessage)
-        #expect(submission.images.reduce(0) { $0 + $1.data.count }
-            <= ChatImageAttachment.maxCombinedImageBytes)
+        #expect(submission.images.reduce(0) { $0 + $1.encodedDataURLByteCount }
+            <= ChatImageAttachment.maxCombinedEncodedImageBytes)
     }
 
     @Test("a deleted conversation cannot be resurrected by a late image import")
@@ -427,9 +431,11 @@ struct ChatAttachmentDraftTests {
         let stripped = CapabilityChipRenderGateSourceGuardTests
             .stripCommentsAndWhitespace(source)
 
-        // The pre-read budget gate runs before any beginImageImport/read work.
+        // The pre-read budget gate runs before any beginImageImport/read work,
+        // charging existing images at their encoded wire form so the incoming
+        // batch and the already-attached set speak the same byte budget.
         let gated = stripped.contains(
-            "letselection=ChatImageAttachment.importCandidates(urls,existingCount:attachmentDraft.images.count,existingBytes:attachmentDraft.images.reduce(0){$0+$1.data.count})"
+            "letselection=ChatImageAttachment.importCandidates(urls,existingCount:existing.count,existingBytes:existing.reduce(0){$0+$1.encodedDataURLByteCount})"
         )
         #expect(gated, "addImageURLs no longer gates image candidates before import.")
         #expect(stripped.contains(
@@ -469,6 +475,14 @@ struct ChatAttachmentDraftTests {
             mimeType: "image/png",
             data: Data(repeating: 0x47, count: bytes)
         )
+    }
+
+    /// A raw byte count whose encoded data-URL size is *at most* `encoded`, so
+    /// a test can express "this image encodes to ~60 % of the message budget"
+    /// without hard-coding base64 expansion.
+    private func rawBytesForEncoded(_ encoded: Int) -> Int {
+        let prefix = ChatImageAttachment.encodedDataURLByteCount(mimeType: "image/png", rawBytes: 0)
+        return ((encoded - prefix) / 4) * 3
     }
 
     private func makeFile(name: String, text: String) throws -> ChatFileAttachment {
