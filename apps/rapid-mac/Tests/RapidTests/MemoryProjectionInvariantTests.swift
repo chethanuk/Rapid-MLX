@@ -665,10 +665,20 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
     override func startLoading() {
         let path = request.url?.path
         let payload: Data
-        if path == "/v1/models/load" {
-            let body = request.httpBody ?? Data()
+        let statusCode: Int
+        if request.httpMethod == "POST", path == "/v1/models/load" {
+            let body = request.httpBody ?? Self.readBodyStream(request.httpBodyStream) ?? Data()
             let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-            let alias = object?["model"] as? String ?? "missing-load-alias"
+            guard let alias = object?["model"] as? String,
+                  object?["replace_group"] as? String == "assistant",
+                  object?["memory_policy"] as? String == "evict_first_if_needed"
+            else {
+                respond(
+                    statusCode: 400,
+                    payload: Data(#"{"error":{"message":"invalid replacement policy"}}"#.utf8)
+                )
+                return
+            }
             let estimatedGB = object?["estimated_size_gb"] as? Double ?? 0
             let estimatedBytes = UInt64(estimatedGB * Double(UInt64(1) << 30))
             let status = Self.status(alias: alias, estimatedBytes: estimatedBytes)
@@ -685,14 +695,26 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
             )
             Self.lock.unlock()
             payload = try! JSONEncoder().encode(status)
-        } else {
+            statusCode = 200
+        } else if request.httpMethod == "GET", path == "/v1/models/residency" {
             Self.lock.lock()
             let snapshot = Self.residentSnapshot
             Self.lock.unlock()
             payload = try! JSONEncoder().encode(snapshot ?? .empty)
+            statusCode = 200
+        } else {
+            respond(
+                statusCode: 404,
+                payload: Data(#"{"error":{"message":"unexpected request"}}"#.utf8)
+            )
+            return
         }
+        respond(statusCode: statusCode, payload: payload)
+    }
+
+    private func respond(statusCode: Int, payload: Data) {
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+            url: request.url!, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: nil
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: payload)
@@ -700,6 +722,22 @@ private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked 
     }
 
     override func stopLoading() {}
+
+    private static func readBodyStream(_ stream: InputStream?) -> Data? {
+        guard let stream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = buffer.withUnsafeMutableBufferPointer { pointer in
+                stream.read(pointer.baseAddress!, maxLength: pointer.count)
+            }
+            if count > 0 { data.append(buffer, count: count) }
+            if count == 0 { return data }
+            if count < 0 { return nil }
+        }
+    }
 
     private static func status(alias: String, estimatedBytes: UInt64) -> ResidentModelStatus {
         ResidentModelStatus(
@@ -729,6 +767,18 @@ private final class MemoryInvariantProjectionRejectProtocol: URLProtocol, @unche
     }
 
     override func startLoading() {
+        guard request.httpMethod == "POST", request.url?.path == "/v1/models/load" else {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(
+                self,
+                didLoad: Data(#"{"error":{"message":"unexpected request"}}"#.utf8)
+            )
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let payload = Data(#"{"error":{"message":"insufficient capacity"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}"#.utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 507, httpVersion: "HTTP/1.1", headerFields: nil
