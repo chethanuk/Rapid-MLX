@@ -110,6 +110,38 @@ fi
 
 log() { printf '[gui-golden] %s\n' "$*"; }
 die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
+
+# Small executable contracts shared by the real journeys and the fast Python
+# harness tests. Keeping the failure inside these helpers means changing a
+# journey guard from ``die`` to logging can no longer leave the unit contract
+# green: the helper is exercised with both allowed and forbidden fixtures.
+assert_no_fake_server_start() {
+    local events="$1" alias="$2" phase="$3"
+    [[ -s "$events" ]] || return 0
+    if [[ -n "$alias" ]]; then
+        if jq -e -s --arg alias "$alias" \
+            'any(.[]; .event == "server_started" and .alias == $alias)' \
+            "$events" >/dev/null; then
+            die "$phase unexpectedly started $alias"
+        fi
+    elif jq -e -s 'any(.[]; .event == "server_started")' \
+        "$events" >/dev/null; then
+        die "$phase unexpectedly started a model"
+    fi
+}
+
+require_observed_phase() {
+    local observed="$1" phase="$2"
+    [[ "$observed" == 1 ]] || die "required $phase phase was not observed"
+}
+
+# When sourced, expose only the executable contract helpers above. Return
+# before cleanup traps, app launch, filesystem mutation, or tool preflight.
+# Direct execution cannot be bypassed with an environment variable.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
 write_result() {
     local status="$1" exit_code="$2" finished_epoch duration_seconds
@@ -4670,10 +4702,8 @@ flow_audio_readiness() {
     # loading everywhere else; the default Audio pane is the easiest place for
     # it to creep back in, because dictation *does* load a model — just later,
     # when the user actually presses the hotkey.
-    if [[ -s "$OUT/fake-events.jsonl" ]] \
-       && jq -e -s 'any(.[]; .event == "server_started")' "$OUT/fake-events.jsonl" >/dev/null; then
-        die "Opening Audio started a model before any user action"
-    fi
+    assert_no_fake_server_start \
+        "$OUT/fake-events.jsonl" "" "Opening Audio before any user action"
 
     press "$OUT/dictation.json" Audio.Mode.Speech "$OUT/speech-tab-press.json" \
         || die "Audio Speech segment is not pressable from Dictation"
@@ -4721,10 +4751,8 @@ flow_audio_readiness() {
     done
     [[ "$speech_downloading" == 1 ]] \
         || die "Speech never exposed Downloading after Download"
-    if jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-qwen3-tts")' \
-        "$OUT/fake-events.jsonl" >/dev/null; then
-        die "Speech started fake-qwen3-tts before its pull completed and cache was verified"
-    fi
+    assert_no_fake_server_start \
+        "$OUT/fake-events.jsonl" "fake-qwen3-tts" "Speech before pull completion"
 
     local speech_start_ready=0
     for ((i=0; i<120; i++)); do
@@ -4739,10 +4767,8 @@ flow_audio_readiness() {
     done
     [[ "$speech_start_ready" == 1 ]] \
         || die "Speech did not become Start-ready after its download completed"
-    if jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-qwen3-tts")' \
-        "$OUT/fake-events.jsonl" >/dev/null; then
-        die "Speech loaded automatically after a download-only action"
-    fi
+    assert_no_fake_server_start \
+        "$OUT/fake-events.jsonl" "fake-qwen3-tts" "Speech after download-only action"
     press "$OUT/speech-downloaded.json" Readiness.Action "$OUT/speech-start.json" \
         || die "Speech Start is not pressable after download"
     wait_fake_event \
@@ -4974,10 +5000,8 @@ flow_audio_readiness() {
     # rows render a grant button only while the permission is missing, so its
     # tree legitimately differs between a fresh runner and a developer machine.
     # A snapshot would encode the runner's TCC state as the contract.
-    if jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-whisper-small")' \
-        "$OUT/fake-events.jsonl" >/dev/null; then
-        die "Opening Dictation loaded its model before the user dictated"
-    fi
+    assert_no_fake_server_start \
+        "$OUT/fake-events.jsonl" "fake-whisper-small" "Opening Dictation"
 
     press "$OUT/dictation-return.json" Readiness.Action "$OUT/dictation-download.json" \
         || die "Dictation Download is not pressable"
@@ -4996,10 +5020,8 @@ flow_audio_readiness() {
     done
     [[ "$dictation_downloaded" == 1 ]] \
         || die "Dictation banner did not clear after the download landed"
-    if jq -e -s 'any(.[]; .event == "server_started" and .alias == "fake-whisper-small")' \
-        "$OUT/fake-events.jsonl" >/dev/null; then
-        die "Dictation loaded the model after Download while dictation was off"
-    fi
+    assert_no_fake_server_start \
+        "$OUT/fake-events.jsonl" "fake-whisper-small" "Dictation after Download"
 
     jq -n '{success: true,
             assertion: "Dictation is privacy-safe and inert on open, exposes the shared explicit Download lifecycle for an uncached model, and Speech keeps its explicit Download and Start"}' \
@@ -5243,8 +5265,7 @@ flow_dictation() {
         fi
         sleep 0.1
     done
-    [[ "$loading_seen" == 1 ]] \
-        || die "Dictation never exposed model loading before readiness"
+    require_observed_phase "$loading_seen" loading
     [[ "$(element_field "$OUT/dictation-loading.json" Dictation.Enable value)" == "1" ]] \
         || die "Dictation lost the user's Enabled intent while loading"
 
@@ -5262,8 +5283,7 @@ flow_dictation() {
         fi
         sleep 0.1
     done
-    [[ "$ready_seen" == 1 ]] \
-        || die "Dictation did not become Listening after model warmup"
+    require_observed_phase "$ready_seen" listening
 
     # The warmup request must have stayed on the conversation server. A
     # transcription-only start here is the exact silent-eviction regression.

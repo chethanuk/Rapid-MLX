@@ -23,6 +23,9 @@ they exist when they break.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +101,27 @@ def _owns_committed_baseline(flow: str) -> bool:
     return any(p.name.startswith(flow) for p in SNAPSHOTS.glob("*.txt"))
 
 
+def _run_harness_helper(tmp_path: Path, helper: str, *args: str):
+    env = os.environ.copy()
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'harness="$1"; shift; helper="$1"; shift; helper_args=("$@"); '
+            'set --; source "$harness"; "$helper" "${helper_args[@]}"',
+            "gui-contract-test",
+            str(HARNESS),
+            helper,
+            *args,
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_audio_readiness_asserts_outcomes_not_just_presses():
     """The audio-readiness journey proves model lifecycle outcomes.
 
@@ -131,15 +155,53 @@ def test_audio_readiness_never_auto_starts_a_model():
     """
     flow = _harness_flow_body("flow_audio_readiness")
 
-    # Negative auto-load guards: `die` when a model started without an action.
-    # Both the Speech/TTS and the Dictation/transcription model paths must
-    # refuse premature `server_started`, so dropping either path fails here.
-    for alias in ("fake-qwen3-tts", "fake-whisper-small"):
-        assert (
-            f'any(.[]; .event == "server_started" and .alias == "{alias}")' in flow
-        ), f"audio-readiness no longer refutes premature auto-start of {alias}"
+    # The executable failure helper must control all five inert phases: opening
+    # Audio, before/after the TTS download, and before/after Dictation download.
+    assert flow.count("assert_no_fake_server_start") == 5
+    assert flow.count('"fake-qwen3-tts"') >= 2
+    assert flow.count('"fake-whisper-small"') >= 2
     # The one allowed start is asserted as a waited post-condition after Start.
     assert '"server_started" and .alias == "fake-qwen3-tts"' in flow
+
+
+@pytest.mark.parametrize("guarded_alias", ["", "fake-qwen3-tts", "fake-whisper-small"])
+def test_auto_start_guard_fails_on_forbidden_event(tmp_path: Path, guarded_alias: str):
+    events = tmp_path / "events.jsonl"
+    started_alias = guarded_alias or "some-model"
+    events.write_text(json.dumps({"event": "server_started", "alias": started_alias}))
+
+    result = _run_harness_helper(
+        tmp_path,
+        "assert_no_fake_server_start",
+        str(events),
+        guarded_alias,
+        "test phase",
+    )
+
+    assert result.returncode == 1
+    assert "FAIL:" in result.stderr
+
+
+def test_alias_guard_allows_unrelated_or_empty_events(tmp_path: Path):
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps({"event": "server_started", "alias": "other"}))
+    unrelated = _run_harness_helper(
+        tmp_path,
+        "assert_no_fake_server_start",
+        str(events),
+        "fake-qwen3-tts",
+        "test phase",
+    )
+    events.write_text("")
+    empty = _run_harness_helper(
+        tmp_path,
+        "assert_no_fake_server_start",
+        str(events),
+        "fake-qwen3-tts",
+        "test phase",
+    )
+    assert unrelated.returncode == 0
+    assert empty.returncode == 0
 
 
 def test_audio_control_journey_is_blocking_gui_ci_and_has_failure_evidence():
@@ -176,9 +238,18 @@ def test_dictation_journey_proves_loading_before_ready():
     assert '.event == "audio_transcription"' in flow
     # The status filter used to read readiness text off a control description.
     assert '(.description // .value // .label // "")' in flow
-    # Two distinct outcome-state predicates on Dictation.Status: the loading
-    # phase (before readiness) and the Listening phase (after warmup).
+    # Two distinct observed states feed the executable failure helper.
     assert flow.count('select(.identifier == "Dictation.Status"') == 2
+    assert 'require_observed_phase "$loading_seen" loading' in flow
+    assert 'require_observed_phase "$ready_seen" listening' in flow
+
+
+def test_required_phase_helper_controls_failure(tmp_path: Path):
+    observed = _run_harness_helper(tmp_path, "require_observed_phase", "1", "loading")
+    missing = _run_harness_helper(tmp_path, "require_observed_phase", "0", "loading")
+    assert observed.returncode == 0
+    assert missing.returncode == 1
+    assert "FAIL:" in missing.stderr
 
 
 def test_image_generation_shell_request_matches_the_swift_default():
