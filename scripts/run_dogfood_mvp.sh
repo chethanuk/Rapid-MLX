@@ -28,6 +28,8 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 MODEL="${MODEL:-qwen3.5-35b}"
 PORT="${PORT:-8765}"
 API_KEY="${API_KEY:-$(openssl rand -hex 24)}"
@@ -136,7 +138,16 @@ echo "Starting $RAPID_MLX_CMD ($MODEL on :$PORT) [extra: $EXTRA_SERVE_ARGS] …"
 # (e.g. `--cors-origins *`) survives the unquoted expansion instead of
 # globbing against $PWD. Restore right after.
 set -f
-nohup $RAPID_MLX_CMD serve "$MODEL" --port "$PORT" --api-key "$API_KEY" \
+if [[ -n "${DOGFOOD_WORKING_SET_GB:-}" ]]; then
+  size_args=(--working-set-gb "$DOGFOOD_WORKING_SET_GB")
+else
+  size_args=(--model "$MODEL")
+fi
+# The wrapper execs the serve command, so SERVER_PID remains the process that
+# owns the host lock and stop/status retain their existing ownership semantics.
+# shellcheck disable=SC2086  # RAPID_MLX_CMD and EXTRA_SERVE_ARGS are command fragments by contract.
+nohup python3 "$ROOT/scripts/large-model-run.py" "${size_args[@]}" -- \
+  $RAPID_MLX_CMD serve "$MODEL" --port "$PORT" --api-key "$API_KEY" \
   --log-level INFO $EXTRA_SERVE_ARGS >"$SERVER_LOG" 2>&1 &
 set +f
 echo $! > "$SERVER_PID"

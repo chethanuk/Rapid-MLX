@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Conservative, report-first hygiene for a shared macOS build host."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from protected_models import cache_name, load_manifest
+
+
+def command(*args: str, cwd: Path | None = None, check: bool = True) -> str:
+    result = subprocess.run(args, cwd=cwd, check=False, text=True, capture_output=True)
+    if check and result.returncode:
+        raise RuntimeError(result.stderr.strip() or "command failed: " + " ".join(args))
+    return result.stdout
+
+
+def worktrees(repo: Path) -> list[dict[str, object]]:
+    fields: dict[str, object] | None = None
+    rows: list[dict[str, object]] = []
+    raw = command("git", "worktree", "list", "--porcelain", "-z", cwd=repo)
+    for token in raw.split("\0"):
+        if not token:
+            if fields:
+                rows.append(fields)
+                fields = None
+            continue
+        key, _, value = token.partition(" ")
+        if key == "worktree":
+            if fields:
+                rows.append(fields)
+            fields = {"path": Path(value)}
+        elif fields is not None:
+            fields[key] = value if value else True
+    if fields:
+        rows.append(fields)
+    return rows
+
+
+def in_use(path: Path) -> bool:
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return True
+    try:
+        result = subprocess.run(
+            [lsof, "+D", str(path)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return True
+    return result.returncode == 0
+
+
+def classify_worktree(repo: Path, row: dict[str, object], cutoff: float) -> str:
+    path = Path(row["path"])
+    if path.resolve() == repo.resolve():
+        return "primary"
+    if "locked" in row:
+        return "locked"
+    if not path.exists():
+        return "missing"
+    if path.stat().st_mtime >= cutoff:
+        return "recent"
+    if command("git", "status", "--porcelain", cwd=path).strip():
+        return "dirty"
+    upstream = command(
+        "git", "rev-parse", "--abbrev-ref", "@{upstream}", cwd=path, check=False
+    ).strip()
+    if not upstream:
+        return "no-upstream"
+    ahead = command("git", "rev-list", "--count", f"{upstream}..HEAD", cwd=path)
+    if int(ahead) != 0:
+        return "unpushed"
+    if in_use(path):
+        return "in-use"
+    return "eligible"
+
+
+def finished_dogfood_dirs(scratch: Path, cutoff: float) -> list[Path]:
+    if not scratch.exists():
+        return []
+    rows: list[Path] = []
+    for marker in scratch.glob("rapid-*/.dogfood-finished"):
+        candidate = marker.parent.resolve()
+        try:
+            candidate.relative_to(scratch.resolve())
+        except ValueError:
+            continue
+        if (
+            (candidate / ".dogfood-owned").is_file()
+            and candidate.stat().st_mtime < cutoff
+            and not in_use(candidate)
+        ):
+            rows.append(candidate)
+    return rows
+
+
+def mounted_images() -> list[tuple[Path, Path]]:
+    if sys.platform != "darwin" or not shutil.which("hdiutil"):
+        return []
+    raw = command("hdiutil", "info", "-plist", check=False)
+    if not raw:
+        return []
+    import plistlib
+
+    result: list[tuple[Path, Path]] = []
+    for image in plistlib.loads(raw.encode()).get("images", []):
+        image_path = image.get("image-path")
+        if not image_path:
+            continue
+        for entity in image.get("system-entities", []):
+            mount = entity.get("mount-point")
+            if mount:
+                result.append((Path(image_path), Path(mount)))
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument("--scratch", type=Path, default=Path("/private/tmp"))
+    parser.add_argument("--min-age-hours", type=float, default=6)
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args(argv)
+    repo = args.repo.resolve()
+    scratch = args.scratch.resolve()
+    if scratch == Path("/") or str(scratch).startswith("/Volumes/Extreme SSD"):
+        parser.error("scratch must be a narrow local directory, never / or Extreme SSD")
+    cutoff = time.time() - args.min_age_hours * 3600
+    mode = "APPLY" if args.apply else "DRY-RUN"
+    print(f"MODE {mode}")
+
+    hf_root = Path(
+        os.environ.get(
+            "HF_HUB_CACHE",
+            Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub",
+        )
+    )
+    for model in load_manifest():
+        cache = hf_root / cache_name(str(model["repository"]))
+        state = "present" if cache.exists() else "absent"
+        print(f"PROTECTED {model['repository']} {state} {cache}")
+    print("POLICY model caches are report-only and are never removed")
+
+    eligible_worktrees: list[Path] = []
+    for row in worktrees(repo):
+        path = Path(row["path"])
+        reason = classify_worktree(repo, row, cutoff)
+        if reason == "eligible" and not path.resolve().is_relative_to(scratch):
+            reason = "outside-scratch"
+        print(f"WORKTREE {reason} {path}")
+        if reason == "eligible":
+            eligible_worktrees.append(path)
+
+    dogfoods = finished_dogfood_dirs(scratch, cutoff)
+    dogfood_set = set(dogfoods)
+    removable_owners = [*eligible_worktrees, *dogfoods]
+    for image, mount in mounted_images():
+        owner = next(
+            (
+                path
+                for path in removable_owners
+                if image.resolve().is_relative_to(path.resolve())
+            ),
+            None,
+        )
+        action = "eligible" if owner else "skip-unowned"
+        print(f"DMG {action} {mount} image={image}")
+        if args.apply and owner:
+            subprocess.run(["hdiutil", "detach", str(mount)], check=True)
+    for path in dogfoods:
+        print(f"DOGFOOD eligible {path}")
+
+    if args.apply:
+        for path in eligible_worktrees:
+            current = next(
+                (row for row in worktrees(repo) if Path(row["path"]) == path), None
+            )
+            if current is None or classify_worktree(repo, current, cutoff) != "eligible":
+                raise RuntimeError(f"worktree changed after planning; refusing: {path}")
+            subprocess.run(
+                ["git", "worktree", "remove", str(path)], cwd=repo, check=True
+            )
+            print(f"REMOVED worktree {path}")
+        for path in dogfood_set:
+            marker = path / ".dogfood-finished"
+            if (
+                not path.resolve().is_relative_to(scratch)
+                or not marker.is_file()
+                or not (path / ".dogfood-owned").is_file()
+                or in_use(path)
+            ):
+                raise RuntimeError(f"dogfood changed after planning; refusing: {path}")
+            shutil.rmtree(path)
+            print(f"REMOVED dogfood {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
