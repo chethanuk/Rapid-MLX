@@ -1386,10 +1386,22 @@ class TestServingLaneDecisionValidation:
 
         # A vision-lane reason is not a silent downgrade, so pairing it with
         # auto_text_fallback=True must fail (it would reach the generic copy).
-        with pytest.raises(
-            ValueError, match="cannot be paired with auto_text_fallback"
-        ):
+        with pytest.raises(ValueError, match="requires auto_text_fallback=False"):
             ServingLaneDecision(True, "vision_supported", auto_text_fallback=True)
+
+    def test_downgrade_reason_without_auto_text_fallback_is_rejected(self):
+        from vllm_mlx.api.utils import ServingLaneDecision
+
+        with pytest.raises(ValueError, match="requires auto_text_fallback=True"):
+            ServingLaneDecision(False, "vision_memory_insufficient")
+
+    def test_reason_must_match_selected_lane(self):
+        from vllm_mlx.api.utils import ServingLaneDecision
+
+        with pytest.raises(ValueError, match="requires is_mllm=True"):
+            ServingLaneDecision(False, "vision_supported")
+        with pytest.raises(ValueError, match="requires is_mllm=False"):
+            ServingLaneDecision(True, "text_checkpoint")
 
     def test_auto_text_fallback_with_downgrade_reason_is_accepted(self):
         from vllm_mlx.api.utils import ServingLaneDecision
@@ -1404,6 +1416,7 @@ class TestServingLaneDecisionValidation:
         from vllm_mlx.api.utils import (
             AUTO_TEXT_FALLBACK_REASONS,
             SERVING_LANE_REASONS,
+            VISION_SERVING_LANE_REASONS,
             ServingLaneDecision,
         )
 
@@ -1411,11 +1424,15 @@ class TestServingLaneDecisionValidation:
         # catch the set drifting from what the decision function emits. Every
         # auto-fallback reason must also pass the flag.
         for reason in SERVING_LANE_REASONS:
-            ServingLaneDecision(False, reason)
-        for reason in AUTO_TEXT_FALLBACK_REASONS:
-            ServingLaneDecision(False, reason, auto_text_fallback=True)
+            ServingLaneDecision(
+                reason in VISION_SERVING_LANE_REASONS,
+                reason,
+                auto_text_fallback=reason in AUTO_TEXT_FALLBACK_REASONS,
+            )
         # Auto-fallback members are a strict subset of all reasons.
         assert AUTO_TEXT_FALLBACK_REASONS <= SERVING_LANE_REASONS
+        assert VISION_SERVING_LANE_REASONS <= SERVING_LANE_REASONS
+        assert not (AUTO_TEXT_FALLBACK_REASONS & VISION_SERVING_LANE_REASONS)
 
 
 class TestExtractMultimodalContent:

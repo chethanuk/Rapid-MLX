@@ -31,12 +31,14 @@ pure text parsing.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
 from vllm_mlx.api.utils import (
     AUTO_TEXT_FALLBACK_REASONS,
     SERVING_LANE_REASONS,
+    VISION_SERVING_LANE_REASONS,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -48,47 +50,137 @@ ENGINE = REPO / "vllm_mlx"
 
 PROFILE_SWIFT = REPO / "apps/rapid-mac/Sources/Rapid/Server/ServerModelProfile.swift"
 
-# ``ServingLaneDecision(False, "x", auto_text_fallback=True)`` — tolerant of
-# line breaks and spacing, strict about the keyword actually being True.
-AUTO_FALLBACK_RE = re.compile(r"auto_text_fallback\s*=\s*True")
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Top-level string constants available to reason emitters in one module."""
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = value.value
+    return constants
 
 
-def _balanced_call(text: str, open_paren: int) -> str:
-    """Source of the call whose ``(`` sits at ``open_paren``."""
-    depth = 0
-    for i in range(open_paren, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_paren : i + 1]
-    raise AssertionError(f"unbalanced ServingLaneDecision call at offset {open_paren}")
+def _string_value(node: ast.expr, constants: dict[str, str], *, context: str) -> str:
+    """Resolve a string literal or a module-level string constant, else fail loud."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id]
+    raise AssertionError(
+        f"{context} must use a string literal or module-level string constant; "
+        f"AST scanner cannot validate {ast.unparse(node)!r}"
+    )
 
 
-def _decision_reasons() -> dict[str, bool]:
-    """``{reason: auto_text_fallback}`` for every ``ServingLaneDecision`` in the tree."""
-    found: dict[str, bool] = {}
+def _bool_value(node: ast.expr, *, context: str) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    raise AssertionError(
+        f"{context} must use a bool literal; AST scanner cannot validate "
+        f"{ast.unparse(node)!r}"
+    )
+
+
+def _call_argument(call: ast.Call, position: int, keyword: str) -> ast.expr | None:
+    for item in call.keywords:
+        if item.arg == keyword:
+            return item.value
+    return call.args[position] if len(call.args) > position else None
+
+
+def _decision_reasons() -> dict[str, tuple[bool, bool]]:
+    """``{reason: (is_mllm, auto_fallback)}`` for every decision construction."""
+    found: dict[str, tuple[bool, bool]] = {}
     for path in ENGINE.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        for match in re.finditer(r"ServingLaneDecision\(", text):
-            call = _balanced_call(text, match.end() - 1)
-            reason = re.search(r'"([^"]+)"', call)
-            assert reason, f"ServingLaneDecision without a literal reason: {call!r}"
-            auto_fallback = bool(AUTO_FALLBACK_RE.search(call))
-            # A reason emitted from several call sites is auto-fallback if ANY of
-            # them sets the flag — the user can reach the copy through that path.
-            found[reason.group(1)] = found.get(reason.group(1), False) or auto_fallback
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        constants = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if (
+                not isinstance(node.func, ast.Name)
+                or node.func.id != "ServingLaneDecision"
+            ):
+                continue
+            lane_node = _call_argument(node, 0, "is_mllm")
+            reason_node = _call_argument(node, 1, "reason")
+            auto_node = _call_argument(node, 2, "auto_text_fallback")
+            assert lane_node is not None and reason_node is not None, (
+                f"ServingLaneDecision at {path}:{node.lineno} omits lane or reason"
+            )
+            context = f"ServingLaneDecision at {path}:{node.lineno}"
+            reason = _string_value(reason_node, constants, context=context)
+            classification = (
+                _bool_value(lane_node, context=context),
+                _bool_value(auto_node, context=context)
+                if auto_node is not None
+                else False,
+            )
+            previous = found.setdefault(reason, classification)
+            assert previous == classification, (
+                f"{reason!r} has conflicting lane/fallback classifications: "
+                f"{previous} and {classification}"
+            )
     assert found, "no ServingLaneDecision constructions found — parser is stale"
     return found
 
 
-def _literal_assignments(attribute: str) -> set[str]:
-    """Reason strings assigned to ``attribute`` anywhere in the engine tree."""
-    pattern = re.compile(rf'{re.escape(attribute)}\s*=\s*"([^"]+)"')
+def _assignment_target(target: ast.expr) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        owner = ast.unparse(target.value)
+        return f"{owner}.{target.attr}"
+    return None
+
+
+def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
+    """Static reason values assigned to reason fields anywhere in the engine tree."""
     found: set[str] = set()
     for path in ENGINE.rglob("*.py"):
-        found.update(pattern.findall(path.read_text(encoding="utf-8")))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        constants = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [_assignment_target(target) for target in targets]
+            selected = [
+                name
+                for name in names
+                if name is not None
+                and (
+                    name == exact_target
+                    if exact_target is not None
+                    else name.endswith("serving_lane_reason")
+                )
+            ]
+            if not selected:
+                continue
+            value = node.value
+            if isinstance(value, ast.Constant) and value.value is None:
+                # Optional response/schema fields are initialized empty; they
+                # are not reason emitters.
+                continue
+            if isinstance(value, ast.Name) and value.id not in constants:
+                # Runtime pass-through from an already validated decision/profile.
+                continue
+            if isinstance(value, ast.Attribute) and value.attr == "lane_reason":
+                continue
+            found.add(
+                _string_value(
+                    value,
+                    constants,
+                    context=f"reason assignment at {path}:{node.lineno}",
+                )
+            )
     return found
 
 
@@ -100,11 +192,11 @@ def _engine_reasons() -> dict[str, bool]:
     wrong. ``ServingLaneDecision`` records that as ``auto_text_fallback``;
     assignments outside it have to be classified here.
     """
-    reasons = _decision_reasons()
+    reasons = {reason: auto for reason, (_, auto) in _decision_reasons().items()}
     # Plain assignments seed the field — startup does this for image-gen /
     # video-gen modalities and passes it straight through. Those models have
     # no vision lane to lose, so the generic copy is not misleading for them.
-    for reason in _literal_assignments("serving_lane_reason"):
+    for reason in _literal_assignments():
         reasons.setdefault(reason, False)
     # An assignment to the instance attribute is the engine downgrading
     # itself mid-load: after a failed vision load its own warning calls this
@@ -112,7 +204,7 @@ def _engine_reasons() -> dict[str, bool]:
     # Same silent downgrade the flag marks elsewhere, but it never passes
     # through ServingLaneDecision, so there is no flag to read. Runs after the
     # loop above, whose broader pattern also matches these lines.
-    for reason in _literal_assignments("self._serving_lane_reason"):
+    for reason in _literal_assignments(exact_target="self._serving_lane_reason"):
         reasons[reason] = True
     return reasons
 
@@ -180,7 +272,9 @@ def test_auto_text_fallback_ssot_matches_the_tree():
     member even though it still needs dedicated copy; see
     ``test_every_silent_downgrade_has_dedicated_copy``.)
     """
-    decision_auto = {r for r, is_auto in _decision_reasons().items() if is_auto}
+    decision_auto = {
+        reason for reason, (_, is_auto) in _decision_reasons().items() if is_auto
+    }
     assert decision_auto, "no auto_text_fallback decisions parsed — parser is stale"
     assert set(AUTO_TEXT_FALLBACK_REASONS) == decision_auto, (
         f"AUTO_TEXT_FALLBACK_REASONS and the ServingLaneDecision call sites disagree:\n"
@@ -188,6 +282,19 @@ def test_auto_text_fallback_ssot_matches_the_tree():
         f"{sorted(set(AUTO_TEXT_FALLBACK_REASONS) - decision_auto) or 'none'}\n"
         f"  decision call site flags it but SSOT misses it: "
         f"{sorted(decision_auto - set(AUTO_TEXT_FALLBACK_REASONS)) or 'none'}"
+    )
+
+
+def test_vision_lane_reason_ssot_matches_the_tree():
+    decision_vision = {
+        reason for reason, (is_mllm, _) in _decision_reasons().items() if is_mllm
+    }
+    assert set(VISION_SERVING_LANE_REASONS) == decision_vision, (
+        "VISION_SERVING_LANE_REASONS and decision call sites disagree:\n"
+        f"  in SSOT but no vision decision emits it: "
+        f"{sorted(set(VISION_SERVING_LANE_REASONS) - decision_vision) or 'none'}\n"
+        f"  emitted on vision lane but absent from SSOT: "
+        f"{sorted(decision_vision - set(VISION_SERVING_LANE_REASONS)) or 'none'}"
     )
 
 

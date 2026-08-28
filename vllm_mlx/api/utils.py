@@ -1407,6 +1407,19 @@ AUTO_TEXT_FALLBACK_REASONS = frozenset(
     }
 )
 
+# Reasons that select the multimodal lane. Every other reason in the complete
+# roster describes a text lane (including mid-load and non-LLM fallbacks).
+# Keeping this classification explicit lets ``ServingLaneDecision`` reject a
+# reason/boolean pairing that would otherwise make downstream engine selection
+# disagree with the diagnostic sent to clients.
+VISION_SERVING_LANE_REASONS = frozenset(
+    {
+        "vision_lane_forced",
+        "vision_hybrid_runtime_supported",
+        "vision_supported",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ServingLaneDecision:
@@ -1423,12 +1436,21 @@ class ServingLaneDecision:
                 f"{sorted(SERVING_LANE_REASONS)}. Add it to SERVING_LANE_REASONS "
                 f"and the Desktop copy contract if it is genuinely engine-emitted."
             )
-        if self.auto_text_fallback and self.reason not in AUTO_TEXT_FALLBACK_REASONS:
+        expected_auto_fallback = self.reason in AUTO_TEXT_FALLBACK_REASONS
+        if self.auto_text_fallback != expected_auto_fallback:
             raise ValueError(
-                f"{self.reason!r} cannot be paired with auto_text_fallback=True: "
-                f"only {sorted(AUTO_TEXT_FALLBACK_REASONS)} downgrade a "
-                f"vision-capable model to the text lane. Add a dedicated Desktop "
-                f"copy case if this is genuinely a silent vision-lane downgrade."
+                f"{self.reason!r} requires auto_text_fallback="
+                f"{expected_auto_fallback}, got {self.auto_text_fallback}: only "
+                f"{sorted(AUTO_TEXT_FALLBACK_REASONS)} downgrade a vision-capable "
+                f"model to the text lane. Update the reason roster and dedicated "
+                f"Desktop copy together if that classification changes."
+            )
+        expected_mllm = self.reason in VISION_SERVING_LANE_REASONS
+        if self.is_mllm != expected_mllm:
+            raise ValueError(
+                f"{self.reason!r} requires is_mllm={expected_mllm}, got "
+                f"{self.is_mllm}: vision-lane reasons are "
+                f"{sorted(VISION_SERVING_LANE_REASONS)}"
             )
 
 
