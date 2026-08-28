@@ -10,10 +10,6 @@ route → engine → ``shared_apply_chat_template``, merging unknown keys into
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
-import pytest
-
 from vllm_mlx.utils.chat_template import apply_chat_template
 
 
