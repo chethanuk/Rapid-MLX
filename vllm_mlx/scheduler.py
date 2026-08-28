@@ -1593,7 +1593,7 @@ def _config_vetted_mtp_supports_spec_decode(model_type: str | None) -> bool:
     narrowly tied to the model families this MTP runtime supports.
     """
 
-    return model_type in {"qwen3_5", "qwen3_5_moe", "hy_v3"}
+    return model_type in {"qwen3_5", "qwen3_5_moe", "hy_v3", "qwen4_exp"}
 
 
 def _replay_dspark_committed(
@@ -3787,13 +3787,25 @@ class Scheduler:
                     mtp_model_type,
                 )
             else:
+                requested_max_k = getattr(self.config, "mtp_max_k", 3)
+                model_max_k = getattr(
+                    self.model, "mtp_max_speculative_tokens", requested_max_k
+                )
+                effective_max_k = min(requested_max_k, model_max_k)
+                if effective_max_k != requested_max_k:
+                    logger.warning(
+                        "[MTP-vendored] checkpoint caps speculative depth at "
+                        "K=%d (requested K=%d)",
+                        effective_max_k,
+                        requested_max_k,
+                    )
                 _install_mtp_vendored(
                     bg,
                     model=self.model,
                     requests=self.requests,
                     uid_to_request_id=self.uid_to_request_id,
                     # 0.9.13 PR-B: EV depth controller knobs.
-                    max_k=getattr(self.config, "mtp_max_k", 3),
+                    max_k=effective_max_k,
                     disable_auto_k=getattr(self.config, "mtp_disable_auto_k", False),
                     # Preferred (named) identity for the controller
                     # registry. The previous spelling ended in a bare

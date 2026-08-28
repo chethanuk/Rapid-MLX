@@ -29,6 +29,8 @@ Deliberately out of scope (deferred to PR-B / PR-C):
 
 from __future__ import annotations
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # 1. detect_mtp_eligibility(has_external_sidecar=...) contract
 # ---------------------------------------------------------------------------
@@ -281,8 +283,18 @@ def test_config_vetted_mtp_support_allowlist_is_qwen_only():
 
     assert _config_vetted_mtp_supports_spec_decode("qwen3_5") is True
     assert _config_vetted_mtp_supports_spec_decode("qwen3_5_moe") is True
+    assert _config_vetted_mtp_supports_spec_decode("qwen4_exp") is True
     assert _config_vetted_mtp_supports_spec_decode("gemma4_unified") is False
     assert _config_vetted_mtp_supports_spec_decode(None) is False
+
+
+def test_qwen4_native_mtp_depth_is_one_and_rejects_explicit_deeper_chain():
+    from vllm_mlx.cli import _resolve_mtp_depth_for_model
+
+    assert _resolve_mtp_depth_for_model("qwen4_exp", 3, explicit=False) == 1
+    assert _resolve_mtp_depth_for_model("qwen3_5", 3, explicit=True) == 3
+    with pytest.raises(ValueError, match="num_speculative_tokens=1 only"):
+        _resolve_mtp_depth_for_model("qwen4_exp", 2, explicit=True)
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +828,41 @@ def test_apply_mtp_dispatch_returns_attached_on_happy_path(monkeypatch):
     assert result == _batched._DISPATCH_ATTACHED
 
 
+def test_apply_mtp_dispatch_uses_loaded_snapshot_for_qwen4_native_head(monkeypatch):
+    """Flash-Next reads mtp.* from the exact snapshot selected by load."""
+    from vllm_mlx.engine import batched as _batched
+    from vllm_mlx.scheduler import SchedulerConfig
+
+    captured = {}
+
+    def fake_dispatch(model, model_name, mtp_sidecar, **kwargs):
+        captured["model"] = model
+        captured["model_name"] = model_name
+        captured["mtp_sidecar"] = mtp_sidecar
+        captured.update(kwargs)
+        return _batched._DISPATCH_ATTACHED
+
+    monkeypatch.setattr(_batched, "_run_dispatch_mtp_inject", fake_dispatch)
+    model = object()
+    sc = SchedulerConfig(spec_decode="mtp", mtp_model_type="qwen4_exp")
+    result = _batched._apply_mtp_dispatch(
+        model=model,
+        model_name="qwen3.8-flash-next-4bit",
+        scheduler_config=sc,
+        executor=_SyncExecutor(),
+        checkpoint_source="/cache/snapshots/immutable-revision",
+    )
+
+    assert result == _batched._DISPATCH_ATTACHED
+    assert captured == {
+        "model": model,
+        "model_name": "qwen3.8-flash-next-4bit",
+        "mtp_sidecar": "/cache/snapshots/immutable-revision",
+        "preferred_model_type": "qwen4_exp",
+    }
+    assert sc.mtp_sidecar is None
+
+
 def test_apply_mtp_dispatch_raises_on_rejected(monkeypatch):
     """Codex round-G NIT #4: end-to-end runtime coverage of the
     hard-fail branch — not a source-string check.
@@ -1204,7 +1251,7 @@ def test_start_llm_calls_apply_mtp_dispatch():
             """
 
         def _recording_apply_mtp_dispatch(
-            *, model, model_name, scheduler_config, executor
+            *, model, model_name, scheduler_config, executor, checkpoint_source=None
         ) -> str:
             dispatch_calls.append(
                 {
@@ -1212,6 +1259,7 @@ def test_start_llm_calls_apply_mtp_dispatch():
                     "model_name": model_name,
                     "scheduler_config": scheduler_config,
                     "executor": executor,
+                    "checkpoint_source": checkpoint_source,
                 }
             )
             raise _ScopedTestSentinelError("apply_mtp_dispatch invoked")
@@ -1244,6 +1292,7 @@ def test_start_llm_calls_apply_mtp_dispatch():
     call = dispatch_calls[0]
     assert call["model_name"] == engine._model_name
     assert call["scheduler_config"] is engine._scheduler_config
+    assert call["checkpoint_source"] == "/fake/immutable-snapshot"
     assert call["executor"] is engine._model_load_executor, (
         "codex round-L NIT: dispatch was called with the wrong "
         "executor — must be the same mlx-step worker that loaded "
