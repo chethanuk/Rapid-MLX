@@ -81,6 +81,8 @@ class TestChatTemplateKwargsPassthrough:
             tok,
             [{"role": "user", "content": "hi"}],
             tools=server_tools,
-            chat_template_kwargs={"tools": [{"type": "function", "function": {"name": "evil"}}]},
+            chat_template_kwargs={
+                "tools": [{"type": "function", "function": {"name": "evil"}}]
+            },
         )
         assert tok.received_kwargs["tools"] == server_tools
