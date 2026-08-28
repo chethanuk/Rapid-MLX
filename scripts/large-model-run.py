@@ -62,6 +62,7 @@ def available_gib() -> float:
 
 
 def run(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser()
     choice = parser.add_mutually_exclusive_group(required=True)
     choice.add_argument("--model")
@@ -71,7 +72,7 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--lock-timeout", type=int, default=7200)
     parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
@@ -97,7 +98,7 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
             flush=True,
         )
-        inner = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+        inner = [sys.executable, str(Path(__file__).resolve()), *raw_argv]
         env = dict(os.environ, RAPID_LARGE_MODEL_LOCK_HELD="1")
         return subprocess.call(
             [lockf, "-k", "-t", str(args.lock_timeout), str(args.lock_file), *inner],
