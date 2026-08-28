@@ -458,6 +458,144 @@ struct ChatImageAttachmentTests {
         }
     }
 
+    private func tempDirectory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-img-budget-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    /// Creates real files with the given byte sizes so
+    /// `importCandidates` (which reads `fileSizeKey`) sees real sizes.
+    private func materialize(_ files: [(name: String, size: Int)], in root: URL) throws -> [URL] {
+        try files.map { entry in
+            let url = root.appendingPathComponent(entry.name)
+            try Data(repeating: 0, count: entry.size).write(to: url)
+            return url
+        }
+    }
+
+    @Test("importCandidates enforces the count and aggregate-byte boundaries")
+    func importCandidatesBoundaries() throws {
+        let root = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Count boundary: 6 files, 4-slot budget => 4 accepted, 2 rejected.
+        let six = try materialize([
+            ("a.png", 100), ("b.png", 100), ("c.png", 100),
+            ("d.png", 100), ("e.png", 100), ("f.png", 100),
+        ], in: root)
+        let countSelection = ChatImageAttachment.importCandidates(
+            six, existingCount: 0, existingBytes: 0
+        )
+        #expect(countSelection.accepted == Array(six.prefix(ChatImageAttachment.maxImagesPerMessage)))
+        #expect(countSelection.rejectedCount == 6 - ChatImageAttachment.maxImagesPerMessage)
+
+        // Aggregate-byte boundary: an image over the remaining aggregate budget
+        // is skipped (its per-file 20 MB check still happens at read time), while
+        // a following image that fits is still admitted.
+        let max = ChatImageAttachment.maxCombinedImageBytes
+        let half = max / 2
+        let big = try materialize([
+            ("big.png", max + 1), ("small.png", 100),
+        ], in: root)
+        let bigSelection = ChatImageAttachment.importCandidates(
+            big, existingCount: 0, existingBytes: 0
+        )
+        #expect(bigSelection.accepted == [big[1]])
+        #expect(bigSelection.rejectedCount == 1)
+
+        let thirds = try materialize([
+            ("one.png", half), ("two.png", half), ("three.png", 100),
+        ], in: root)
+        let thirdsSelection = ChatImageAttachment.importCandidates(
+            thirds, existingCount: 0, existingBytes: 0
+        )
+        // half+half fits exactly (== budget), the third is over.
+        #expect(thirdsSelection.accepted == Array(thirds.prefix(2)))
+        #expect(thirdsSelection.rejectedCount == 1)
+
+        // Existing budget/bytes are honored.
+        let withExisting = ChatImageAttachment.importCandidates(
+            [thirds[2]], existingCount: 4, existingBytes: 0
+        )
+        #expect(withExisting.accepted.isEmpty)
+        #expect(withExisting.rejectedCount == 1)
+    }
+
+    @Test("importCandidates admits a mixed accepted/rejected batch in selection order")
+    func importCandidatesMixedBatch() throws {
+        let root = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let max = ChatImageAttachment.maxCombinedImageBytes
+        // First fits, second is over the aggregate budget, third fits again
+        // only if the second was skipped and bytes remain.
+        let urls = try materialize([
+            ("keep.png", 10), ("oversize.png", max), ("keep2.png", 10),
+        ], in: root)
+        let selection = ChatImageAttachment.importCandidates(
+            urls, existingCount: 0, existingBytes: 0
+        )
+        #expect(selection.accepted == [urls[0], urls[2]])
+        #expect(selection.rejectedCount == 1)
+    }
+
+    @Test("fittedForMessage caps count and keeps only images that fit the combined budget")
+    func fittedForMessageBoundaries() throws {
+        let small = try ChatImageAttachment(
+            filename: "a.png", mimeType: "image/png", data: Data(repeating: 1, count: 10)
+        )
+        let big = try ChatImageAttachment(
+            filename: "b.png", mimeType: "image/png",
+            data: Data(repeating: 2, count: ChatImageAttachment.maxCombinedImageBytes)
+        )
+        let many = try ChatImageAttachment(
+            filename: "c.png", mimeType: "image/png", data: Data(repeating: 3, count: 10)
+        )
+        // A single image that fills the whole budget leaves room for nothing else.
+        #expect(ChatImageAttachment.fittedForMessage([big, small, many]) == [big])
+        // When the big image is not first, it cannot coexist with the two small
+        // images that already used some budget; the small ones are kept.
+        #expect(ChatImageAttachment.fittedForMessage([small, big, many]) == [small, many])
+        // Count cap: 6 small images fit bytes but not count.
+        let sixSmall = try (0..<6).map {
+            try ChatImageAttachment(
+                filename: "\($0).png", mimeType: "image/png", data: Data(repeating: 1, count: 10)
+            )
+        }
+        #expect(ChatImageAttachment.fittedForMessage(sixSmall).count
+            == ChatImageAttachment.maxImagesPerMessage)
+    }
+
+    @Test("wire request never exceeds the accepted, bounded image set")
+    func wireRequestStaysWithinImageBudget() throws {
+        // Distinct byte payloads keep each base64 encoding unique so the wire
+        // can be checked for exactly which images were admitted.
+        let many = try (0..<ChatImageAttachment.maxImagesPerMessage + 5).map { index in
+            try ChatImageAttachment(
+                filename: "\(index).png",
+                mimeType: "image/png",
+                data: Data(repeating: UInt8(64 + index), count: 10)
+            )
+        }
+        let admitted = ChatImageAttachment.fittedForMessage(many)
+        #expect(admitted.count == ChatImageAttachment.maxImagesPerMessage)
+        let request = ChatStreamClient.Request(
+            alias: "qwen3.5-9b-4bit",
+            messages: [
+                ChatMessage(role: .user, content: "Describe", imageAttachments: admitted)
+            ]
+        )
+        let wire = String(decoding: try JSONEncoder().encode(request.messages), as: UTF8.self)
+        for attachment in admitted {
+            #expect(wire.contains(attachment.data.base64EncodedString()))
+        }
+        let rejected = Array(many.dropFirst(ChatImageAttachment.maxImagesPerMessage))
+        for rejectedImage in rejected {
+            #expect(!wire.contains(rejectedImage.data.base64EncodedString()))
+        }
+    }
+
     private static func writeSolidImage(
         to url: URL,
         width: Int,

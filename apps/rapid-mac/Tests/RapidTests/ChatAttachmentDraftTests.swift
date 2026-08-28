@@ -274,6 +274,172 @@ struct ChatAttachmentDraftTests {
         #expect(draft.images == [second])
     }
 
+    @Test("appendImage enforces the per-message image count and byte budget")
+    func appendImageEnforcesImageBudget() throws {
+        var draft = ChatAttachmentDraft()
+        // Fill the count slot.
+        for index in 0..<ChatImageAttachment.maxImagesPerMessage {
+            let appended = draft.appendImage(try makeImage(name: "\(index).png"))
+            #expect(appended)
+        }
+        // Count budget exhausted: a fitted image is rejected.
+        let countRejected = draft.appendImage(try makeImage(name: "overflow.png"))
+        #expect(!countRejected)
+        #expect(draft.images.count == ChatImageAttachment.maxImagesPerMessage)
+
+        // Byte budget exhausted: each image is individually under the per-file
+        // 20 MB cap, but two that together exceed the 20 MB aggregate cannot
+        // both be appended.
+        var byteDraft = ChatAttachmentDraft()
+        let large = try makeImage(name: "big.png", bytes: 20 * 1024 * 1024 - 1)
+        let largeAccepted = byteDraft.appendImage(large)
+        #expect(largeAccepted)
+        let another = try makeImage(name: "another.png", bytes: 20 * 1024 * 1024 - 1)
+        let byteRejected = byteDraft.appendImage(another)
+        #expect(!byteRejected)
+        #expect(byteDraft.images == [large])
+    }
+
+    @Test("appendImages keeps only the batch that fits and reports the rejected count")
+    func appendImagesGatesMixedBatch() throws {
+        var draft = ChatAttachmentDraft()
+        // The first image alone fits; together the pair exceeds 20 MB aggregate,
+        // so the second is dropped and counted as rejected.
+        let first = try makeImage(name: "first.png", bytes: 12 * 1024 * 1024)
+        let second = try makeImage(name: "second.png", bytes: 12 * 1024 * 1024)
+
+        let rejectedCount = draft.appendImages([
+            (first, URL(fileURLWithPath: "/tmp/first.png")),
+            (second, URL(fileURLWithPath: "/tmp/second.png")),
+        ])
+        #expect(rejectedCount == 1)
+        #expect(draft.images == [first])
+        #expect(draft.sourcePaths.count == 1)
+        #expect(draft.sourcePaths[first.id] != nil)
+        #expect(draft.sourcePaths[second.id] == nil)
+    }
+
+    @Test("duplicate paths are filtered before the budget gate so they consume budget once")
+    func duplicatesAreDedupedBeforeBudgetGate() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-dedup-budget-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Six references to one path. Dedup must collapse them to a single
+        // candidate so the 4-slot count budget is charged once, not six times.
+        let file = root.appendingPathComponent("photo.png")
+        try Data(repeating: 0, count: 100).write(to: file)
+        let batch = Array(repeating: file, count: 6)
+
+        // What addAttachmentURLs does first: dedup the batch.
+        let (fresh, duplicates) = ChatAttachmentDraft.withoutAlreadyAttached(
+            batch, attached: []
+        )
+        #expect(fresh == [file])
+        #expect(duplicates == 5)
+
+        // Then the image budget gate sees only the single fresh path and accepts
+        // it (and, having been deduped, it is charged once).
+        let selection = ChatImageAttachment.importCandidates(
+            fresh, existingCount: 0, existingBytes: 0
+        )
+        #expect(selection.accepted == [file])
+        #expect(selection.rejectedCount == 0)
+
+        // If dedup had NOT run first, the raw six would consume four slots:
+        // prove the gate alone would have under-promised.
+        let withoutDedup = ChatImageAttachment.importCandidates(
+            batch, existingCount: 0, existingBytes: 0
+        )
+        #expect(withoutDedup.rejectedCount > 0)
+    }
+
+    @Test("a submission (the wire request) never exceeds the accepted, bounded image set")
+    func submissionStaysWithinImageBudget() throws {
+        var draft = ChatAttachmentDraft()
+        // Push far more images than the budget admits; the draft gate holds the
+        // count, and takeSubmission snapshots only what fits. The request is
+        // built from this snapshot, so it is bounded by construction.
+        for index in 0..<ChatImageAttachment.maxImagesPerMessage + 5 {
+            _ = draft.appendImage(try makeImage(name: "\(index).png"))
+        }
+        let submission = draft.takeSubmission()
+        #expect(submission.images.count == ChatImageAttachment.maxImagesPerMessage)
+        #expect(submission.images.reduce(0) { $0 + $1.data.count }
+            <= ChatImageAttachment.maxCombinedImageBytes)
+    }
+
+    @Test("a deleted conversation cannot be resurrected by a late image import")
+    func deletedConversationRejectsImageCompletion() throws {
+        let deletedConversation = UUID()
+        let survivingConversation = UUID()
+        var store = ChatAttachmentDraftStore()
+        let startedImport = store.beginImageImport(conversationID: deletedConversation)
+        let importID = try #require(startedImport)
+
+        let late = try makeImage(name: "late.png")
+        store.retainDrafts(for: [survivingConversation])
+        let accepted = store.finishImageImport(
+            request: importID,
+            [(late, URL(fileURLWithPath: "/tmp/late.png"))],
+            notice: nil
+        )
+
+        #expect(!accepted)
+        #expect(!store[deletedConversation].hasAttachments)
+        #expect(!store[deletedConversation].isImportingFiles)
+    }
+
+    @Test("switching conversations mid-image-import cannot land images in the visible draft")
+    func imageImportCannotResurrectAcrossConversations() throws {
+        let conversationA = UUID()
+        let conversationB = UUID()
+        let late = try makeImage(name: "late.png")
+        var store = ChatAttachmentDraftStore()
+
+        let startedA = store.beginImageImport(conversationID: conversationA)
+        let importA = try #require(startedA)
+        // Switch to B after import A started.
+        store.beginImageImport(conversationID: conversationB)
+
+        let accepted = store.finishImageImport(
+            request: importA,
+            [(late, URL(fileURLWithPath: "/tmp/late.png"))],
+            notice: nil
+        )
+
+        #expect(accepted)
+        #expect(store[conversationA].images == [late])
+        #expect(store[conversationB].images.isEmpty)
+    }
+
+    @Test("ChatView gates images before importing and keeps dedup upstream")
+    func imageBudgetWiringIntoChatView() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/Rapid/UI/ChatView.swift"),
+            encoding: .utf8
+        )
+        let stripped = CapabilityChipRenderGateSourceGuardTests
+            .stripCommentsAndWhitespace(source)
+
+        // The pre-read budget gate runs before any beginImageImport/read work.
+        let gated = stripped.contains(
+            "letselection=ChatImageAttachment.importCandidates(urls,existingCount:attachmentDraft.images.count,existingBytes:attachmentDraft.images.reduce(0){$0+$1.data.count})"
+        )
+        #expect(gated, "addImageURLs no longer gates image candidates before import.")
+        #expect(stripped.contains(
+            "Self.loadImageAttachments(selection.accepted)"
+        ), "addImageURLs must load only the budgeted candidates, not the whole selection.")
+        #expect(stripped.contains(
+            "attachmentDraft.filteringAlreadyAttached(urls)"
+        ), "Dedup must remain the first step so duplicates never reach the budget gate twice.")
+    }
+
     @Test("ChatView writes async completion through the originating conversation key")
     func lifecycleIsWiredIntoChatView() throws {
         let source = try String(
@@ -297,11 +463,11 @@ struct ChatAttachmentDraftTests {
         #expect(stripped.contains(".onChange(of:viewModel.conversations.map(\\.id)){_,_inpruneAttachmentDrafts()}"))
     }
 
-    private func makeImage(name: String) throws -> ChatImageAttachment {
+    private func makeImage(name: String, bytes: Int = 4) throws -> ChatImageAttachment {
         try ChatImageAttachment(
             filename: name,
             mimeType: "image/png",
-            data: Data([0x89, 0x50, 0x4E, 0x47])
+            data: Data(repeating: 0x47, count: bytes)
         )
     }
 
