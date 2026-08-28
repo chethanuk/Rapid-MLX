@@ -13,6 +13,7 @@ milestones have independent numerical and lifecycle coverage.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, cast
@@ -716,7 +717,24 @@ class QSAIndexer(nn.Module):
                 base=self.rope_theta,
             )[:, 0, 0, :]
 
-        cache.update(raw_keys, transform_group)
+        def transform_groups(groups: mx.array, starts: mx.array) -> mx.array:
+            normalized = self.k_layernorm(groups)
+            return apply_qwen4_exp_rope(
+                normalized[:, None, :, :],
+                starts[None, :],
+                rotary_dim=self.rotary_dim,
+                base=self.rope_theta,
+            )[:, 0, :, :]
+
+        cache.update(
+            raw_keys,
+            transform_group,
+            transform_groups=(
+                transform_groups
+                if os.getenv("RAPID_MLX_QSA_VECTORIZED_CACHE", "1") != "0"
+                else None
+            ),
+        )
         # The architecture reference stays on ordinary causal attention while
         # every complete block fits the QSA budget. Preserve that exact math
         # and kernel selection while still updating Rapid's persistent index

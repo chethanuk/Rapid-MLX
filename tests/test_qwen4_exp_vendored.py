@@ -525,6 +525,95 @@ def test_qsa_cache_keeps_only_raw_ring_and_persistent_compressed_keys():
     )
 
 
+@pytest.mark.parametrize("length", [1, 4, 7, 8, 9])
+def test_qsa_cache_vectorized_aligned_prefill_matches_scalar_update(length):
+    values = mx.arange(length, dtype=mx.float32).reshape(1, length, 1)
+
+    def transform(group, start):
+        return group + start
+
+    def transform_many(groups, starts):
+        return groups + starts[None, :, None]
+
+    scalar = QSAIndexCache(compress_ratio=4)
+    vectorized = QSAIndexCache(compress_ratio=4)
+    scalar.update(values, transform)
+    vectorized.update(values, transform, transform_groups=transform_many)
+    mx.eval(scalar.state, vectorized.state)
+
+    assert scalar.meta_state == vectorized.meta_state
+    np.testing.assert_array_equal(
+        np.array(scalar.raw_ring), np.array(vectorized.raw_ring)
+    )
+    if scalar.compressed_keys is None:
+        assert vectorized.compressed_keys is None
+    else:
+        np.testing.assert_array_equal(
+            np.array(scalar.compressed_keys), np.array(vectorized.compressed_keys)
+        )
+
+
+def test_qsa_cache_vectorized_chunks_and_scalar_tail_keep_identical_state():
+    def transform(group, start):
+        return group + start
+
+    def transform_many(groups, starts):
+        return groups + starts[None, :, None]
+
+    scalar = QSAIndexCache(compress_ratio=4)
+    vectorized = QSAIndexCache(compress_ratio=4)
+    for start, length in ((0, 8), (8, 7), (15, 1), (16, 5)):
+        values = mx.arange(start, start + length, dtype=mx.float32).reshape(
+            1, length, 1
+        )
+        scalar.update(values, transform)
+        vectorized.update(values, transform, transform_groups=transform_many)
+        mx.eval(scalar.state, vectorized.state)
+        assert scalar.meta_state == vectorized.meta_state
+        np.testing.assert_array_equal(
+            np.array(scalar.raw_ring), np.array(vectorized.raw_ring)
+        )
+        np.testing.assert_array_equal(
+            np.array(scalar.compressed_keys), np.array(vectorized.compressed_keys)
+        )
+
+
+def test_qsa_vectorized_cache_default_matches_scalar_attention(monkeypatch):
+    args = _args(
+        indexer_budget=4,
+        indexer_compress_ratio=2,
+        rope_parameters={"rope_theta": 10_000_000, "partial_rotary_factor": 0.5},
+    )
+    attention = QSAAttention(args)
+    prompt = mx.arange(9 * args.hidden_size, dtype=mx.float32).reshape(
+        1, 9, args.hidden_size
+    )
+
+    monkeypatch.setenv("RAPID_MLX_QSA_VECTORIZED_CACHE", "0")
+    scalar_cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
+    scalar = attention(prompt, scalar_cache)
+    mx.eval(scalar, scalar_cache.state)
+
+    monkeypatch.delenv("RAPID_MLX_QSA_VECTORIZED_CACHE")
+    vectorized_cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
+    vectorized = attention(prompt, vectorized_cache)
+    mx.eval(vectorized, vectorized_cache.state)
+
+    np.testing.assert_array_equal(np.array(scalar), np.array(vectorized))
+    for scalar_state, vectorized_state in zip(
+        scalar_cache.state, vectorized_cache.state
+    ):
+        if isinstance(scalar_state, tuple):
+            for scalar_array, vectorized_array in zip(scalar_state, vectorized_state):
+                np.testing.assert_array_equal(
+                    np.array(scalar_array), np.array(vectorized_array)
+                )
+        else:
+            np.testing.assert_array_equal(
+                np.array(scalar_state), np.array(vectorized_state)
+            )
+
+
 @pytest.mark.parametrize("length", [8, 9])
 def test_qsa_cache_rewinds_recoverable_group_and_recomputes_divergence(length):
     def transform(group, start):
