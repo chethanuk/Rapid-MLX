@@ -35,6 +35,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 from vllm_mlx.api.utils import (
     AUTO_TEXT_FALLBACK_REASONS,
     SERVING_LANE_REASONS,
@@ -132,18 +134,50 @@ def _decision_reasons() -> dict[str, tuple[bool, bool]]:
     return found
 
 
-def _assignment_target(target: ast.expr) -> str | None:
+def _assignment_targets(target: ast.expr) -> list[str]:
     if isinstance(target, ast.Name):
-        return target.id
+        return [target.id]
     if isinstance(target, ast.Attribute):
         owner = ast.unparse(target.value)
-        return f"{owner}.{target.attr}"
-    return None
+        return [f"{owner}.{target.attr}"]
+    if isinstance(target, (ast.List, ast.Tuple)):
+        return [name for item in target.elts for name in _assignment_targets(item)]
+    return []
+
+
+# Dynamic assignments are allowed only when their exact source has already
+# crossed a validated boundary. Keeping this roster exact makes the scanner
+# fail closed on a new local variable, attribute, call, or destructuring site.
+_VALIDATED_REASON_PASSTHROUGHS = frozenset(
+    {
+        (
+            "engine/batched.py",
+            "self._serving_lane_reason",
+            "serving_lane_reason",
+        ),
+        (
+            "server.py",
+            "_serving_lane_reason",
+            "_serving_checkpoint.lane_reason",
+        ),
+        (
+            "server.py",
+            "serving_lane_reason",
+            "serving_checkpoint.lane_reason",
+        ),
+        (
+            "routes/models.py",
+            "serving_lane_reason",
+            "_served_lane_fields(model_id)",
+        ),
+    }
+)
 
 
 def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
     """Static reason values assigned to reason fields anywhere in the engine tree."""
     found: set[str] = set()
+    seen_passthroughs: set[tuple[str, str, str]] = set()
     for path in ENGINE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         constants = _module_string_constants(tree)
@@ -151,12 +185,11 @@ def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
             if not isinstance(node, (ast.Assign, ast.AnnAssign)):
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = [_assignment_target(target) for target in targets]
+            names = [name for target in targets for name in _assignment_targets(target)]
             selected = [
                 name
                 for name in names
-                if name is not None
-                and (
+                if (
                     name == exact_target
                     if exact_target is not None
                     else name.endswith("serving_lane_reason")
@@ -169,10 +202,19 @@ def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
                 # Optional response/schema fields are initialized empty; they
                 # are not reason emitters.
                 continue
-            if isinstance(value, ast.Name) and value.id not in constants:
-                # Runtime pass-through from an already validated decision/profile.
-                continue
-            if isinstance(value, ast.Attribute) and value.attr == "lane_reason":
+            if not (
+                isinstance(value, ast.Constant) and isinstance(value.value, str)
+            ) and not (isinstance(value, ast.Name) and value.id in constants):
+                relative_path = path.relative_to(ENGINE).as_posix()
+                source = ast.unparse(value)
+                passthroughs = {(relative_path, name, source) for name in selected}
+                unknown = passthroughs - _VALIDATED_REASON_PASSTHROUGHS
+                assert not unknown, (
+                    "unvalidated dynamic serving-lane reason assignment(s): "
+                    f"{sorted(unknown)}. Route the value through the shared "
+                    "invariant, then add only that exact pass-through here."
+                )
+                seen_passthroughs.update(passthroughs)
                 continue
             found.add(
                 _string_value(
@@ -181,7 +223,32 @@ def _literal_assignments(*, exact_target: str | None = None) -> set[str]:
                     context=f"reason assignment at {path}:{node.lineno}",
                 )
             )
+    if exact_target is None:
+        assert seen_passthroughs == _VALIDATED_REASON_PASSTHROUGHS, (
+            "validated serving-lane pass-through roster drifted:\n"
+            f"missing: {sorted(_VALIDATED_REASON_PASSTHROUGHS - seen_passthroughs)}\n"
+            f"unexpected: {sorted(seen_passthroughs - _VALIDATED_REASON_PASSTHROUGHS)}"
+        )
     return found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def assign(self, local_reason):\n    self._serving_lane_reason = local_reason\n",
+        "def assign():\n    lane, serving_lane_reason = resolve()\n",
+    ],
+)
+def test_dynamic_reason_assignment_scanner_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+):
+    (tmp_path / "dynamic.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "ENGINE", tmp_path)
+
+    with pytest.raises(AssertionError, match="unvalidated dynamic"):
+        _literal_assignments()
 
 
 def _engine_reasons() -> dict[str, bool]:
