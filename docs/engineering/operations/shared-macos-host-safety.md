@@ -19,8 +19,10 @@ deleted by this command.
 `--apply` is destructive and is reserved for an explicitly authorized cleanup.
 Even then, a worktree must be older than six hours, live below the configured
 scratch root, be porcelain-clean, have an upstream, have no unpushed commits,
-and have no open files. The script rechecks those conditions immediately before
-removal and uses `git worktree remove` rather than deleting a registered tree.
+A branch with an open pull request is retained, and inability to read pull
+request state makes every worktree ineligible. The script also requires no open
+files, rechecks all conditions immediately before removal, and uses
+`git worktree remove` rather than deleting a registered tree.
 A dogfood directory needs both tool-owned and operator-finished markers.
 
 ## Run model loads

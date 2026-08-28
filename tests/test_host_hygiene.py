@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -81,9 +82,19 @@ def test_worktree_is_eligible_only_when_clean_old_and_pushed(
     os.utime(tree, (old, old))
     monkeypatch.setattr(studio_hygiene, "in_use", lambda _: False)
     row = next(row for row in studio_hygiene.worktrees(repo) if row["path"] == tree)
-    assert studio_hygiene.classify_worktree(repo, row, time.time() - 3600) == "eligible"
+    assert (
+        studio_hygiene.classify_worktree(repo, row, time.time() - 3600, set())
+        == "eligible"
+    )
+    assert (
+        studio_hygiene.classify_worktree(repo, row, time.time() - 3600, {"safe"})
+        == "open-pr"
+    )
     (tree / "tracked").write_text("dirty\n")
-    assert studio_hygiene.classify_worktree(repo, row, time.time() - 3600) == "dirty"
+    assert (
+        studio_hygiene.classify_worktree(repo, row, time.time() - 3600, set())
+        == "dirty"
+    )
 
 
 def test_apply_uses_git_to_remove_only_an_eligible_worktree(
@@ -110,6 +121,7 @@ def test_apply_uses_git_to_remove_only_an_eligible_worktree(
     os.utime(tree, (old, old))
     monkeypatch.setattr(studio_hygiene, "in_use", lambda _: False)
     monkeypatch.setattr(studio_hygiene, "mounted_images", lambda: [])
+    monkeypatch.setattr(studio_hygiene, "open_pr_heads", lambda _: set())
     assert (
         studio_hygiene.main(
             [
@@ -149,6 +161,29 @@ def test_only_explicitly_finished_dogfood_is_a_candidate(
     assert studio_hygiene.finished_dogfood_dirs(tmp_path, time.time() - 3600) == [
         finished
     ]
+
+
+def test_only_old_unused_rapid_temp_dmg_mount_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "rapid-mlx-desktop.udrw.dmg"
+    image.write_bytes(b"stub")
+    mount = Path(tempfile.mkdtemp(prefix="rapid-test-dmg-mount.", dir="/private/tmp"))
+    old = time.time() - 10_000
+    os.utime(image, (old, old))
+    os.utime(mount, (old, old))
+    monkeypatch.setattr(studio_hygiene, "in_use", lambda _: False)
+    try:
+        assert studio_hygiene.stale_rapid_dmg(image, mount, time.time() - 3600)
+        other = tmp_path / "personal-backup.dmg"
+        other.write_bytes(b"stub")
+        os.utime(other, (old, old))
+        assert not studio_hygiene.stale_rapid_dmg(other, mount, time.time() - 3600)
+        assert not studio_hygiene.stale_rapid_dmg(
+            image, Path("/Volumes/Rapid-MLX"), time.time() - 3600
+        )
+    finally:
+        mount.rmdir()
 
 
 def test_hygiene_default_is_dry_run_and_never_removes_models() -> None:
