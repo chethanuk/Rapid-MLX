@@ -25,24 +25,6 @@ ACTIVATION_FIRST_CHAT_REPLY = "first_chat_reply"
 ACTIVATION_FIRST_VISION_REPLY = "first_vision_reply"
 ACTIVATION_FIRST_DICTATION = "first_dictation"
 ACTIVATION_FIRST_IMAGE = "first_image"
-DESKTOP_ACTIVATION_KINDS: frozenset[str] = frozenset(
-    {
-        ACTIVATION_FIRST_CHAT_REPLY,
-        ACTIVATION_FIRST_VISION_REPLY,
-        ACTIVATION_FIRST_DICTATION,
-        ACTIVATION_FIRST_IMAGE,
-    }
-)
-ACTIVATION_KINDS: frozenset[str] = (
-    frozenset(
-        {
-            ACTIVATION_FIRST_INFERENCE,
-            ACTIVATION_MODEL_PULL,
-            ACTIVATION_AGENT_SETUP,
-        }
-    )
-    | DESKTOP_ACTIVATION_KINDS
-)
 
 # Where the milestone happened. ``cli`` = the interactive REPL / a CLI
 # subcommand; ``api`` = the HTTP server serving an external caller;
@@ -50,9 +32,35 @@ ACTIVATION_KINDS: frozenset[str] = (
 SURFACE_CLI = "cli"
 SURFACE_API = "api"
 SURFACE_DESKTOP = "desktop"
-ACTIVATION_SURFACES: frozenset[str] = frozenset(
-    {SURFACE_CLI, SURFACE_API, SURFACE_DESKTOP}
+ACTIVATION_KIND_SURFACE_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (ACTIVATION_FIRST_INFERENCE, SURFACE_CLI),
+        (ACTIVATION_FIRST_INFERENCE, SURFACE_API),
+        (ACTIVATION_MODEL_PULL, SURFACE_CLI),
+        (ACTIVATION_AGENT_SETUP, SURFACE_CLI),
+        (ACTIVATION_FIRST_CHAT_REPLY, SURFACE_DESKTOP),
+        (ACTIVATION_FIRST_VISION_REPLY, SURFACE_DESKTOP),
+        (ACTIVATION_FIRST_DICTATION, SURFACE_DESKTOP),
+        (ACTIVATION_FIRST_IMAGE, SURFACE_DESKTOP),
+    }
 )
+ACTIVATION_KINDS: frozenset[str] = frozenset(
+    kind for kind, _ in ACTIVATION_KIND_SURFACE_PAIRS
+)
+ACTIVATION_SURFACES: frozenset[str] = frozenset(
+    surface for _, surface in ACTIVATION_KIND_SURFACE_PAIRS
+)
+DESKTOP_ACTIVATION_KINDS: frozenset[str] = frozenset(
+    kind
+    for kind, surface in ACTIVATION_KIND_SURFACE_PAIRS
+    if surface == SURFACE_DESKTOP
+)
+
+
+def is_allowed_activation(activation_kind: str, surface: str) -> bool:
+    """Return whether a milestone is valid on the supplied product surface."""
+    return (activation_kind, surface) in ACTIVATION_KIND_SURFACE_PAIRS
+
 
 # ``rapid-mlx chat`` spawns its own ephemeral ``serve`` and drives it over
 # HTTP, so first_inference is emitted at the server-side success chokepoint

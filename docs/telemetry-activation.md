@@ -89,6 +89,11 @@ the event-specific payload is:
 
 No prompt, no completion, no content of any kind — two enums only. This is
 the same privacy class as the `first_session` / `auto_selected` booleans.
+Kinds and surfaces are a closed pair contract, not independent allowlists: only
+the combinations listed in the milestone table above are valid. Engine
+`first_inference` may use `cli` or `api`; `model_pull` and `agent_setup` use
+`cli`; every Desktop kind uses `desktop`. Producers drop any other pairing
+before creating a marker or event.
 
 ### Why a dedicated event and not derivation from `request`
 
