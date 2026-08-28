@@ -1372,6 +1372,52 @@ class TestResolveServingLane:
         )
 
 
+class TestServingLaneDecisionValidation:
+    """The SSOT membership checks on ``ServingLaneDecision`` fail fast."""
+
+    def test_unknown_reason_is_rejected(self):
+        from vllm_mlx.api.utils import ServingLaneDecision
+
+        with pytest.raises(ValueError, match="unknown serving_lane_reason"):
+            ServingLaneDecision(False, "operator_forced_text")
+
+    def test_auto_text_fallback_with_non_downgrade_reason_is_rejected(self):
+        from vllm_mlx.api.utils import ServingLaneDecision
+
+        # A vision-lane reason is not a silent downgrade, so pairing it with
+        # auto_text_fallback=True must fail (it would reach the generic copy).
+        with pytest.raises(
+            ValueError, match="cannot be paired with auto_text_fallback"
+        ):
+            ServingLaneDecision(True, "vision_supported", auto_text_fallback=True)
+
+    def test_auto_text_fallback_with_downgrade_reason_is_accepted(self):
+        from vllm_mlx.api.utils import ServingLaneDecision
+
+        decision = ServingLaneDecision(
+            False, "vision_memory_insufficient", auto_text_fallback=True
+        )
+        assert decision.reason == "vision_memory_insufficient"
+        assert decision.auto_text_fallback is True
+
+    def test_ssot_members_are_all_constructible(self):
+        from vllm_mlx.api.utils import (
+            AUTO_TEXT_FALLBACK_REASONS,
+            SERVING_LANE_REASONS,
+            ServingLaneDecision,
+        )
+
+        # Every reason the SSOT names must be a valid construction — this would
+        # catch the set drifting from what the decision function emits. Every
+        # auto-fallback reason must also pass the flag.
+        for reason in SERVING_LANE_REASONS:
+            ServingLaneDecision(False, reason)
+        for reason in AUTO_TEXT_FALLBACK_REASONS:
+            ServingLaneDecision(False, reason, auto_text_fallback=True)
+        # Auto-fallback members are a strict subset of all reasons.
+        assert AUTO_TEXT_FALLBACK_REASONS <= SERVING_LANE_REASONS
+
+
 class TestExtractMultimodalContent:
     """Tests for extract_multimodal_content function."""
 
