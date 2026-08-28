@@ -249,13 +249,15 @@ without that copy; the rejected gather path is not included in the candidate.
 ## QSA compressed-key cache follow-up
 
 The next 0.13.2 candidate batches QSA compressed-key pooling, normalization,
-RoPE, and cache insertion for the common aligned single-request prefill path.
+RoPE, and cache insertion for aligned single-request prefills containing at
+least two complete compression groups.
 Previously, each QSA layer processed one four-token compression group at a
 time. A 32K request therefore scheduled thousands of small array operations
 before attention began. The candidate performs the same FP32 group mean and
-per-group transforms as one device batch. Continuous batches, padded rows, and
-prefills that begin inside a compression group retain the scalar compatibility
-path. `RAPID_MLX_QSA_VECTORIZED_CACHE=0` is the A/B escape hatch.
+per-group transforms as one device batch. Decode and one-group speculative
+verification receive no batching benefit, so those paths retain their existing
+cache-update order. Continuous batches, padded rows, and prefills that begin
+inside a compression group likewise retain the lifecycle-compatible path.
 
 The comparison below uses the previous vectorized-mask candidate as its
 baseline, so it measures only the compressed-key cache change. Both sides ran

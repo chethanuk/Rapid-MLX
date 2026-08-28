@@ -13,7 +13,6 @@ milestones have independent numerical and lifecycle coverage.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, cast
@@ -729,11 +728,7 @@ class QSAIndexer(nn.Module):
         cache.update(
             raw_keys,
             transform_group,
-            transform_groups=(
-                transform_groups
-                if os.getenv("RAPID_MLX_QSA_VECTORIZED_CACHE", "1") != "0"
-                else None
-            ),
+            transform_groups=transform_groups,
         )
         # The architecture reference stays on ordinary causal attention while
         # every complete block fits the QSA budget. Preserve that exact math

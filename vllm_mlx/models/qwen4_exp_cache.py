@@ -145,6 +145,7 @@ class QSAIndexCache(ArraysCache):
             and batch == 1
             and valid_spans == [(0, length)]
             and self._offsets[0] % self.compress_ratio == 0
+            and length // self.compress_ratio >= 2
         ):
             return self._update_aligned_single_row(raw_keys, transform_groups)
         if self.raw_ring is None:
@@ -224,7 +225,13 @@ class QSAIndexCache(ArraysCache):
             ring = raw_keys[:, complete_length - ratio : complete_length, :]
         remainder = length - complete_length
         if remainder:
-            ring[:, :remainder, :] = raw_keys[:, complete_length:, :]
+            ring = mx.concatenate(
+                [
+                    raw_keys[:, complete_length:, :],
+                    ring[:, remainder:, :],
+                ],
+                axis=1,
+            )
         self.raw_ring = ring
 
         old_count = self._compressed_counts[0]

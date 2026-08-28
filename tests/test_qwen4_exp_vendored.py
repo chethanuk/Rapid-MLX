@@ -578,7 +578,7 @@ def test_qsa_cache_vectorized_chunks_and_scalar_tail_keep_identical_state():
         )
 
 
-def test_qsa_vectorized_cache_default_matches_scalar_attention(monkeypatch):
+def test_qsa_vectorized_cache_matches_architecture_reference():
     args = _args(
         indexer_budget=4,
         indexer_compress_ratio=2,
@@ -588,30 +588,35 @@ def test_qsa_vectorized_cache_default_matches_scalar_attention(monkeypatch):
     prompt = mx.arange(9 * args.hidden_size, dtype=mx.float32).reshape(
         1, 9, args.hidden_size
     )
+    projected = attention.indexer.index_qk_proj(prompt)
+    query_width = args.indexer_n_heads * args.indexer_head_dim
+    _, raw_keys = mx.split(projected, [query_width], axis=-1)
+    raw_keys = raw_keys.reshape(1, 9, 1, args.indexer_head_dim).squeeze(2)
+    pooled = mx.mean(
+        raw_keys[:, :8, :].reshape(1, 4, 2, args.indexer_head_dim).astype(mx.float32),
+        axis=2,
+    ).astype(raw_keys.dtype)
+    normalized = attention.indexer.k_layernorm(pooled)
+    expected = apply_qwen4_exp_rope(
+        normalized[:, None, :, :],
+        mx.arange(0, 8, 2, dtype=mx.int64)[None, :],
+        rotary_dim=attention.indexer.rotary_dim,
+        base=attention.indexer.rope_theta,
+    )[:, 0, :, :]
+    mx.eval(expected, raw_keys)
 
-    monkeypatch.setenv("RAPID_MLX_QSA_VECTORIZED_CACHE", "0")
-    scalar_cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
-    scalar = attention(prompt, scalar_cache)
-    mx.eval(scalar, scalar_cache.state)
+    cache = QSAIndexCache(compress_ratio=2)
+    attention.indexer(prompt, cache, physical_kv_length=9)
+    mx.eval(expected, cache.state)
 
-    monkeypatch.delenv("RAPID_MLX_QSA_VECTORIZED_CACHE")
-    vectorized_cache = CacheList(KVCache(), QSAIndexCache(compress_ratio=2))
-    vectorized = attention(prompt, vectorized_cache)
-    mx.eval(vectorized, vectorized_cache.state)
-
-    np.testing.assert_array_equal(np.array(scalar), np.array(vectorized))
-    for scalar_state, vectorized_state in zip(
-        scalar_cache.state, vectorized_cache.state
-    ):
-        if isinstance(scalar_state, tuple):
-            for scalar_array, vectorized_array in zip(scalar_state, vectorized_state):
-                np.testing.assert_array_equal(
-                    np.array(scalar_array), np.array(vectorized_array)
-                )
-        else:
-            np.testing.assert_array_equal(
-                np.array(scalar_state), np.array(vectorized_state)
-            )
+    assert cache._compressed_count == 4
+    np.testing.assert_array_equal(
+        np.array(cache.compressed_keys[:, :4, :]), np.array(expected)
+    )
+    np.testing.assert_array_equal(
+        np.array(cache.raw_ring),
+        np.array(mx.concatenate([raw_keys[:, 8:9, :], raw_keys[:, 7:8, :]], axis=1)),
+    )
 
 
 @pytest.mark.parametrize("length", [8, 9])
