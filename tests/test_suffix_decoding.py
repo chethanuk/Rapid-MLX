@@ -156,12 +156,31 @@ class TestValidation:
     def test_rejects_invalid_suffix_len(self):
         with pytest.raises(ValueError):
             SuffixDecodingDrafter(max_suffix_len=0)
+        with pytest.raises(ValueError, match="min_suffix_len"):
+            SuffixDecodingDrafter(min_suffix_len=0)
+        with pytest.raises(ValueError, match="max_suffix_len"):
+            SuffixDecodingDrafter(min_suffix_len=3, max_suffix_len=2)
 
     def test_rejects_invalid_confidence(self):
         with pytest.raises(ValueError):
             SuffixDecodingDrafter(min_confidence=1.5)
         with pytest.raises(ValueError):
             SuffixDecodingDrafter(min_confidence=-0.1)
+
+    def test_min_suffix_floor_suppresses_short_matches(self):
+        drafter = SuffixDecodingDrafter(
+            max_draft_tokens=4,
+            min_suffix_len=3,
+            max_suffix_len=4,
+        )
+        drafter.add_prompt_tokens([1, 2, 9, 1, 2, 8])
+
+        assert drafter.get_draft() == []
+
+        drafter.add_generated_token(9)
+        drafter.add_generated_token(1)
+        drafter.add_generated_token(2)
+        assert drafter.get_draft() == [8, 9, 1, 2]
 
 
 class TestRealisticAgentWorkload:

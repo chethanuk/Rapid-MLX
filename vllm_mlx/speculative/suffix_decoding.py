@@ -93,6 +93,9 @@ class SuffixDecodingDrafter:
         max_draft_tokens: Cap on draft length per call. The verify forward
             cost grows linearly with this; pick based on your model's
             attention cost vs. expected acceptance. Typical values 4-16.
+        min_suffix_len: Shortest suffix allowed to trigger a proposal. Raising
+            this prevents common one- or two-token fragments from producing
+            low-value drafts.
         max_suffix_len: Longest suffix prefix to index (k-gram size). Longer
             suffixes are more discriminating but slower to build. 4 is a
             good default — covers most repeated-phrase cases without
@@ -109,18 +112,22 @@ class SuffixDecodingDrafter:
     def __init__(
         self,
         max_draft_tokens: int = 8,
+        min_suffix_len: int = 1,
         max_suffix_len: int = 4,
         min_confidence: float = 0.3,
         max_history: int | None = 32_000,
     ):
         if max_draft_tokens < 1:
             raise ValueError("max_draft_tokens must be >= 1")
-        if max_suffix_len < 1:
-            raise ValueError("max_suffix_len must be >= 1")
+        if min_suffix_len < 1:
+            raise ValueError("min_suffix_len must be >= 1")
+        if max_suffix_len < min_suffix_len:
+            raise ValueError("max_suffix_len must be >= min_suffix_len")
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("min_confidence must be in [0, 1]")
 
         self.max_draft_tokens = max_draft_tokens
+        self.min_suffix_len = min_suffix_len
         self.max_suffix_len = max_suffix_len
         self.min_confidence = min_confidence
         self.max_history = max_history
@@ -206,7 +213,11 @@ class SuffixDecodingDrafter:
         # suffix is more discriminating, so we prefer its continuations
         # when available. (PLD paper showed this matters more than match
         # count for typical agent workloads.)
-        for k in range(min(self.max_suffix_len, len(self._tokens)), 0, -1):
+        for k in range(
+            min(self.max_suffix_len, len(self._tokens)),
+            self.min_suffix_len - 1,
+            -1,
+        ):
             query = tuple(self._tokens[-k:])
             positions = self._suffix_index[k].get(query, [])
             if not positions:

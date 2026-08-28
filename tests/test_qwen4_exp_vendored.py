@@ -988,6 +988,49 @@ def test_speculative_reject_restores_gdn_ple_and_qsa_state():
             assert baseline[1].offset == restored[1].offset
 
 
+def test_ngram_reject_restore_and_replay_is_token_exact_across_qsa_group():
+    from scripts.bench_qwen4_ngram import (
+        _restore_before_verify,
+        _snapshot_verify_boundary,
+    )
+
+    args = _ple_args()
+    model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
+    baseline_cache = model.make_cache()
+    verify_cache = model.make_cache()
+    prompt = mx.array([[1, 2, 3]])
+    mx.eval(model(prompt, cache=baseline_cache), model(prompt, cache=verify_cache))
+
+    # The accepted prefix is [4, 5].  The verifier also evaluates rejected
+    # token 6, crossing this fixture's two-token QSA compression boundary.
+    mx.eval(model(mx.array([[4, 5]]), cache=baseline_cache))
+    snapshot = _snapshot_verify_boundary(verify_cache)
+    mx.eval(model(mx.array([[4, 5, 6]]), cache=verify_cache))
+    _restore_before_verify(snapshot, verify_tokens=3)
+    mx.eval(model(mx.array([[4, 5]]), cache=verify_cache))
+
+    baseline_logits = model(mx.array([[7]]), cache=baseline_cache)
+    restored_logits = model(mx.array([[7]]), cache=verify_cache)
+    mx.eval(
+        baseline_logits,
+        restored_logits,
+        [cache.state for cache in baseline_cache],
+        [cache.state for cache in verify_cache],
+    )
+    np.testing.assert_allclose(
+        np.array(restored_logits), np.array(baseline_logits), rtol=0, atol=0
+    )
+    for baseline, restored in zip(baseline_cache, verify_cache):
+        if isinstance(baseline, Qwen4ExpStateCache):
+            for expected, actual in zip(baseline.state, restored.state):
+                np.testing.assert_allclose(
+                    np.array(actual), np.array(expected), rtol=0, atol=0
+                )
+        else:
+            assert baseline[0].offset == restored[0].offset
+            assert baseline[1].offset == restored[1].offset
+
+
 def test_sanitize_preserves_ple_shards_and_maps_experts_without_concat():
     args = _ple_args()
     model = Model(ModelArgs(model_type="qwen4_exp", text_config=asdict(args)))
