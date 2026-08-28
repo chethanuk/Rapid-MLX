@@ -230,8 +230,12 @@ def inject_qwen4_exp_mtp_support(
                 return [CacheList(KVCache(), QSAIndexCache(ratio))]
 
         inner.mtp = mtp
-        inner.mtp_max_speculative_tokens = 1
-        model.mtp_max_speculative_tokens = 1
+        # Experiment: the checkpoint owns one autoregressive MTP layer, which
+        # can be called repeatedly to form a target-verified draft chain.  Keep
+        # the normal CLI default at K=1; this capability ceiling only permits
+        # explicit K=2/3 qualification runs.
+        inner.mtp_max_speculative_tokens = 3
+        model.mtp_max_speculative_tokens = 3
         inner.__class__ = _Qwen4ExpWithMTP
         mx.eval(mtp.parameters())
         return True
