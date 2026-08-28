@@ -711,7 +711,7 @@ def activation(*, activation_kind: str, surface: str) -> None:
     # later, their next successful inference still emits.
     if not is_enabled():
         return
-    surface_norm = surface  # validated with activation_kind above
+    surface_norm = surface  # already validated against ACTIVATION_SURFACES above
     with _activation_lock:
         if activation_kind in _activation_latched:
             return
