@@ -562,7 +562,12 @@ def test_qsa_cache_vectorized_chunks_and_scalar_tail_keep_identical_state():
 
     scalar = QSAIndexCache(compress_ratio=4)
     vectorized = QSAIndexCache(compress_ratio=4)
-    for start, length in ((0, 8), (8, 7), (15, 1), (16, 5)):
+    # A small allocation step exercises initial allocation, reuse within the
+    # existing capacity, and growth without constructing a synthetic 1K token
+    # input solely for the production step=256 boundary.
+    scalar.step = 4
+    vectorized.step = 4
+    for start, length in ((0, 8), (8, 8), (16, 8), (24, 7), (31, 1), (32, 5)):
         values = mx.arange(start, start + length, dtype=mx.float32).reshape(
             1, length, 1
         )

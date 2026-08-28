@@ -208,21 +208,15 @@ class QSAIndexCache(ArraysCache):
         ratio = self.compress_ratio
         complete_length = length // ratio * ratio
         group_count = complete_length // ratio
-        transformed = None
-        if group_count:
-            groups = raw_keys[:, :complete_length, :].reshape(
-                1, group_count, ratio, dim
-            )
-            pooled = mx.mean(groups.astype(mx.float32), axis=2).astype(raw_keys.dtype)
-            starts = self._offsets[0] + mx.arange(group_count) * ratio
-            transformed = transform_groups(pooled, starts)
+        # ``update`` enters this fast path only with at least two complete
+        # groups, so keep the implementation free of unreachable empty-group
+        # branches and make every cache transition explicit.
+        groups = raw_keys[:, :complete_length, :].reshape(1, group_count, ratio, dim)
+        pooled = mx.mean(groups.astype(mx.float32), axis=2).astype(raw_keys.dtype)
+        starts = self._offsets[0] + mx.arange(group_count) * ratio
+        transformed = transform_groups(pooled, starts)
 
-        if self.raw_ring is None:
-            ring = mx.zeros((1, ratio, dim), dtype=raw_keys.dtype)
-        else:
-            ring = self.raw_ring
-        if group_count:
-            ring = raw_keys[:, complete_length - ratio : complete_length, :]
+        ring = raw_keys[:, complete_length - ratio : complete_length, :]
         remainder = length - complete_length
         if remainder:
             ring = mx.concatenate(
@@ -236,26 +230,20 @@ class QSAIndexCache(ArraysCache):
 
         old_count = self._compressed_counts[0]
         new_count = old_count + group_count
-        if group_count:
-            capacity = ((new_count + self.step - 1) // self.step) * self.step
-            if self.compressed_keys is None:
-                expanded = mx.zeros((1, capacity, dim), dtype=raw_keys.dtype)
-            elif capacity > self.compressed_keys.shape[1]:
-                expanded = mx.zeros(
-                    (1, capacity, dim), dtype=self.compressed_keys.dtype
-                )
-                expanded[:, : self.compressed_keys.shape[1], :] = self.compressed_keys
-            else:
-                expanded = self.compressed_keys
-            assert transformed is not None
-            expanded[:, old_count:new_count, :] = transformed
-            self.compressed_keys = expanded
+        capacity = ((new_count + self.step - 1) // self.step) * self.step
+        if self.compressed_keys is None:
+            expanded = mx.zeros((1, capacity, dim), dtype=raw_keys.dtype)
+        elif capacity > self.compressed_keys.shape[1]:
+            expanded = mx.zeros((1, capacity, dim), dtype=self.compressed_keys.dtype)
+            expanded[:, : self.compressed_keys.shape[1], :] = self.compressed_keys
+        else:
+            expanded = self.compressed_keys
+        expanded[:, old_count:new_count, :] = transformed
+        self.compressed_keys = expanded
 
         self._offsets[0] += length
         self._pending_left_padding[0] = 0
         self._compressed_counts[0] = new_count
-        if self.compressed_keys is None:
-            return mx.zeros((1, 0, dim), dtype=raw_keys.dtype)
         return self.compressed_keys[:, :new_count, :]
 
     def keys_for_blocks(self, row: int, block_count: int) -> mx.array:
