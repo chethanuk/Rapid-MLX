@@ -352,7 +352,7 @@ def persist_pulled_variant(repo_id: str, variant: str) -> None:
     the pull valid and merely means the serve path falls back to (honest)
     whole-repo-root resolution for that repo.
     """
-    if not variant:
+    if not _valid_variant_subfolder(variant):
         return
     try:
         refs_dir = os.path.dirname(_variant_marker_path(repo_id))
@@ -377,9 +377,26 @@ def pulled_variant(repo_id: str) -> str | None:
     try:
         with open(_variant_marker_path(repo_id), encoding="utf-8") as fh:
             variant = fh.read().strip()
-        return variant or None
+        return variant if _valid_variant_subfolder(variant) else None
     except OSError:
         return None
+
+
+def _valid_variant_subfolder(variant: object) -> bool:
+    """Whether a marker is a relative, downward, non-glob repo subfolder."""
+    if not isinstance(variant, str) or not variant:
+        return False
+    glob_meta = set("*?[]!")
+    drive_qualified = len(variant) >= 2 and variant[1] == ":"
+    return not (
+        variant.startswith("/")
+        or os.path.isabs(variant)
+        or drive_qualified
+        or "\\" in variant
+        or ".." in variant.split("/")
+        or variant.endswith("/")
+        or glob_meta & set(variant)
+    )
 
 
 def _model_info_with_timeout(repo_id: str, timeout: float):

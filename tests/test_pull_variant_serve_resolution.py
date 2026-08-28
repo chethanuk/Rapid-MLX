@@ -11,18 +11,17 @@ These tests pin that:
 
 1. ``persist_pulled_variant`` / ``pulled_variant`` round-trip: a narrowed pull
    records the folder, and an unrecorded repo reads back ``None``.
-2. the core #2340 scenario: a RAW repo id (no catalog alias) that was pulled
-   with ``--bits 4`` resolves, at load time, to its ``4bit/`` snapshot subfolder.
+2. the core #2340 scenario: a repo id pulled with ``--bits`` resolves, at load
+   time, to that exact snapshot subfolder, even when a catalog reverse lookup
+   names a different default subfolder.
 3. without a recorded variant (no ``--bits/--format`` pull), the same raw repo
    id resolves to the repo root as before — the marker never invents one.
 4. a genuinely absent variant still raises the actionable message (the pulled
    marker points at a folder that is neither present nor complete).
 
-The repo id is deliberately NOT a catalog alias so ``resolve_subfolder`` returns
-``None`` and only the marker fallback can select the subfolder — the real
-``LiquidAI/LFM2.5-2.6B-MLX`` layout (root has only README/LICENSE, ``4bit/`` is
-self-contained) is reproduced by fixtures. ``snapshot_download`` and the marker
-path are mocked; no weights and no network are touched.
+Both an unregistered repo and the real cataloged multi-variant layout are
+covered. ``snapshot_download`` and the marker path are mocked; no weights and
+no network are touched.
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ from vllm_mlx.utils.tokenizer import _resolve_subfolder_checkpoint
 # and ``resolve_model`` both leave it untouched, so only the marker fallback
 # can select the subfolder.
 RAW_REPO = "acme/MultiVariant-MLX"
+CATALOG_REPO = "LiquidAI/LFM2.5-2.6B-MLX"
 
 
 def _multi_variant_tree():
@@ -79,6 +79,15 @@ def test_persist_empty_is_a_noop(marker_path):
     _download_gate.persist_pulled_variant(RAW_REPO, "")
     assert _download_gate.pulled_variant(RAW_REPO) is None
     assert not marker_path.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid", ["../escape", "/absolute", "C:/drive", "4bit\\escape", "*", "4bit/"]
+)
+def test_invalid_marker_values_fail_closed(marker_path, invalid):
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(invalid)
+    assert _download_gate.pulled_variant(RAW_REPO) is None
 
 
 def test_missing_marker_returns_none_without_error(marker_path):
@@ -123,6 +132,35 @@ def test_serve_resolves_a_pulled_bits_variant(monkeypatch, tmp_path, marker_path
     # The handed-over directory must be where mlx-lm's loader glob will hit.
     assert Path(resolved, "config.json").exists()
     assert list(Path(resolved).glob("model*.safetensors"))
+
+
+def test_pulled_variant_overrides_catalog_default(monkeypatch, tmp_path, marker_path):
+    """An explicit 8-bit pull wins over this repo's catalog 4-bit default."""
+    from vllm_mlx.model_aliases import resolve_subfolder
+
+    assert resolve_subfolder(CATALOG_REPO) == "4bit", "precondition: catalog default"
+
+    snapshot = tmp_path / "snapshots" / "cafebabe"
+    (snapshot / "8bit").mkdir(parents=True)
+    (snapshot / "8bit" / "config.json").write_text("{}")
+    (snapshot / "8bit" / "model.safetensors").write_bytes(b"\x00" * 16)
+
+    seen: dict[str, object] = {}
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        seen["repo_id"] = repo_id
+        seen["allow_patterns"] = kwargs.get("allow_patterns")
+        return str(snapshot)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    _download_gate.persist_pulled_variant(CATALOG_REPO, "8bit")
+
+    resolved = _resolve_subfolder_checkpoint(CATALOG_REPO)
+
+    assert resolved == os.path.join(str(snapshot), "8bit")
+    assert seen == {"repo_id": CATALOG_REPO, "allow_patterns": ["8bit/*"]}
 
 
 def test_serve_uses_format_marker_folder(monkeypatch, tmp_path, marker_path):

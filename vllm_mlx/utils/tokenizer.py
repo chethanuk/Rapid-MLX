@@ -1024,24 +1024,23 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     # A malformed aliases.json is a hard error everywhere else too
     # (``resolve_model`` loads the same registry at CLI startup), so this
     # is consistent, not a new failure mode.
-    from ..model_aliases import resolve_model, resolve_subfolder
-
-    subfolder = resolve_subfolder(model_name)
-
     from huggingface_hub import snapshot_download
 
     from .._download_gate import _snapshot_is_complete, pulled_variant
+    from ..model_aliases import resolve_model, resolve_subfolder
 
-    # #2340: a raw repo id (no catalog alias) that was pulled with
-    # ``--bits/--format`` recorded its chosen variant in the HF cache. Recover
-    # it so ``serve <repo>`` after ``pull --bits 4 <repo>`` joins the same
-    # subfolder instead of pointing at the weightless repo root.
+    repo_id = resolve_model(model_name)
+
+    # #2340: a repo pulled with ``--bits/--format`` recorded its chosen variant
+    # in the HF cache. Recover it before consulting the catalog: the marker is
+    # the user's latest explicit pull choice, whereas a reverse catalog lookup
+    # can only recover the repo's default subfolder after the CLI has resolved
+    # an alias to its bare repo id. Without this precedence, ``pull --bits 8``
+    # followed by ``serve <repo>`` silently loads the catalog's 4-bit default.
     # ``pulled_variant`` is best-effort and returns ``None`` when the repo was
-    # never narrowed (or the marker is unreadable) — both fall through to the
-    # historical whole-repo-root resolution below.
-    if subfolder is None:
-        repo_id = resolve_model(model_name)
-        subfolder = pulled_variant(repo_id)
+    # never narrowed (or the marker is invalid/unreadable) — those cases retain
+    # the historical catalog-subfolder or whole-repo-root resolution.
+    subfolder = pulled_variant(repo_id) or resolve_subfolder(model_name)
     if not subfolder:
         return model_name
     # ``resolve_subfolder`` answers for BOTH spellings — the alias the user
@@ -1050,8 +1049,6 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     # programmatic callers reach with a bare alias, skipping the CLI's
     # pre-resolution, so normalize here instead of assuming someone
     # upstream already did.
-    repo_id = resolve_model(model_name)
-
     patterns = [f"{subfolder}/*"]
 
     # Offline-first: a warm, COMPLETE cache resolves with zero network. The
