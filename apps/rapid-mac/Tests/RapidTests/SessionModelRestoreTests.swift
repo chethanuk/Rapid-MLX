@@ -322,6 +322,41 @@ struct SessionModelRestoreTests {
         #expect(reconciled[chat.alias.lowercased()]?.generation == 7)
     }
 
+    @Test("Cat 2364: surviving provenance refreshes capability metadata from the current row")
+    func provenanceRefreshesCurrentCatalogMetadata() {
+        let stale = ModelEntry(
+            alias: chat.alias,
+            hfRepo: chat.hfRepo,
+            sizeOnDisk: chat.sizeOnDisk,
+            cached: true,
+            kind: .chat,
+            isBuiltinProfile: true,
+            isTextOnly: false
+        )
+        let current = ModelEntry(
+            alias: chat.alias,
+            hfRepo: chat.hfRepo,
+            sizeOnDisk: chat.sizeOnDisk,
+            cached: true,
+            kind: .chat,
+            isBuiltinProfile: true,
+            isTextOnly: true
+        )
+
+        let reconciled = ServerManager.reconcilingProvenance(
+            [
+                chat.alias.lowercased(): ServerManager.CatalogEntryHint(
+                    entry: stale,
+                    generation: 7
+                ),
+            ],
+            against: [current],
+            generation: 7
+        )
+
+        #expect(reconciled[chat.alias.lowercased()]?.entry == current)
+    }
+
     @Test(
         "Cat 2364: a catalog-epoch change bounds the fallback lifecycle even when the alias stays chat"
     )
@@ -532,5 +567,45 @@ struct SessionModelRestoreTests {
         #expect(plan.chatAliasResolved)
         #expect(plan.models.chatAlias == chat.alias)
         #expect(plan.shouldAutoStart)
+    }
+
+    @Test("Lifecycle catalog reads await fresh metadata instead of stale presentation rows")
+    func lifecycleCatalogReadBypassesStaleWhileRevalidate() async {
+        let audioOnly = ModelEntry(
+            alias: chat.alias,
+            hfRepo: chat.hfRepo,
+            sizeOnDisk: chat.sizeOnDisk,
+            cached: true,
+            kind: .audio,
+            audioCapability: .transcription
+        )
+        let loader = SequencedCatalogLoader([[chat], [audioOnly]])
+        let cache = ModelCatalogCache(
+            loader: { _, _ in await loader.load() },
+            ttl: 0
+        )
+        let binary = URL(fileURLWithPath: "/tmp/rapid-session-fresh-catalog-test")
+
+        let presented = await cache.entries(binary: binary, generation: 0)
+        let authoritative = await cache.freshEntries(binary: binary, generation: 0)
+
+        #expect(presented == [chat])
+        #expect(authoritative == [audioOnly])
+    }
+
+    @Test("Lifecycle catalog reads reuse an unexpired snapshot")
+    func lifecycleCatalogReadKeepsTheFastPath() async {
+        let loader = SequencedCatalogLoader([[chat], [stt]])
+        let cache = ModelCatalogCache { _, _ in await loader.load() }
+        let binary = URL(fileURLWithPath: "/tmp/rapid-session-fresh-cache-test")
+
+        let first = await cache.entries(binary: binary, generation: 0)
+        let authoritative = await cache.freshEntries(binary: binary, generation: 0)
+        await cache.invalidate()
+        let nextLoaderValue = await cache.entries(binary: binary, generation: 0)
+
+        #expect(first == [chat])
+        #expect(authoritative == [chat])
+        #expect(nextLoaderValue == [stt])
     }
 }

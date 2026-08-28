@@ -1154,14 +1154,18 @@ final class ServerManager {
         // in its own right: old hints must not cross it even when the refreshed
         // subprocess fails.
         guard !catalog.isEmpty else { return currentEpoch }
-        return currentEpoch.filter { _, record in
+        return currentEpoch.reduce(into: [:]) { result, pair in
+            let (key, record) = pair
             // The authoritative snapshot removes the alias (no row) or
             // reclassifies its lane (no longer chat): the chat fallback must
             // not survive it.
             guard let current = catalog.first(where: {
                 $0.alias.caseInsensitiveCompare(record.entry.alias) == .orderedSame
-            }) else { return false }
-            return current.kind == .chat
+            }), current.kind == .chat else { return }
+            // Refresh every field, not just lane membership. Capability
+            // metadata participates in process-lane selection on a later
+            // same-epoch empty probe.
+            result[key] = CatalogEntryHint(entry: current, generation: generation)
         }
     }
 
@@ -1193,6 +1197,27 @@ final class ServerManager {
             against: catalog,
             generation: generation
         )
+    }
+
+    /// Await a lifecycle-grade snapshot whose generation is still current
+    /// when the load returns. Downloads may complete while the catalog
+    /// subprocess is running; in that case retry against the new epoch instead
+    /// of applying an old snapshot to a newer on-disk model set.
+    private func stableFreshCatalogSnapshot(
+        binary: URL
+    ) async -> (entries: [ModelEntry], generation: UInt)? {
+        while !Task.isCancelled, !didSignalShutdown {
+            let generation = downloads?.cacheGeneration ?? 0
+            let entries = await ModelCatalogCache.shared.freshEntries(
+                binary: binary,
+                generation: generation
+            )
+            guard !Task.isCancelled, !didSignalShutdown else { return nil }
+            if generation == downloads?.cacheGeneration ?? 0 {
+                return (entries, generation)
+            }
+        }
+        return nil
     }
 
     /// Issue #2364 test seam — seed the retained chat-lane provenance so a
@@ -1396,7 +1421,7 @@ final class ServerManager {
     ) async -> Bool {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        let catalogGeneration = downloads?.cacheGeneration ?? 0
+        var catalogGeneration = downloads?.cacheGeneration ?? 0
         if let validatedHint = Self.validatedCatalogHint(
             alias: trimmed,
             hint: catalogEntryHint,
@@ -1411,11 +1436,11 @@ final class ServerManager {
         // authoritatively. This probe is needed only to decide whether an
         // already-running text-lane sidecar can accept a resident load.
         if child != nil, let binary = binaryPath {
-            let catalogSnapshot = await ModelCatalogCache.shared.entries(
-                binary: binary,
-                generation: catalogGeneration
-            )
-            if Task.isCancelled || didSignalShutdown { return false }
+            guard let observation = await stableFreshCatalogSnapshot(binary: binary) else {
+                return false
+            }
+            let catalogSnapshot = observation.entries
+            catalogGeneration = observation.generation
             // Reconcile the retained chat-lane fallback against this
             // authoritative snapshot just like ``start`` does (#2364).
             reconcileCatalogProvenStart(
@@ -2326,23 +2351,21 @@ final class ServerManager {
         // launch a visual checkpoint in its text lane. Keeping this await
         // before `isOperating = true` preserves the cancellable startup
         // contract; re-check every entry guard after actor reentrancy.
-        let catalogGeneration = downloads?.cacheGeneration ?? 0
+        guard let catalogObservation = await stableFreshCatalogSnapshot(binary: binary) else {
+            return
+        }
+        let catalogGeneration = catalogObservation.generation
         // #2364: a newer authoritative snapshot may have removed the alias or
         // reclassified it out of the chat lane between this start and the
         // previous one. Reconcile the retained fallback against that snapshot
         // NOW — before the ready fallback is consulted below — so a stale chat
         // classification cannot be reused when a later probe fails.
+        let catalogSnapshot = catalogObservation.entries
         reconcileCatalogProvenStart(
-            against: await ModelCatalogCache.shared.entries(
-                binary: binary,
-                generation: catalogGeneration
-            ),
+            against: catalogSnapshot,
             generation: catalogGeneration
         )
-        let probedCatalogEntry = await ModelCatalogCache.shared.entries(
-            binary: binary,
-            generation: catalogGeneration
-        ).first {
+        let probedCatalogEntry = catalogSnapshot.first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
         let catalogEntry = Self.readyCatalogEntry(

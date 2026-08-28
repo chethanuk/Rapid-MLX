@@ -4501,15 +4501,16 @@ struct QuickstartView: View {
             let catalogEntry = cachedModels.first {
                 $0.alias == coordinator.selection.alias
             }
+            let catalogEntryHint = catalogEntry.map {
+                ServerManager.CatalogEntryHint(
+                    entry: $0,
+                    generation: catalogGeneration
+                )
+            }
             Task {
                 await server.start(
                     alias: coordinator.selection.alias,
-                    catalogEntryHint: catalogEntry.map {
-                        ServerManager.CatalogEntryHint(
-                            entry: $0,
-                            generation: catalogGeneration
-                        )
-                    }
+                    catalogEntryHint: catalogEntryHint
                 )
             }
         case .openModelManagement, .openWebSearchSettings:
@@ -4596,15 +4597,16 @@ struct QuickstartView: View {
     /// integer a human watching it can actually see change.
     private func startCachedModel(_ cached: ModelEntry) {
         coordinator.enterSkippingDownload()
+        let catalogEntryHint = ServerManager.CatalogEntryHint(
+            entry: cached,
+            generation: catalogGeneration
+        )
         Task { @MainActor in
             await coordinator.afterSkippingDownloadBeat(duration: Self.skippingDownloadBeat) {
                 await server.start(
                     alias: cached.alias,
                     hfPath: cached.hfRepo,
-                    catalogEntryHint: ServerManager.CatalogEntryHint(
-                        entry: cached,
-                        generation: catalogGeneration
-                    )
+                    catalogEntryHint: catalogEntryHint
                 )
             }
         }
@@ -4700,16 +4702,17 @@ struct QuickstartView: View {
             let catalogEntry = cachedModels.first {
                 $0.alias == coordinator.selection.alias
             }
+            let catalogEntryHint = catalogEntry.map {
+                ServerManager.CatalogEntryHint(
+                    entry: $0,
+                    generation: catalogGeneration
+                )
+            }
             Task { @MainActor in
                 await server.start(
                     alias: coordinator.selection.alias,
                     hfPath: coordinator.selection.hfRepo,
-                    catalogEntryHint: catalogEntry.map {
-                        ServerManager.CatalogEntryHint(
-                            entry: $0,
-                            generation: catalogGeneration
-                        )
-                    }
+                    catalogEntryHint: catalogEntryHint
                 )
             }
         case .cancelled:

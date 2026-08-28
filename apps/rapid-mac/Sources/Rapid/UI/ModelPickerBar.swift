@@ -1567,18 +1567,19 @@ struct ModelPickerBar: View {
         }
         let catalogEntry = catalog.first(where: { $0.alias == trimmed })
         let hfPath = catalogEntry?.hfRepo
+        let catalogEntryHint = catalogEntry.map {
+            ServerManager.CatalogEntryHint(
+                entry: $0,
+                generation: catalogGeneration
+            )
+        }
         // Launch flags are applied inside ServerManager.start (one choke
         // point for every start path), RAM-gated to the recommended pick.
         Task {
             await server.start(
                 alias: trimmed,
                 hfPath: hfPath,
-                catalogEntryHint: catalogEntry.map {
-                    ServerManager.CatalogEntryHint(
-                        entry: $0,
-                        generation: catalogGeneration
-                    )
-                }
+                catalogEntryHint: catalogEntryHint
             )
         }
     }
