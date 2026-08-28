@@ -144,6 +144,13 @@ def _assignment_targets(target: ast.expr) -> list[str]:
     if isinstance(target, ast.Attribute):
         owner = ast.unparse(target.value)
         return [f"{owner}.{target.attr}"]
+    if (
+        isinstance(target, ast.Subscript)
+        and isinstance(target.slice, ast.Constant)
+        and isinstance(target.slice.value, str)
+    ):
+        owner = ast.unparse(target.value)
+        return [f"{owner}.{target.slice.value}"]
     if isinstance(target, (ast.List, ast.Tuple)):
         return [name for item in target.elts for name in _assignment_targets(item)]
     return []
@@ -154,6 +161,11 @@ def _assignment_targets(target: ast.expr) -> list[str]:
 # fail closed on a new local variable, attribute, call, or destructuring site.
 _VALIDATED_REASON_PASSTHROUGHS = frozenset(
     {
+        (
+            "api/utils.py",
+            "error.serving_lane_reason",
+            "serving_lane_reason",
+        ),
         (
             "engine/batched.py",
             "self._serving_lane_reason",
@@ -327,6 +339,27 @@ def test_dynamic_reason_assignment_scanner_fails_closed(
         _literal_assignments()
 
 
+def test_subscript_reason_assignment_reaches_exhaustive_ssot_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "subscript.py").write_text(
+        'decision = ServingLaneDecision(False, "text_checkpoint")\n'
+        'payload["serving_lane_reason"] = "unknown_reason"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "ENGINE", tmp_path)
+    monkeypatch.setitem(globals(), "_VALIDATED_REASON_PASSTHROUGHS", frozenset())
+    monkeypatch.setitem(
+        globals(),
+        "_VALIDATED_REASON_KEYWORD_PASSTHROUGHS",
+        frozenset(),
+    )
+
+    with pytest.raises(AssertionError, match="unknown_reason"):
+        _assert_ssot_matches_engine()
+
+
 def test_qualified_decision_constructor_is_scanned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -430,14 +463,7 @@ def _swift_case_labels() -> set[str]:
     return labels
 
 
-def test_ssot_is_the_exhaustive_set_of_emitted_reasons():
-    """The SSOT must both contain every reason the engine emits and not be dead.
-
-    This is the mechanism-level check behind the issue: a stray ``serving_lane_reason``
-    literal introduced anywhere in the engine (now or later) fails the ``<=`` half, and
-    a stale SSOT entry that the engine stopped emitting fails the ``>=`` half. Either
-    half means engine and copy have been allowed to drift again.
-    """
+def _assert_ssot_matches_engine() -> None:
     emitted = set(_engine_reasons())
     assert set(SERVING_LANE_REASONS) == emitted, (
         f"SERVING_LANE_REASONS and the engine tree disagree:\n"
@@ -447,6 +473,17 @@ def test_ssot_is_the_exhaustive_set_of_emitted_reasons():
         f"{sorted(emitted - set(SERVING_LANE_REASONS)) or 'none'}\n"
         f"Emitted (from tree scan): {sorted(emitted)}"
     )
+
+
+def test_ssot_is_the_exhaustive_set_of_emitted_reasons():
+    """The SSOT must both contain every reason the engine emits and not be dead.
+
+    This is the mechanism-level check behind the issue: a stray ``serving_lane_reason``
+    literal introduced anywhere in the engine (now or later) fails the ``<=`` half, and
+    a stale SSOT entry that the engine stopped emitting fails the ``>=`` half. Either
+    half means engine and copy have been allowed to drift again.
+    """
+    _assert_ssot_matches_engine()
 
 
 def test_auto_text_fallback_ssot_matches_the_tree():
