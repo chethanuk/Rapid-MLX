@@ -209,6 +209,47 @@ def test_explicit_alias_overrides_repo_variant_marker(
     assert seen == {"repo_id": CATALOG_REPO, "allow_patterns": ["4bit/*"]}
 
 
+def test_serving_checkpoint_resolves_explicit_alias_before_lane_selection(
+    monkeypatch, tmp_path, marker_path
+):
+    """The server checkpoint choke point retains CLI alias precedence."""
+    from types import SimpleNamespace
+
+    import huggingface_hub
+
+    from vllm_mlx import server
+
+    snapshot = tmp_path / "snapshots" / "01234567"
+    checkpoint = snapshot / "4bit"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "config.json").write_text("{}")
+    (checkpoint / "model.safetensors").write_bytes(b"\x00" * 16)
+    seen: dict[str, object] = {}
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        seen["repo_id"] = repo_id
+        seen["allow_patterns"] = kwargs.get("allow_patterns")
+        return str(snapshot)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(server, "_ensure_routing_config", lambda _path: None)
+    monkeypatch.setattr(
+        server,
+        "resolve_serving_lane_decision",
+        lambda *args, **kwargs: SimpleNamespace(
+            auto_text_fallback=False,
+            reason="text_checkpoint",
+        ),
+    )
+    _download_gate.persist_pulled_variant(CATALOG_REPO, "8bit")
+
+    resolved = server._resolve_serving_checkpoint(CATALOG_ALIAS)
+
+    assert resolved.model_path == CATALOG_REPO
+    assert resolved.load_path == str(checkpoint)
+    assert seen == {"repo_id": CATALOG_REPO, "allow_patterns": ["4bit/*"]}
+
+
 def test_serve_uses_format_marker_folder(monkeypatch, tmp_path, marker_path):
     """``--format <folder>`` records the literal folder; serve joins it."""
     snapshot = tmp_path / "snap" / "abc"

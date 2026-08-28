@@ -1745,19 +1745,30 @@ def _resolve_serving_checkpoint(
     the engine must receive that local path rather than retrying the repo id.
     """
     from .model_aliases import resolve_model, resolve_profile
+    from .utils.tokenizer import _resolve_subfolder_checkpoint
 
     model_path = resolve_model(model_name)
+    # Resolve a multi-variant repository before reading metadata or choosing a
+    # serving lane. This is the one checkpoint-identity choke point shared by
+    # startup and residency: an explicit alias keeps its declared subfolder,
+    # while a bare repo ID may recover the latest ``pull --bits/--format``
+    # marker. Deferring this to BatchedEngine loses the CLI's alias spelling
+    # and lets reverse-catalog metadata select the default checkpoint first.
+    resolved_subfolder_path = _resolve_subfolder_checkpoint(model_name)
+    checkpoint_path = (
+        model_path if resolved_subfolder_path == model_name else resolved_subfolder_path
+    )
     if not force_mllm and not force_text:
-        _ensure_routing_config(model_path)
+        _ensure_routing_config(checkpoint_path)
     from .model_metadata import read_model_metadata
 
-    metadata = read_model_metadata(model_path)
+    metadata = read_model_metadata(checkpoint_path)
     load_path = (
         str(metadata.snapshot_dir)
         if metadata is not None and metadata.snapshot_dir is not None
-        else model_path
+        else checkpoint_path
     )
-    profile = resolve_profile(model_path)
+    profile = resolve_profile(model_name) or resolve_profile(model_path)
     decision = resolve_serving_lane_decision(
         load_path,
         force_mllm=force_mllm,
@@ -2077,7 +2088,7 @@ def load_model(
     _serving_lane_reason = "not_applicable"
     if not _is_generative_media:
         _serving_checkpoint = _resolve_serving_checkpoint(
-            model_name,
+            effective_model_alias or model_name,
             force_mllm=force_mllm,
             force_text=force_text,
             requested_spec_decode=(
