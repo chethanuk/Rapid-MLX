@@ -116,18 +116,26 @@ die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 # journey guard from ``die`` to logging can no longer leave the unit contract
 # green: the helper is exercised with both allowed and forbidden fixtures.
 assert_no_fake_server_start() {
-    local events="$1" alias="$2" phase="$3"
+    local events="$1" alias="$2" phase="$3" query_status=0
     [[ -s "$events" ]] || return 0
     if [[ -n "$alias" ]]; then
-        if jq -e -s --arg alias "$alias" \
+        jq -e -s --arg alias "$alias" \
             'any(.[]; .event == "server_started" and .alias == $alias)' \
-            "$events" >/dev/null; then
-            die "$phase unexpectedly started $alias"
-        fi
-    elif jq -e -s 'any(.[]; .event == "server_started")' \
-        "$events" >/dev/null; then
-        die "$phase unexpectedly started a model"
+            "$events" >/dev/null || query_status=$?
+    else
+        jq -e -s 'any(.[]; .event == "server_started")' \
+            "$events" >/dev/null || query_status=$?
     fi
+    case "$query_status" in
+        0)
+            if [[ -n "$alias" ]]; then
+                die "$phase unexpectedly started $alias"
+            fi
+            die "$phase unexpectedly started a model"
+            ;;
+        1) return 0 ;; # valid JSONL with no matching event
+        *) die "$phase could not validate the sidecar event log" ;;
+    esac
 }
 
 require_observed_phase() {

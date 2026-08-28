@@ -7,8 +7,9 @@ display string or rewording a `die` message used to fail the suite for no
 behavioural reason (#2494). Each guard below now asserts the structural
 *behaviour* that actually matters:
 
-* a journey performs an action and then evaluates a post-condition on the
-  resulting UI/fake-event state (counts of outcome assertions vs. presses);
+* readiness gestures and their phase-specific UI/fake-event outcomes remain
+  ordered, with shared failure helpers executed against positive and negative
+  fixtures;
 * the fake-event and fixture contracts the journey depends on are intact
   (`pull` lifecycle, machine aliases, watchdog events);
 * the flow is gated in CI and its failures leave usable evidence (parsed
@@ -48,25 +49,6 @@ def _harness_flow_body(flow_function: str) -> str:
     """
     source = HARNESS.read_text()
     return source.split(f"{flow_function}() {{", 1)[1].split("\n}", 1)[0]
-
-
-def _assertion_count(body: str) -> int:
-    """Outcome-assertion helper calls: `die`, `wait_fake_event`, `wait_identifier`."""
-    return (
-        body.count("die ")
-        + body.count("wait_fake_event")
-        + body.count("wait_identifier")
-    )
-
-
-def _action_count(body: str) -> int:
-    """Gesture helper calls that drive a control: `press`, `set-value`, `increment`, `decrement`."""
-    return (
-        body.count('press "$OUT/')
-        + body.count('"$AX_DRIVER" set-value')
-        + body.count('"$AX_DRIVER" increment')
-        + body.count('"$AX_DRIVER" decrement')
-    )
 
 
 def _golden_flow_steps() -> list[dict[str, Any]]:
@@ -122,25 +104,33 @@ def _run_harness_helper(tmp_path: Path, helper: str, *args: str):
     )
 
 
-def test_audio_readiness_asserts_outcomes_not_just_presses():
-    """The audio-readiness journey proves model lifecycle outcomes.
+def _assert_in_order(body: str, *anchors: str) -> None:
+    positions = [body.index(anchor) for anchor in anchors]
+    assert positions == sorted(positions), (
+        f"journey contract is out of order: {list(zip(anchors, positions, strict=True))}"
+    )
 
-    Every gesture (press / set-value) is followed by an outcome assertion
-    (`die`/`wait_fake_event`/`wait_identifier`) that verifies the resulting
-    state, and the total number of outcome assertions dwarfs the number of
-    gestures. A journey that merely pressed buttons and read one final tree
-    would fail here.
-    """
+
+def test_audio_download_and_start_actions_have_ordered_outcomes():
+    """Each readiness gesture is followed by its phase-specific outcome."""
     flow = _harness_flow_body("flow_audio_readiness")
 
-    # Proves control outcomes, not just presses: assertions > gestures.
-    assert _assertion_count(flow) > _action_count(flow)
-    # The lifecycle is two real downloads (Download -> Start) for model start,
-    # keyed on the fake's recorded `pull` command event.
-    assert flow.count('.subcommand == "pull"') == 2
-    # The journey watches both a TTS and a transcription model start/stop.
-    assert '.alias == "fake-qwen3-tts"' in flow
-    assert '.alias == "fake-whisper-small"' in flow
+    _assert_in_order(
+        flow,
+        'press "$OUT/speech.json" Readiness.Action',
+        '.subcommand == "pull" and .alias == "fake-qwen3-tts"',
+        '"fake-qwen3-tts" "Speech before pull completion"',
+        '"fake-qwen3-tts" "Speech after download-only action"',
+        'press "$OUT/speech-downloaded.json" Readiness.Action',
+        '.event == "server_started" and .alias == "fake-qwen3-tts"',
+    )
+    _assert_in_order(
+        flow,
+        '"fake-whisper-small" "Opening Dictation"',
+        'press "$OUT/dictation-return.json" Readiness.Action',
+        '.subcommand == "pull" and .alias == "fake-whisper-small"',
+        '"fake-whisper-small" "Dictation after Download"',
+    )
 
 
 def test_audio_readiness_never_auto_starts_a_model():
@@ -202,6 +192,20 @@ def test_alias_guard_allows_unrelated_or_empty_events(tmp_path: Path):
     )
     assert unrelated.returncode == 0
     assert empty.returncode == 0
+
+
+def test_auto_start_guard_fails_closed_on_partial_jsonl(tmp_path: Path):
+    events = tmp_path / "events.jsonl"
+    events.write_text('{"event":"server_started"')
+    result = _run_harness_helper(
+        tmp_path,
+        "assert_no_fake_server_start",
+        str(events),
+        "fake-qwen3-tts",
+        "test phase",
+    )
+    assert result.returncode == 1
+    assert "FAIL:" in result.stderr
 
 
 def test_audio_control_journey_is_blocking_gui_ci_and_has_failure_evidence():
