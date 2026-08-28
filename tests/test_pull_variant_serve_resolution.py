@@ -511,6 +511,32 @@ def test_successful_ordinary_hf_pull_clears_previous_variant(marker_path):
     assert _download_gate.pulled_variant(RAW_REPO) is None
 
 
+def test_ordinary_hf_pull_survives_marker_clear_failure(capsys):
+    """Cleanup metadata is best-effort after a valid HF pull completes."""
+    import argparse
+
+    from vllm_mlx import cli
+
+    args = argparse.Namespace(
+        model=RAW_REPO,
+        bits=None,
+        format=None,
+        _original_alias=RAW_REPO,
+    )
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        patch("huggingface_hub.snapshot_download", return_value="/cache/snapshot"),
+        patch(
+            "vllm_mlx._download_gate.clear_pulled_variant",
+            side_effect=OSError("read-only cache"),
+        ),
+    ):
+        cli.pull_command(args)  # must not raise after a successful download
+
+    assert "Cached at: /cache/snapshot" in capsys.readouterr().out
+
+
 def test_successful_ordinary_mirror_pull_clears_previous_variant(marker_path):
     """The mirror-success early return applies the same marker transition."""
     import argparse
@@ -533,3 +559,32 @@ def test_successful_ordinary_mirror_pull_clears_previous_variant(marker_path):
         cli.pull_command(args)
 
     assert _download_gate.pulled_variant(RAW_REPO) is None
+
+
+def test_ordinary_mirror_pull_survives_marker_clear_failure(capsys):
+    """Cleanup metadata is best-effort on the mirror-success early return."""
+    import argparse
+
+    from vllm_mlx import cli
+
+    args = argparse.Namespace(
+        model=RAW_REPO,
+        bits=None,
+        format=None,
+        _original_alias=RAW_REPO,
+    )
+
+    def mirror_success(repo_id, *, out):
+        out["network_fetch"] = False
+        return True
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", side_effect=mirror_success),
+        patch(
+            "vllm_mlx._download_gate.clear_pulled_variant",
+            side_effect=OSError("read-only cache"),
+        ),
+    ):
+        cli.pull_command(args)  # must not raise after a successful download
+
+    assert "Already cached" in capsys.readouterr().out
