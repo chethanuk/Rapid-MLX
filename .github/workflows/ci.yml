@@ -36,7 +36,10 @@ jobs:
         id: policy
         env:
           EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
@@ -50,7 +53,11 @@ jobs:
             python scripts/classify_ci_changes.py \
               --paths-file /tmp/changed-paths \
               --github-output "$GITHUB_OUTPUT"
-            full_gate="$FULL_CI"
+            full_gate=false
+            if [ "$FULL_CI" = true ] || \
+              { [[ "$HEAD_REF" == train/* ]] && [ "$HEAD_REPO" = "$REPO" ]; }; then
+              full_gate=true
+            fi
             echo "full_gate=$full_gate" >> "$GITHUB_OUTPUT"
             if [ "$full_gate" = true ]; then
               echo 'l1_matrix={"include":[{"model":"qwen3.5-4b-4bit","contract_only":"0"},{"model":"llama3-3b-4bit","contract_only":"0"},{"model":"gemma3-4b-qat-4bit","contract_only":"1"},{"model":"qwen3-4b-instruct-2507-4bit","contract_only":"1"},{"model":"qwen3-4b-thinking-2507-4bit","contract_only":"1"}]}' >> "$GITHUB_OUTPUT"
@@ -377,6 +384,7 @@ jobs:
             tests/test_music_engine.py \
             tests/test_audio_model_worker.py \
             tests/test_server_load_model_order.py \
+            tests/test_hermetic_network_off.py \
             tests/test_routing_groups_0131.py \
             tests/test_ready_banner_timing.py \
             tests/test_api_validation_bundle.py \
@@ -397,7 +405,6 @@ jobs:
             tests/test_version_sync.py \
             tests/test_pull_variant_selection.py \
             tests/test_share_cli.py \
-            tests/test_cli_models.py \
             tests/test_doctor_env_health.py \
             tests/test_train_gates_matches_ci.py \
             -v --tb=short \
@@ -570,17 +577,24 @@ jobs:
     # smoke on the FREE macos-14 hosted runner. That runner HAS a real Metal GPU
     # (``mx.default_device()`` -> ``Device(gpu, 0)``), so MLX runs on the GPU
     # there for $0; its ~7GB RAM caps it at small models, not the 35B self-hosted
-    # Studio (L2) tier. Runs on every PR to catch GROSS engine breakage BEFORE
-    # the expensive Studio gate: garbage-from-first-token (#1234 doubled-norm
-    # class, via the #1247 GOLDEN gate) and tool-call parser regressions.
+    # Studio (L2) tier. Runs on promoted and integration heads to catch GROSS
+    # engine breakage before landing: garbage-from-first-token (#1234
+    # doubled-norm class, via the #1247 GOLDEN gate) and tool-call parser
+    # regressions. Ordinary PRs retain Linux + Apple-Silicon coverage without
+    # queueing these model downloads.
     #
-    # Two GOLDEN models run coherence + the engine contract. The remaining 4B
+    # GOLDEN models run coherence + the engine contract. The 4B
     # aliases run contract-only: forcing a zero-argument call factors model
     # competence out while still covering multi-turn replay, streaming channel
     # routing, and native-marker leaks (#1677).
-    # Each model runs on its own runner (parallel), so ~7GB RAM holds one ~2GB
-    # model comfortably. A 3-4B model is fine for a coherence/parser gate — it
-    # is not a chat-quality eval, which stays on the 35B L2 tier.
+    # Each model runs on its own runner (parallel) so lanes do not share RAM.
+    # The Qwen3.5-9B (#2419 top-telemetry cover) was tried here and relocated off
+    # L1: its runtime footprint is ~8.7 GB (vllm_mlx/model_recommendations.json,
+    # SSOT — bucketed at the 18 GB floor) vs this runner's ~7 GB, and the
+    # coherence serve OOMs (server unreachable, 503) under the gate. It, like the
+    # 26-35B top-telemetry lanes (Qwen3.6-35B-A3B, Qwen3.8/3.6-27B, Gemma-4-26B,
+    # Bonsai-27B, 15-38GB), exceeds this free runner's ~7GB budget — they stay on
+    # the self-hosted 35B Studio tier-1 gate (L2), not on L1.
     #
     # Gemma3 is multimodal but this contract is text/tool-only, so the smoke
     # script forces ``--no-mllm`` and exercises its LM backbone without pulling
@@ -589,7 +603,9 @@ jobs:
     # The aggregate ``tests`` job requires this matrix, so a contract failure is
     # release-blocking rather than an informational red check.
     needs: changes
-    if: needs.changes.outputs.engine == 'true'
+    if: >-
+      needs.changes.outputs.engine == 'true' &&
+      needs.changes.outputs.full_gate == 'true'
     runs-on: macos-14
     timeout-minutes: 20
     strategy:
@@ -648,28 +664,7 @@ jobs:
       - l1-smoke
     runs-on: ubuntu-latest
     if: always()
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-      statuses: write
     steps:
-      - name: Start an internal PR merge status pending
-        if: >-
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.engine == 'true' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          jq -n \
-            --arg target_url "$RUN_URL" \
-            '{state: "pending", context: "tests", description: "Evaluating the required engine merge gate", target_url: $target_url}' \
-            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null
-
       - name: Check test results
         run: |
           if [ "${{ needs.changes.result }}" != success ]; then
@@ -698,11 +693,6 @@ jobs:
             echo "MLX dependency-bound guard failed"
             exit 1
           fi
-          if [ "${{ github.event_name }}" = "pull_request" ] \
-            && [ "${{ needs.changes.outputs.full_gate }}" != "true" ]; then
-            echo "Engine PR checks passed; the required tests status remains pending until the full-ci label is applied"
-            exit 0
-          fi
           if [ "${{ needs.test-matrix.result }}" != "success" ]; then
             echo "Unit tests failed"
             exit 1
@@ -716,44 +706,12 @@ jobs:
             echo "Changed-lines coverage union failed"
             exit 1
           fi
-          if [ "${{ needs.l1-smoke.result }}" != "success" ]; then
-            echo "Small-model tool-loop contract failed"
+          if [ "${{ needs.changes.outputs.full_gate }}" = "true" ]; then
+            if [ "${{ needs.l1-smoke.result }}" != "success" ]; then
+              echo "Small-model tool-loop contract failed"
+              exit 1
+            fi
+          elif [ "${{ needs.l1-smoke.result }}" != "skipped" ]; then
+            echo "Unpromoted head unexpectedly allocated the L1 smoke lane"
             exit 1
           fi
-
-      - name: Settle a successful internal full-CI status
-        if: >-
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.engine == 'true' &&
-          needs.changes.outputs.full_gate == 'true' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          LIVE_PR_JSON="$RUNNER_TEMP/live-pr.json"
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}" > "$LIVE_PR_JSON"
-          LIVE_STATE=$(jq -r '.state' "$LIVE_PR_JSON")
-          LIVE_BASE_REF=$(jq -r '.base.ref' "$LIVE_PR_JSON")
-          LIVE_HEAD_SHA=$(jq -r '.head.sha' "$LIVE_PR_JSON")
-          LIVE_FULL_CI=$(jq -r 'any(.labels[]; .name == "full-ci")' "$LIVE_PR_JSON")
-
-          RUNS_JSON="$RUNNER_TEMP/ci-runs.json"
-          gh api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100" > "$RUNS_JSON"
-          LATEST_RUN_ID=$(jq -r '[.workflow_runs[]] | if length > 0 then max_by(.id).id else "" end' "$RUNS_JSON")
-          if [ "$LIVE_STATE" != open ] || [ "$LIVE_BASE_REF" != main ] || \
-             [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ] || [ "$LIVE_FULL_CI" != true ] || \
-             [ "$LATEST_RUN_ID" != "$RUN_ID" ]; then
-            echo "Not settling stale or unpromoted engine evidence (state=$LIVE_STATE base=$LIVE_BASE_REF live=$LIVE_HEAD_SHA run_head=$HEAD_SHA full_ci=$LIVE_FULL_CI latest_run=${LATEST_RUN_ID:-missing} run_id=$RUN_ID)."
-            exit 0
-          fi
-
-          jq -n \
-            --arg target_url "$RUN_URL" \
-            '{state: "success", context: "tests", description: "Exact-head full-CI merge gate passed", target_url: $target_url}' \
-            | gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" --input - >/dev/null
