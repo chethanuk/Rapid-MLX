@@ -74,7 +74,7 @@ def open_pr_heads(repo: Path) -> set[str] | None:
             "--state",
             "open",
             "--limit",
-            "200",
+            "1000",
             "--json",
             "headRefName",
         ],
@@ -86,7 +86,10 @@ def open_pr_heads(repo: Path) -> set[str] | None:
     if result.returncode:
         return None
     try:
-        return {row["headRefName"] for row in json.loads(result.stdout)}
+        rows = json.loads(result.stdout)
+        if len(rows) >= 1000:
+            return None
+        return {row["headRefName"] for row in rows}
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
