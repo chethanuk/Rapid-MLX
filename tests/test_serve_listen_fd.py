@@ -353,7 +353,7 @@ def test_serve_command_dispatches_uvicorn_with_fd_when_listen_fd_set(
 
 
 def test_dflash_memory_check_receives_original_alias(
-    stub_heavy_serve_deps, monkeypatch
+    stub_heavy_serve_deps, monkeypatch, scheduler_config_stub
 ):
     """The DFlash branch sizes the alias, not only its resolved HF path."""
     calls: list[tuple[str, str | None]] = []
