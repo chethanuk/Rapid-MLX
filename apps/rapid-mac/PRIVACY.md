@@ -53,8 +53,9 @@ so one Mac is not counted as two installs. We collect:
     locals).
   * App version + macOS version + a short context label (e.g.
     `chat_send`, `download_install`).
-* `activation` — once per install for each first successful chat reply,
-  vision reply, delivered dictation transcript, or generated image. The
+* `activation` — once per install for each first successful text chat reply,
+  delivered dictation transcript, or generated image. A vision-reply milestone
+  is reserved in the event schema but is not sent by this version. The
   event-specific payload contains only the closed milestone name and
   `surface: desktop`; it contains no model, timing, count, prompt, response,
   attachment, transcript, generated image, or path.

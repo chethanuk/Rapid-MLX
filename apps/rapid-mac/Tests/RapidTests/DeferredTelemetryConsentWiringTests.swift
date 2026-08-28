@@ -121,11 +121,14 @@ struct DeferredTelemetryConsentWiringTests {
         let normalizedPrivacy = privacy.split(whereSeparator: \Character.isWhitespace).joined(separator: " ")
 
         for surface in [banner, settings] {
-            #expect(surface.contains("first successful chat reply, vision reply, dictation, or image"))
+            #expect(surface.contains("first successful text chat reply, dictation, or generated image"))
+            #expect(surface.contains("does not send a vision-reply milestone"))
             #expect(surface.contains("only the milestone name and “Desktop”"))
             #expect(surface.contains("derives a country code but never stores your IP"))
         }
         #expect(privacy.contains("`activation` — once per install"))
+        #expect(privacy.contains("vision-reply milestone"))
+        #expect(privacy.contains("is reserved in the event schema but is not sent by this version"))
         #expect(privacy.contains("`surface: desktop`"))
         #expect(privacy.contains("two-letter country code"))
         #expect(normalizedPrivacy.contains("the IP address is never persisted"))
