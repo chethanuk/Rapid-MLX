@@ -180,7 +180,7 @@ def stale_rapid_dmg(image: Path, mount: Path, cutoff: float) -> bool:
     if not image.is_file() or not mount.is_dir():
         return False
     mount_text = str(mount.resolve())
-    tool_mount = mount_text.startswith("/private/tmp/rapid-") or (
+    tool_mount = mount_text.startswith(("/private/tmp/rapid-", "/tmp/rapid-")) or (
         mount_text.startswith("/private/var/folders/")
         and mount.name.startswith("rapid-")
     )
@@ -191,6 +191,30 @@ def stale_rapid_dmg(image: Path, mount: Path, cutoff: float) -> bool:
     if max(image.stat().st_mtime, mount.stat().st_mtime) >= cutoff:
         return False
     return not in_use(mount)
+
+
+def owner_remains_removable(
+    repo: Path,
+    owner: Path,
+    worktree_owners: set[Path],
+    dogfood_owners: set[Path],
+    scratch: Path,
+    cutoff: float,
+) -> bool:
+    if owner in worktree_owners:
+        heads = open_pr_heads(repo)
+        if heads is None or not owner.resolve().is_relative_to(scratch):
+            return False
+        current = next(
+            (row for row in worktrees(repo) if Path(row["path"]) == owner), None
+        )
+        return (
+            current is not None
+            and classify_worktree(repo, current, cutoff, heads) == "eligible"
+        )
+    if owner in dogfood_owners:
+        return owner in set(finished_dogfood_dirs(scratch, cutoff))
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dogfoods = finished_dogfood_dirs(scratch, cutoff)
     dogfood_set = set(dogfoods)
+    worktree_set = set(eligible_worktrees)
     removable_owners = [*eligible_worktrees, *dogfoods]
     for image, mount in mounted_images():
         owner = next(
@@ -251,6 +276,15 @@ def main(argv: list[str] | None = None) -> int:
         action = "eligible" if owner or legacy_stale else "skip-unowned"
         print(f"DMG {action} {mount} image={image}")
         if args.apply and (owner or legacy_stale):
+            if owner is not None and (
+                in_use(mount)
+                or not owner_remains_removable(
+                    repo, owner, worktree_set, dogfood_set, scratch, cutoff
+                )
+            ):
+                raise RuntimeError(
+                    f"DMG owner or mount changed after planning; refusing: {mount}"
+                )
             if owner is None and not stale_rapid_dmg(image, mount, cutoff):
                 raise RuntimeError(
                     f"DMG mount changed after planning; refusing: {mount}"
@@ -260,10 +294,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"DOGFOOD eligible {path}")
 
     if args.apply:
-        current_open_heads = open_pr_heads(repo)
-        if current_open_heads is None:
-            raise RuntimeError("GitHub PR state unavailable at apply time; refusing")
         for path in eligible_worktrees:
+            current_open_heads = open_pr_heads(repo)
+            if current_open_heads is None:
+                raise RuntimeError(
+                    "GitHub PR state unavailable at apply time; refusing"
+                )
             current = next(
                 (row for row in worktrees(repo) if Path(row["path"]) == path), None
             )

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -86,13 +87,14 @@ def run(argv: list[str] | None = None) -> int:
     if required <= args.threshold_gb:
         os.execvp(command[0], command)
 
-    lockf = shutil.which("lockf")
-    if lockf is None:
-        print(
-            "large-model-run: lockf is required for a large model load", file=sys.stderr
-        )
-        return 2
     if os.environ.get("RAPID_LARGE_MODEL_LOCK_HELD") != "1":
+        lockf = shutil.which("lockf")
+        if lockf is None:
+            print(
+                "large-model-run: lockf is required for a large model load",
+                file=sys.stderr,
+            )
+            return 2
         print(
             f"large-model-run: waiting for host lock ({required:.1f} GiB working set)",
             file=sys.stderr,
@@ -100,10 +102,26 @@ def run(argv: list[str] | None = None) -> int:
         )
         inner = [sys.executable, str(Path(__file__).resolve()), *raw_argv]
         env = dict(os.environ, RAPID_LARGE_MODEL_LOCK_HELD="1")
-        return subprocess.call(
+        child = subprocess.Popen(
             [lockf, "-k", "-t", str(args.lock_timeout), str(args.lock_file), *inner],
             env=env,
+            start_new_session=True,
         )
+        previous: dict[signal.Signals, object] = {}
+
+        def forward(signum: int, _frame: object) -> None:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
+
+        for name in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            previous[name] = signal.signal(name, forward)
+        try:
+            return child.wait()
+        finally:
+            for name, handler in previous.items():
+                signal.signal(name, handler)
 
     available = available_gib()
     minimum = required + args.reserve_gb

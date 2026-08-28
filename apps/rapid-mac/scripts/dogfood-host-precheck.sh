@@ -4,7 +4,7 @@ set -euo pipefail
 
 die() { printf 'dogfood-host-precheck: FAIL: %s\n' "$*" >&2; exit 1; }
 
-if [[ "${CI:-}" == "true" ]]; then
+if [[ "${CI:-}" == "true" && "${RAPID_HOST_SAFETY_TESTING:-0}" != "1" ]]; then
     [[ "${1:-}" == "--" ]] && shift && exec "$@"
     exit 0
 fi

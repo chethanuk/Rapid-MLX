@@ -168,7 +168,7 @@ def test_only_old_unused_rapid_temp_dmg_mount_is_stale(
 ) -> None:
     image = tmp_path / "rapid-mlx-desktop.udrw.dmg"
     image.write_bytes(b"stub")
-    mount = Path(tempfile.mkdtemp(prefix="rapid-test-dmg-mount.", dir="/private/tmp"))
+    mount = Path(tempfile.mkdtemp(prefix="rapid-test-dmg-mount.", dir="/tmp"))
     old = time.time() - 10_000
     os.utime(image, (old, old))
     os.utime(mount, (old, old))
@@ -182,6 +182,58 @@ def test_only_old_unused_rapid_temp_dmg_mount_is_stale(
         assert not studio_hygiene.stale_rapid_dmg(
             image, Path("/Volumes/Rapid-MLX"), time.time() - 3600
         )
+    finally:
+        mount.rmdir()
+
+
+def test_apply_rechecks_owner_and_mount_before_detaching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)], check=True, capture_output=True
+    )
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "tracked").write_text("one\n")
+    _git(repo, "add", "tracked")
+    _git(repo, "commit", "-m", "initial")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+    tree = tmp_path / "eligible"
+    _git(repo, "worktree", "add", "-b", "eligible", str(tree), "main")
+    _git(tree, "push", "-u", "origin", "eligible")
+    image = tree / "rapid-mlx-desktop.dmg"
+    image.write_bytes(b"stub")
+    _git(tree, "add", image.name)
+    _git(tree, "commit", "-m", "artifact")
+    _git(tree, "push")
+    mount = Path(tempfile.mkdtemp(prefix="rapid-test-owner-mount.", dir="/tmp"))
+    old = time.time() - 10_000
+    os.utime(tree, (old, old))
+    os.utime(image, (old, old))
+    os.utime(mount, (old, old))
+    monkeypatch.setattr(studio_hygiene, "open_pr_heads", lambda _: set())
+    monkeypatch.setattr(studio_hygiene, "mounted_images", lambda: [(image, mount)])
+    monkeypatch.setattr(studio_hygiene, "in_use", lambda path: path == mount)
+    try:
+        with pytest.raises(RuntimeError, match="owner or mount changed"):
+            studio_hygiene.main(
+                [
+                    "--repo",
+                    str(repo),
+                    "--scratch",
+                    str(tmp_path),
+                    "--min-age-hours",
+                    "1",
+                    "--apply",
+                ]
+            )
+        assert tree.exists()
+        assert mount.exists()
     finally:
         mount.rmdir()
 

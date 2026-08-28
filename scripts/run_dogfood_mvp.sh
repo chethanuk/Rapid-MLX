@@ -143,8 +143,9 @@ if [[ -n "${DOGFOOD_WORKING_SET_GB:-}" ]]; then
 else
   size_args=(--model "$MODEL")
 fi
-# The wrapper execs the serve command, so SERVER_PID remains the process that
-# owns the host lock and stop/status retain their existing ownership semantics.
+# SERVER_PID owns the locked process group. The wrapper forwards stop signals
+# to lockf and every server descendant before it exits, so cleanup cannot
+# orphan a model server behind a dead wrapper.
 # shellcheck disable=SC2086  # RAPID_MLX_CMD and EXTRA_SERVE_ARGS are command fragments by contract.
 nohup python3 "$ROOT/scripts/large-model-run.py" "${size_args[@]}" -- \
   $RAPID_MLX_CMD serve "$MODEL" --port "$PORT" --api-key "$API_KEY" \

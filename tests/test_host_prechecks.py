@@ -112,6 +112,59 @@ def test_memory_is_rechecked_after_lock_is_acquired(tmp_path: Path) -> None:
     assert "insufficient memory under lock" in result.stderr
 
 
+@pytest.mark.skipif(shutil.which("lockf") is None, reason="BSD lockf required")
+def test_termination_reaches_locked_server_descendants(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    child = (
+        "import pathlib,subprocess,sys,time; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(60)"
+    )
+    env = dict(
+        os.environ,
+        RAPID_HOST_SAFETY_TESTING="1",
+        RAPID_LARGE_MODEL_TEST_AVAILABLE_GB="100",
+    )
+    wrapper = subprocess.Popen(
+        [
+            sys.executable,
+            str(LOCK),
+            "--working-set-gb",
+            "21",
+            "--lock-file",
+            str(tmp_path / "lock"),
+            "--",
+            sys.executable,
+            "-c",
+            child,
+            str(pid_file),
+        ],
+        env=env,
+    )
+    deadline = time.monotonic() + 5
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert pid_file.exists()
+    descendant = int(pid_file.read_text())
+    wrapper.terminate()
+    wrapper.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while (
+        subprocess.run(
+            ["ps", "-p", str(descendant)], capture_output=True, check=False
+        ).returncode
+        == 0
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+    assert (
+        subprocess.run(
+            ["ps", "-p", str(descendant)], capture_output=True, check=False
+        ).returncode
+        != 0
+    )
+
+
 def test_tart_ready_retries_then_succeeds(tmp_path: Path) -> None:
     fake = tmp_path / "tart"
     count = tmp_path / "count"
