@@ -223,6 +223,35 @@ def test_start_set_guard_rejects_duplicate_expected_alias(tmp_path: Path):
     assert "FAIL:" in result.stderr
 
 
+def test_start_set_guard_retries_a_transient_partial_record(tmp_path: Path):
+    events = tmp_path / "events.jsonl"
+    events.write_text('{"event":"server_started"')
+    repaired = json.dumps({"event": "server_started", "alias": "fake-qwen3-tts"})
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'harness="$1"; events="$2"; repaired="$3"; '
+            '(sleep 0.15; printf "%s\\n" "$repaired" > "$events") & '
+            'repair_pid=$!; set --; source "$harness"; '
+            'assert_fake_server_starts "$events" 1 "fake-qwen3-tts" "test phase"; '
+            'status=$?; wait "$repair_pid"; exit "$status"',
+            "gui-contract-test",
+            str(HARNESS),
+            str(events),
+            repaired,
+        ],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_start_set_guard_fails_closed_on_partial_jsonl(tmp_path: Path):
     events = tmp_path / "events.jsonl"
     events.write_text('{"event":"server_started"')

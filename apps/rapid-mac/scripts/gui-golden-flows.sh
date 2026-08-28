@@ -116,17 +116,26 @@ die() { printf '[gui-golden] FAIL: %s\n' "$*" >&2; exit 1; }
 # journey guard from ``die`` to logging can no longer leave the unit contract
 # green: the helper is exercised with both allowed and forbidden fixtures.
 assert_fake_server_starts() {
-    local events="$1" expected_count="$2" expected_alias="$3" phase="$4" query_status=0
-    jq -e -s --argjson count "$expected_count" --arg alias "$expected_alias" \
-        '[.[] | select(.event == "server_started")] as $starts
-         | (($starts | length) == $count
-            and ($alias == "" or all($starts[]; .alias == $alias)))' \
-        "$events" >/dev/null || query_status=$?
-    case "$query_status" in
-        0) return 0 ;;
-        1) die "$phase observed an unexpected sidecar start set" ;;
-        *) die "$phase could not validate the sidecar event log" ;;
-    esac
+    local events="$1" expected_count="$2" expected_alias="$3" phase="$4"
+    local query_status=0 attempt
+    # The app appends JSONL concurrently. A reader can briefly observe the
+    # final record between writes; retry parse/read failures for a bounded
+    # 400 ms, while a valid-but-wrong start set still fails immediately.
+    # Persistently malformed or unreadable evidence remains fail-closed.
+    for attempt in 1 2 3 4 5; do
+        query_status=0
+        jq -e -s --argjson count "$expected_count" --arg alias "$expected_alias" \
+            '[.[] | select(.event == "server_started")] as $starts
+             | (($starts | length) == $count
+                and ($alias == "" or all($starts[]; .alias == $alias)))' \
+            "$events" >/dev/null 2>&1 || query_status=$?
+        case "$query_status" in
+            0) return 0 ;;
+            1) die "$phase observed an unexpected sidecar start set" ;;
+        esac
+        [[ "$attempt" == 5 ]] || sleep 0.1
+    done
+    die "$phase could not validate the sidecar event log"
 }
 
 require_observed_phase() {
