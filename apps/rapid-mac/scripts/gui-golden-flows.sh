@@ -582,6 +582,7 @@ start_persona() {
         mv "$updated" "$config"
     done
     env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
+        DOGFOOD_WORKING_SET_GB=0.1 \
         FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
         "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
         "$PERSONA/launch.sh" > "$OUT/app.log" 2>&1 &
@@ -597,6 +598,7 @@ relaunch_persona() {
     # killing the old fake (and potentially an operator's real server too).
     cleanup_fake_sidecars
     env RAPID_BIN="$ROOT/scripts/fake-rapid-mlx.sh" \
+        DOGFOOD_WORKING_SET_GB=0.1 \
         FAKE_EVENT_LOG="$OUT/fake-events.jsonl" \
         "${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}" \
         "$PERSONA/launch.sh" >> "$OUT/app.log" 2>&1 &

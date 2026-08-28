@@ -139,3 +139,4 @@ def test_real_dogfood_entrypoints_share_the_host_guards() -> None:
     assert 'size_args=(--model "$MODEL")' in mvp
     assert 'exec "$SCRIPT_DIR/dogfood-host-precheck.sh"' in ax
     assert 'exec "$ROOT/scripts/dogfood-host-precheck.sh"' in golden
+    assert golden.count("DOGFOOD_WORKING_SET_GB=0.1") == 2
