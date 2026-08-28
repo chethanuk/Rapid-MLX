@@ -4260,7 +4260,7 @@ async def _create_chat_completion_impl(
     resolved_thinking = _resolve_enable_thinking(request)
 
     # Prepare kwargs
-    chat_kwargs = {
+    chat_kwargs: dict[str, Any] = {
         "max_tokens": _resolve_max_tokens(request.max_tokens, resolved_thinking),
         "temperature": _resolve_temperature(request.temperature),
         "top_p": _resolve_top_p(request.top_p),
