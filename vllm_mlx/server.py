@@ -1993,11 +1993,18 @@ def load_model(
     # resolve_profile handles both alias-name and HF-path lookups, so a
     # single call suffices regardless of which form load_model was passed.
     _profile = resolve_profile(effective_model_alias or requested_model_name)
-    _model_config = _profile
-    if _model_config is None:
-        from .model_auto_config import detect_model_config
+    # A reverse-catalog profile is only a default for a bare repo ID. When a
+    # narrowed pull marker selects another checkpoint in that repo, its local
+    # metadata is authoritative for auto-config just as an explicit alias is.
+    _bare_repo_has_pulled_variant = False
+    if effective_model_alias is None:
+        try:
+            from ._download_gate import pulled_variant
 
-        _model_config = detect_model_config(model_name)
+            _bare_repo_has_pulled_variant = pulled_variant(model_name) is not None
+        except Exception:
+            pass
+    _model_config = None if _bare_repo_has_pulled_variant else _profile
     if _profile is not None and _profile.recommended_sampling:
         _alias_recommended_sampling = dict(_profile.recommended_sampling)
 
@@ -2100,6 +2107,16 @@ def load_model(
         _engine_model_path = _serving_checkpoint.load_path
         _auto_text_fallback = _serving_checkpoint.auto_text_fallback
         _serving_lane_reason = _serving_checkpoint.lane_reason
+
+    # A bare multi-variant repo has no useful config at its root. Resolve the
+    # concrete checkpoint first, then derive every checkpoint-owned default
+    # from that same directory the engine will load. Before #2340 this probe
+    # ran above ``_resolve_serving_checkpoint`` and could silently configure an
+    # uncatalogued ``pull --bits/--format`` model from the empty repo root.
+    if _model_config is None:
+        from .model_auto_config import detect_model_config
+
+        _model_config = detect_model_config(_engine_model_path)
     if _auto_text_fallback:
         fallback_detail = {
             "text_lane_speculative_decode": (
@@ -2128,7 +2145,7 @@ def load_model(
         )
 
     try:
-        gen_cfg = load_generation_config_sampling(model_name)
+        gen_cfg = load_generation_config_sampling(_engine_model_path)
     except Exception as _e:  # pragma: no cover — defensive belt-and-suspenders
         logger.debug(f"generation_config load failed (non-fatal): {_e}")
         gen_cfg = {}
@@ -3348,7 +3365,10 @@ Examples:
             auto_config_resolved = True
             return None
         try:
-            auto_config = detect_model_config(args.model)
+            from .utils.tokenizer import _resolve_subfolder_checkpoint
+
+            config_path = _resolve_subfolder_checkpoint(args.model)
+            auto_config = detect_model_config(config_path)
         except Exception as exc:
             if not non_fatal:
                 raise

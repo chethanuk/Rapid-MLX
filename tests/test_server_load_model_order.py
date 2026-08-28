@@ -244,6 +244,57 @@ def test_load_model_threads_saved_cli_alias_into_checkpoint_resolution(monkeypat
     assert server._engine.kwargs["model_name"] == "/cache/snapshots/revision/4bit"
 
 
+def test_load_model_detects_config_from_resolved_pulled_variant(monkeypatch):
+    """An uncatalogued repo must inspect the same subfolder it loads.
+
+    ``pull --bits`` leaves the repository root without a ``config.json``.  The
+    marker-aware checkpoint resolver supplies the selected local directory;
+    auto-config and generation defaults must not probe the bare repo first.
+    """
+    from types import SimpleNamespace
+
+    from vllm_mlx import server
+    from vllm_mlx.model_profile import ModelProfile
+
+    _stub_routing_globals(monkeypatch, server)
+    checkpoint = "/cache/snapshots/revision/8bit"
+    monkeypatch.setattr(
+        server,
+        "_resolve_serving_checkpoint",
+        lambda _name, **_kwargs: SimpleNamespace(
+            model_path="publisher/multi-variant",
+            load_path=checkpoint,
+            auto_text_fallback=False,
+            lane_reason="text_checkpoint",
+        ),
+    )
+    detected: list[str] = []
+
+    def detect(path):
+        detected.append(path)
+        return ModelProfile()
+
+    # A bare repo can reverse-resolve to the catalog's default alias. The
+    # persisted 8-bit choice must still make checkpoint metadata authoritative.
+    monkeypatch.setattr(
+        "vllm_mlx.model_aliases.resolve_profile", lambda _name: ModelProfile()
+    )
+    monkeypatch.setattr("vllm_mlx._download_gate.pulled_variant", lambda _name: "8bit")
+    monkeypatch.setattr("vllm_mlx.model_auto_config.detect_model_config", detect)
+    generation_paths: list[str] = []
+    monkeypatch.setattr(
+        "vllm_mlx.utils.generation_config.load_generation_config_sampling",
+        lambda path: generation_paths.append(path) or {},
+    )
+
+    server.load_model("publisher/multi-variant")
+
+    assert detected == [checkpoint]
+    assert generation_paths == [checkpoint]
+    assert server._engine is not None
+    assert server._engine.kwargs["model_name"] == checkpoint
+
+
 def test_materialized_checkpoint_keeps_catalog_vision_memory_floor(monkeypatch):
     from types import SimpleNamespace
 

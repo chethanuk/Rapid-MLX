@@ -3356,7 +3356,16 @@ def serve_command(args):
             auto_config_resolved = True
             return None
         try:
-            auto_config = detect_model_config(args.model)
+            # ``pull --bits/--format`` records the selected subfolder for a
+            # bare multi-variant repo. Read defaults from that concrete
+            # checkpoint, not the config-less repository root. Preserve an
+            # explicit alias because its catalog subfolder outranks a repo
+            # marker by contract.
+            from .utils.tokenizer import _resolve_subfolder_checkpoint
+
+            config_identity = getattr(args, "_original_alias", None) or args.model
+            config_path = _resolve_subfolder_checkpoint(config_identity)
+            auto_config = detect_model_config(config_path)
         except Exception as e:
             if not non_fatal:
                 raise
