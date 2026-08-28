@@ -16,6 +16,7 @@ from scripts import qwen38_streaming_convert as converter
 from scripts.qwen38_streaming_convert import quantized_tensor_names
 from vllm_mlx.kernels.qsa_block_sparse import (
     block_sparse_attention,
+    block_sparse_layout_supported,
     should_use_block_sparse,
 )
 from vllm_mlx.models.qwen4_exp import (
@@ -670,7 +671,14 @@ def test_qsa_block_sparse_selection_keeps_sorted_compact_blocks(monkeypatch):
 
 
 def test_qsa_attention_routes_compact_selection_to_block_kernel(monkeypatch):
-    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    args = _args(
+        indexer_budget=8,
+        indexer_compress_ratio=2,
+        num_attention_heads=24,
+        num_key_value_heads=2,
+        head_dim=256,
+        indexer_head_dim=64,
+    )
     attention = QSAAttention(args)
     observed = []
     monkeypatch.setenv("RAPID_MLX_QSA_BLOCK_SPARSE", "1")
@@ -742,6 +750,56 @@ def test_qsa_attention_routes_compact_selection_to_block_kernel(monkeypatch):
     np.testing.assert_array_equal(block_counts, 4)
     np.testing.assert_array_equal(tail_counts, 2)
     assert block_size == 2
+
+
+def test_qsa_attention_unsupported_layout_stays_on_dense_fallback(monkeypatch):
+    args = _args(indexer_budget=8, indexer_compress_ratio=2)
+    attention = QSAAttention(args)
+    observed_masks = []
+    monkeypatch.setenv("RAPID_MLX_QSA_BLOCK_SPARSE", "1")
+
+    class FakeIndexer:
+        token_budget = 8
+        compress_ratio = 2
+        rope_theta = 10_000_000
+
+        def __call__(self, hidden_states, cache, *, physical_kv_length):
+            length = int(hidden_states.shape[1])
+            return qwen4_exp._QSASelection(
+                token_indices=mx.zeros((1, length, 10), dtype=mx.int32),
+                valid=mx.ones((1, length, 10), dtype=mx.bool_),
+                physical_kv_length=physical_kv_length,
+            )
+
+    class FakeKVCache:
+        offset = 16_384
+        _idx = 16_384
+
+        def size(self):
+            return self._idx
+
+        def update_and_fetch(self, keys, values):
+            return keys, values
+
+    def fail_sparse(*args, **kwargs):
+        raise AssertionError("unsupported layout must not reach sparse attention")
+
+    def fake_dense(queries, keys, values, *, cache, scale, mask):
+        observed_masks.append(mask.shape)
+        return mx.zeros_like(queries)
+
+    attention.indexer = FakeIndexer()
+    monkeypatch.setattr(qwen4_exp, "block_sparse_attention", fail_sparse)
+    monkeypatch.setattr(qwen4_exp, "scaled_dot_product_attention", fake_dense)
+    output = attention(
+        mx.zeros((1, 64, args.hidden_size)),
+        [FakeKVCache(), object()],
+        mask="causal",
+    )
+    mx.eval(output)
+
+    assert output.shape == (1, 64, args.hidden_size)
+    assert observed_masks == [(1, 1, 64, 16_448)]
 
 
 @pytest.mark.skipif(
@@ -878,6 +936,27 @@ def test_qsa_block_sparse_flag_is_opt_in_and_crossover_gated(monkeypatch):
     assert not should_use_block_sparse(63, 32_768)
     assert not should_use_block_sparse(2_048, 16_383)
     assert should_use_block_sparse(64, 16_384) == mx.metal.is_available()
+    assert block_sparse_layout_supported(
+        query_heads=24,
+        kv_heads=2,
+        head_dim=256,
+        block_size=4,
+        dtype=mx.bfloat16,
+    )
+    assert not block_sparse_layout_supported(
+        query_heads=65,
+        kv_heads=1,
+        head_dim=256,
+        block_size=4,
+        dtype=mx.bfloat16,
+    )
+    assert not block_sparse_layout_supported(
+        query_heads=24,
+        kv_heads=2,
+        head_dim=256,
+        block_size=128,
+        dtype=mx.bfloat16,
+    )
 
 
 def test_qsa_batch_prefill_builds_mask_before_kv_update(monkeypatch):

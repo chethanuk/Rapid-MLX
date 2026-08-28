@@ -37,6 +37,7 @@ from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
 
 from ..kernels.qsa_block_sparse import (  # noqa: E402
     block_sparse_attention,
+    block_sparse_layout_supported,
     should_use_block_sparse,
 )
 from .qwen4_exp_cache import QSAIndexCache  # noqa: E402
@@ -876,8 +877,16 @@ class QSAAttention(nn.Module):
         )
         if kv_cache is not None:
             keys, values = kv_cache.update_and_fetch(keys, values)
-        if isinstance(selected, _QSASelection) and should_use_block_sparse(
-            length, physical_length
+        if (
+            isinstance(selected, _QSASelection)
+            and should_use_block_sparse(length, physical_length)
+            and block_sparse_layout_supported(
+                query_heads=self.num_attention_heads,
+                kv_heads=self.num_key_value_heads,
+                head_dim=self.head_dim,
+                block_size=self.indexer.compress_ratio,
+                dtype=queries.dtype,
+            )
         ):
             block_slots = slice(
                 0, self.indexer.token_budget, self.indexer.compress_ratio
