@@ -67,8 +67,8 @@ struct MemoryProjectionInvariantTests {
     /// (falsely) demand confirmation - exactly the #2439 false warning. The
     /// row passes only because the release credit is applied, so deleting
     /// that credit (as an earlier regression did) fails the row.
-    @Test("2439+2443: smart→fast never warns on any curated tier")
-    func test2439_and_2443_smartToFastNeverWarns() throws {
+    @Test("2439+2443: smart→fast never warns on any curated tier", .timeLimit(.minutes(1)))
+    func test2439_and_2443_smartToFastNeverWarns() async throws {
         struct Row {
             let floorGB: Double
             let smart: RAMBucketedDefault.Pick
@@ -132,6 +132,28 @@ struct MemoryProjectionInvariantTests {
                 "tier \(row.floorGB): fast reload without release credit must be unsafe (else this invariant is not load-bearing)"
             )
             #expect(admission.plannedReleaseBytes == UInt64(row.smart.footprintGB * gib))
+
+            // Exercise the production wiring too: ensureServing must choose
+            // releaseModel(currentAlias), apply the admission snapshot, avoid
+            // parking on a false warning, and reach the resident-load client.
+            let server = residencyServer(
+                currentAlias: row.smart.alias,
+                currentFootprintGB: row.smart.footprintGB,
+                host: memorySnapshot(totalGB: totalGB, usedGB: usedWithSmart),
+                session: MemoryInvariantLoadSuccessProtocol.session()
+            )
+            let loaded = await server.ensureServing(
+                alias: row.fast.alias,
+                hfPath: nil,
+                estimatedMemoryGB: row.fast.footprintGB,
+                replacementGroup: .assistant
+            )
+            #expect(loaded, "tier \(row.floorGB): production resident load must proceed")
+            #expect(server.pendingMemoryWarning == nil)
+            #expect(server.state == .ready(alias: row.fast.alias))
+            #expect(server.isModelResident(row.smart.alias),
+                    "in-process replacement rejection/success must not stop the live sidecar")
+            server._testClearChild()
         }
     }
 
@@ -426,6 +448,37 @@ struct MemoryProjectionInvariantTests {
         #expect(otherReason.rejectionMessage(alias: "qwen3.8-27b-4bit") == nil)
     }
 
+    @Test("2444: typed 507 rejection preserves the live resident process", .timeLimit(.minutes(1)))
+    func test2444_typed507PreservesResident() async {
+        let currentAlias = "qwen3.5-4b-4bit"
+        let targetAlias = "qwen3.8-27b-4bit"
+        let server = residencyServer(
+            currentAlias: currentAlias,
+            currentFootprintGB: 4,
+            host: memorySnapshot(totalGB: 64, usedGB: 8),
+            session: MemoryInvariantProjectionRejectProtocol.session()
+        )
+        defer { server._testClearChild() }
+
+        let loaded = await server.ensureServing(
+            alias: targetAlias,
+            hfPath: nil,
+            estimatedMemoryGB: 20,
+            replacementGroup: .assistant
+        )
+
+        #expect(!loaded)
+        #expect(server.pendingMemoryWarning == nil,
+                "Desktop preflight is safe; this rejection must come from the typed 507")
+        #expect(server.state == .ready(alias: currentAlias))
+        #expect(server.servingAlias == currentAlias)
+        #expect(server.isModelResident(currentAlias))
+        let failure = server.residentLoadFailure(for: targetAlias)
+        #expect(failure?.message.contains("release about 6 GB") == true)
+        #expect(failure?.message.contains("26 GB") == true)
+        #expect(failure?.message.contains("24 GB model-memory budget") == true)
+    }
+
     // MARK: - Helpers
 
     private func memorySnapshot(totalGB: Double, usedGB: Double) -> MemoryProbe.Snapshot {
@@ -474,4 +527,73 @@ struct MemoryProjectionInvariantTests {
             audioLanes: []
         )
     }
+
+    private func residencyServer(
+        currentAlias: String,
+        currentFootprintGB: Double,
+        host: MemoryProbe.Snapshot,
+        session: URLSession
+    ) -> ServerManager {
+        var client = ServerResidencyClient()
+        client.session = session
+        let server = ServerManager(
+            testingState: .ready(alias: currentAlias),
+            residency: residency(
+                alias: currentAlias,
+                measuredGB: currentFootprintGB,
+                modality: "text"
+            ),
+            activeBearer: "memory-invariant-test"
+        )
+        server._testSetResidencyClient(client)
+        server._testInstallChild(ProcessGroupChild.testStub())
+        server.memorySnapshotProvider = { host }
+        return server
+    }
+}
+
+private final class MemoryInvariantLoadSuccessProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MemoryInvariantLoadSuccessProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override func startLoading() {
+        let payload = Data(#"{"id":"loaded-model","model_path":"repo/loaded-model","aliases":[],"modality":"text","state":"resident","pinned":false,"primary":true,"active_requests":0,"estimated_bytes":1,"measured_bytes":null,"idle_seconds":0}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class MemoryInvariantProjectionRejectProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MemoryInvariantProjectionRejectProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override func startLoading() {
+        let payload = Data(#"{"error":{"message":"insufficient capacity"},"replacement_projection":{"strategy":"evict_first_if_needed","reason":"role_capacity_insufficient_after_eviction","models_to_free":[{"id":"old-chat","estimated_bytes":6442450944}],"current_bytes":12884901888,"requested_bytes":21474836480,"projected_bytes":27917287424,"limit_bytes":25769803776}}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 507, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
