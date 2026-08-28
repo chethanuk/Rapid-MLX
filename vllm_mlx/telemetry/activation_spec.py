@@ -45,7 +45,8 @@ ACTIVATION_KINDS: frozenset[str] = (
 )
 
 # Where the milestone happened. ``cli`` = the interactive REPL / a CLI
-# subcommand; ``api`` = the HTTP server serving an external caller.
+# subcommand; ``api`` = the HTTP server serving an external caller;
+# ``desktop`` = the native Mac app.
 SURFACE_CLI = "cli"
 SURFACE_API = "api"
 SURFACE_DESKTOP = "desktop"
