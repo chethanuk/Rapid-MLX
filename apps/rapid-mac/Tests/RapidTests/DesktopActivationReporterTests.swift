@@ -130,21 +130,57 @@ struct DesktopActivationReporterTests {
         )
     }
 
-    @Test("A rejected activation never claims the accepted-delivery marker")
-    func rejectedSendDoesNotClaim() async {
+    @Test("A permanent rejection is suppressed for this process without claiming the accepted marker")
+    func rejectedSendDoesNotRepeatOrClaim() async {
         let directory = temporaryDirectory("rejected")
         defer { try? FileManager.default.removeItem(at: directory) }
+        let probe = ActivationReporterProbe()
         let reporter = DesktopActivationReporter(
             isEnabled: { true },
             buildEvent: { event($0) },
-            sendEvent: { _ in .discard },
+            sendEvent: { event in
+                await probe.didSend(event)
+                return .discard
+            },
             markerDirectory: directory
         )
 
         await reporter.report(.firstChatReply)
+        await reporter.report(.firstChatReply)
 
+        #expect(await probe.sentCount == 1)
         #expect(
             !FileManager.default.fileExists(
+                atPath: directory
+                    .appendingPathComponent("activation_seen_desktop_first_chat_reply")
+                    .path
+            )
+        )
+    }
+
+    @Test("Consent revoked during a discarded send stays retryable after Settings opt-in")
+    func revokedDiscardCanRetry() async {
+        let directory = temporaryDirectory("discarded-revoked")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let probe = ActivationReporterProbe(results: [.discard, .accepted])
+        let reporter = DesktopActivationReporter(
+            isEnabled: { probe.isEnabled },
+            buildEvent: { event($0) },
+            sendEvent: { event in
+                let result = await probe.nextResult(for: event)
+                if result == .discard { probe.isEnabled = false }
+                return result
+            },
+            markerDirectory: directory
+        )
+
+        await reporter.report(.firstChatReply)
+        probe.isEnabled = true
+        await reporter.report(.firstChatReply)
+
+        #expect(await probe.sentCount == 2)
+        #expect(
+            FileManager.default.fileExists(
                 atPath: directory
                     .appendingPathComponent("activation_seen_desktop_first_chat_reply")
                     .path

@@ -69,10 +69,24 @@ actor DesktopActivationReporter {
         // can never retire a milestone that did not actually leave the Mac.
         // If consent changed after a real accepted send, leaving the marker
         // retryable permits only a harmless DISTINCT-client deduplicated replay.
-        guard delivery == .accepted, isEnabled() else { return }
-
-        _ = claimMarker(at: marker)
-        resolvedThisProcess.insert(kind)
+        switch delivery {
+        case .accepted:
+            guard isEnabled() else { return }
+            _ = claimMarker(at: marker)
+            resolvedThisProcess.insert(kind)
+        case .discard:
+            // A permanent 4xx or invalid local envelope must not turn one
+            // milestone into a request on every later feature success. Keep
+            // the durable marker unclaimed so a future app launch can retry
+            // after an update. An opt-out racing the send also reports
+            // ``discard``; leave that case unresolved so a later Settings
+            // opt-in in this process can still deliver the milestone.
+            if isEnabled() {
+                resolvedThisProcess.insert(kind)
+            }
+        case .retry:
+            break
+        }
     }
 
     private func markerURL(for kind: Kind) -> URL {
