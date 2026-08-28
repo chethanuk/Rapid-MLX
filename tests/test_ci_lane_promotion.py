@@ -279,14 +279,17 @@ def test_metadata_gate_settles_only_live_exact_head_successful_full_ci():
     assert 'LIVE_HEAD_SHA" != "$RUN_SHA' in run
     assert 'FULL_CI" != true' in run
     assert 'JOB_CONCLUSION" != success' in run
-    assert '.conclusion == "success"' in run
+    assert '.conclusion != "cancelled"' in run
+    assert 'EVIDENCE_RUN_CONCLUSION" != success' in run
     assert "actions/runs/${EVIDENCE_RUN_ID}/jobs" in run
     assert "actions/workflows/${WORKFLOW_FILE}/runs" in run
     assert 'state: "success"' in run
     assert "statuses/${RUN_SHA}" in run
 
 
-def test_metadata_gate_uses_success_before_higher_cancelled_duplicate(tmp_path):
+def _execute_metadata_settlement(
+    tmp_path: Path, *, runs: list[tuple[int, str]]
+) -> tuple[dict[str, str] | None, str]:
     run = _step_run(
         LABEL_GATE_WORKFLOW,
         "settle-completed-gate",
@@ -301,7 +304,7 @@ set -euo pipefail
 case "$*" in
   "api repos/test/repo/pulls/7") cat "$MOCK_PR_JSON" ;;
   *"/actions/workflows/rapid-mac-ci.yml/runs?"*) cat "$MOCK_RUNS_JSON" ;;
-  *"/actions/runs/90/jobs?"*) cat "$MOCK_JOBS_JSON" ;;
+  *"/actions/runs/"*"/jobs?"*) cat "$MOCK_JOBS_JSON" ;;
   *"--method POST"*) cat > "$MOCK_POST" ;;
   *) echo "unexpected gh invocation: $*" >&2; exit 91 ;;
 esac
@@ -329,19 +332,13 @@ esac
             {
                 "workflow_runs": [
                     {
-                        "id": 91,
+                        "id": run_id,
                         "head_sha": head_sha,
                         "status": "completed",
-                        "conclusion": "cancelled",
-                        "html_url": "https://example.invalid/run/91",
-                    },
-                    {
-                        "id": 90,
-                        "head_sha": head_sha,
-                        "status": "completed",
-                        "conclusion": "success",
-                        "html_url": "https://example.invalid/run/90",
-                    },
+                        "conclusion": conclusion,
+                        "html_url": f"https://example.invalid/run/{run_id}",
+                    }
+                    for run_id, conclusion in runs
                 ]
             }
         )
@@ -363,20 +360,36 @@ esac
         "RUN_NAME": "rapid-mac CI",
         "RUN_SHA": head_sha,
         "RUNNER_TEMP": str(tmp_path),
-        "TRIGGER_RUN_ID": "91",
+        "TRIGGER_RUN_ID": str(max(run_id for run_id, _ in runs)),
     }
 
     completed = subprocess.run(
         ["bash", "-c", run], check=True, env=env, capture_output=True, text=True
     )
-    assert post.exists(), completed.stdout + completed.stderr
-    payload = json.loads(post.read_text())
+    payload = json.loads(post.read_text()) if post.exists() else None
+    return payload, completed.stdout + completed.stderr
+
+
+def test_metadata_gate_uses_success_before_higher_cancelled_duplicate(tmp_path):
+    payload, output = _execute_metadata_settlement(
+        tmp_path, runs=[(91, "cancelled"), (90, "success")]
+    )
+    assert payload is not None, output
     assert payload == {
         "state": "success",
         "context": "desktop-tests",
         "description": "Exact-head full-CI merge gate passed",
         "target_url": "https://example.invalid/run/90",
     }
+
+
+def test_metadata_gate_does_not_mask_newer_failure_with_older_success(tmp_path):
+    payload, output = _execute_metadata_settlement(
+        tmp_path,
+        runs=[(92, "failure"), (91, "cancelled"), (90, "success")],
+    )
+    assert payload is None
+    assert "evidence_run=92 workflow=failure" in output
 
 
 def test_all_strict_required_workflows_emit_on_merge_group():

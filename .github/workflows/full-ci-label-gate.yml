@@ -217,21 +217,26 @@ jobs:
           # A label event can create a higher-ID duplicate after an already-
           # successful exact-head run. If that duplicate is cancelled, its
           # completion event must recover the pending status instead of hiding
-          # the valid evidence. Select the latest successful run, not merely
-          # the numerically newest run that GitHub returned.
+          # the valid evidence. Ignore cancelled duplicates, but keep newer
+          # failures authoritative so an older success cannot mask them.
           EVIDENCE_RUN=$(jq -c --arg sha "$RUN_SHA" '
             [.workflow_runs[]
               | select(
                   .head_sha == $sha and
                   .status == "completed" and
-                  .conclusion == "success"
+                  .conclusion != "cancelled"
                 )]
             | if length > 0 then max_by(.id) else empty end
           ' "$RUNS_JSON")
           EVIDENCE_RUN_ID=$(jq -r '.id // empty' <<< "$EVIDENCE_RUN")
           EVIDENCE_RUN_URL=$(jq -r '.html_url // empty' <<< "$EVIDENCE_RUN")
+          EVIDENCE_RUN_CONCLUSION=$(jq -r '.conclusion // empty' <<< "$EVIDENCE_RUN")
           if [ -z "$EVIDENCE_RUN_ID" ] || [ -z "$EVIDENCE_RUN_URL" ]; then
-            echo "No successful exact-head $RUN_NAME evidence is available (trigger_run=$TRIGGER_RUN_ID); leaving status pending."
+            echo "No non-cancelled exact-head $RUN_NAME evidence is available (trigger_run=$TRIGGER_RUN_ID); leaving status pending."
+            exit 0
+          fi
+          if [ "$EVIDENCE_RUN_CONCLUSION" != success ]; then
+            echo "The latest non-cancelled exact-head $RUN_NAME run did not succeed (evidence_run=$EVIDENCE_RUN_ID workflow=${EVIDENCE_RUN_CONCLUSION:-missing}); leaving status pending."
             exit 0
           fi
 
