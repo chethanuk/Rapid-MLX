@@ -81,14 +81,18 @@ struct ServerManagerStateTests {
             }
         }
 
+        // Observe only the termination callback here. Polling
+        // `isProcessGroupAlive` would exercise the WNOHANG fallback and could
+        // make this test pass even if the dispatch source never fired.
         let exited = await waitUntil(deadline: Date().addingTimeInterval(3)) {
-            !child.isProcessGroupAlive
+            !observations.snapshot.isEmpty
         }
         #expect(exited)
         #expect(!child.isRunning)
         #expect(child.terminationStatus == 31)
         // The transition is published exactly once by a single reaper.
         #expect(observations.snapshot == [31])
+        #expect(!child.isProcessGroupAlive)
     }
 
     @Test("Process liveness reaps an exited leader when the event source is delayed")
