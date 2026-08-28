@@ -202,6 +202,23 @@ Production activation is an owner operation and must happen in this order:
    lanes. Then remove `merge-ready` from a queued test PR and verify it leaves
    the queue without merging.
 
+### Operator observation
+
+Capture the immutable head of every candidate before authorizing it:
+
+```bash
+gh pr view <PR_NUMBER> --repo raullenchai/Rapid-MLX \
+  --json headRefOid,mergeStateStatus,statusCheckRollup
+gh pr edit <PR_NUMBER> --repo raullenchai/Rapid-MLX \
+  --add-label merge-ready
+```
+
+The queue-generated pull request is the integration artifact. Its commit must
+contain the recorded candidate heads, and its `tests`, `desktop-tests`, and
+`version-bump-guard` checks must all complete successfully. Green checks on the
+original pull requests are admission evidence, not a substitute for the
+combined result.
+
 Do not enable batching while strict up-to-date protection remains on, and do
 not weaken or remove any required context to make a batch move. A missing,
 cancelled, or failed aggregate is a queue failure.
