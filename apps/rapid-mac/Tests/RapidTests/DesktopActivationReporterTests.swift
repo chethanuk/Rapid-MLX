@@ -130,6 +130,36 @@ struct DesktopActivationReporterTests {
         )
     }
 
+    @Test("A concurrent success retries an in-flight transport failure", .timeLimit(.minutes(1)))
+    func concurrentSuccessRetriesFailedInFlightSend() async {
+        let directory = temporaryDirectory("concurrent-retry")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let probe = InFlightActivationRetryProbe()
+        let reporter = DesktopActivationReporter(
+            isEnabled: { true },
+            buildEvent: { event($0) },
+            sendEvent: { event in await probe.send(event) },
+            markerDirectory: directory
+        )
+
+        let first = Task { await reporter.report(.firstImage) }
+        await probe.waitUntilFirstSendStarted()
+        // Actor reentrancy admits this call while the first transport awaits.
+        // It must become a retry opportunity rather than disappear.
+        await reporter.report(.firstImage)
+        await probe.failFirstSend()
+        await first.value
+
+        #expect(await probe.sentCount == 2)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: directory
+                    .appendingPathComponent("activation_seen_desktop_first_image")
+                    .path
+            )
+        )
+    }
+
     @Test("A permanent rejection is suppressed for this process without claiming the accepted marker")
     func rejectedSendDoesNotRepeatOrClaim() async {
         let directory = temporaryDirectory("rejected")
@@ -214,6 +244,40 @@ struct DesktopActivationReporterTests {
                     .path
             )
         )
+    }
+}
+
+private actor InFlightActivationRetryProbe {
+    private var sends = 0
+    private var firstSendStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstDelivery: CheckedContinuation<TelemetryClient.BatchDelivery, Never>?
+
+    var sentCount: Int { sends }
+
+    func send(_ event: TelemetryEvent) async -> TelemetryClient.BatchDelivery {
+        _ = event
+        sends += 1
+        guard sends == 1 else { return .accepted }
+        return await withCheckedContinuation { continuation in
+            firstDelivery = continuation
+            firstSendStarted = true
+            let waiters = startWaiters
+            startWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func waitUntilFirstSendStarted() async {
+        guard !firstSendStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func failFirstSend() {
+        firstDelivery?.resume(returning: .retry)
+        firstDelivery = nil
     }
 }
 

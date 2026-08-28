@@ -25,6 +25,7 @@ actor DesktopActivationReporter {
     private let markerDirectory: URL
     private var resolvedThisProcess: Set<Kind> = []
     private var inFlight: Set<Kind> = []
+    private var pendingWhileInFlight: Set<Kind> = []
 
     init(
         isEnabled: @escaping Enabled = { TelemetryConfig.isEnabled },
@@ -47,7 +48,11 @@ actor DesktopActivationReporter {
     }
 
     func report(_ kind: Kind) async {
-        guard !resolvedThisProcess.contains(kind), !inFlight.contains(kind) else { return }
+        guard !resolvedThisProcess.contains(kind) else { return }
+        if inFlight.contains(kind) {
+            pendingWhileInFlight.insert(kind)
+            return
+        }
 
         // This is the privacy boundary. Do not even inspect the marker path
         // until the durable shared consent says telemetry is enabled.
@@ -60,32 +65,49 @@ actor DesktopActivationReporter {
         }
 
         inFlight.insert(kind)
+        defer {
+            inFlight.remove(kind)
+            pendingWhileInFlight.remove(kind)
+        }
         let event = buildEvent(kind)
-        let delivery = await sendEvent(event)
-        inFlight.remove(kind)
-        // ``TelemetryClient.sendBatch`` deliberately reports opted-out as a
-        // cleanup-success to its crash-marker caller. Re-check here before
-        // claiming an activation marker so a Settings opt-out racing this send
-        // can never retire a milestone that did not actually leave the Mac.
-        // If consent changed after a real accepted send, leaving the marker
-        // retryable permits only a harmless DISTINCT-client deduplicated replay.
-        switch delivery {
-        case .accepted:
-            guard isEnabled() else { return }
-            _ = claimMarker(at: marker)
-            resolvedThisProcess.insert(kind)
-        case .discard:
-            // A permanent 4xx or invalid local envelope must not turn one
-            // milestone into a request on every later feature success. Keep
-            // the durable marker unclaimed so a future app launch can retry
-            // after an update. An opt-out racing the send also reports
-            // ``discard``; leave that case unresolved so a later Settings
-            // opt-in in this process can still deliver the milestone.
-            if isEnabled() {
+        while true {
+            let delivery = await sendEvent(event)
+            let hasPendingSuccess = pendingWhileInFlight.remove(kind) != nil
+            // ``TelemetryClient.sendBatch`` deliberately reports opted-out as
+            // a cleanup-success to its crash-marker caller. Re-check here
+            // before claiming an activation marker so a Settings opt-out
+            // racing this send can never retire a milestone that did not
+            // actually leave the Mac. If consent changed after a real accepted
+            // send, leaving the marker retryable permits only a harmless
+            // DISTINCT-client deduplicated replay.
+            switch delivery {
+            case .accepted:
+                guard isEnabled() else { return }
+                _ = claimMarker(at: marker)
                 resolvedThisProcess.insert(kind)
+                return
+            case .discard:
+                // A permanent 4xx or invalid local envelope must not turn one
+                // milestone into a request on every later feature success.
+                // Keep the durable marker unclaimed so a future app launch can
+                // retry after an update. An opt-out racing the send also
+                // reports ``discard``; leave that case unresolved so a later
+                // Settings opt-in in this process can still deliver it.
+                if isEnabled() {
+                    resolvedThisProcess.insert(kind)
+                }
+                return
+            case .retry:
+                // A successful product action that arrived while this request
+                // was suspended is the next retry opportunity. Coalesce any
+                // number of such calls into one resend; without one, leave the
+                // milestone unresolved for the next product success.
+                guard hasPendingSuccess, isEnabled() else { return }
+                if FileManager.default.fileExists(atPath: marker.path) {
+                    resolvedThisProcess.insert(kind)
+                    return
+                }
             }
-        case .retry:
-            break
         }
     }
 
