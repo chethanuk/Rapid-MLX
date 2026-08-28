@@ -772,12 +772,12 @@ final class ServerManager {
     /// on. It bounds the fallback's lifecycle so a record derived from an older
     /// catalog epoch is re-derived from the authoritative catalog before it may
     /// be trusted again.
-    struct CatalogProvenStart: Equatable, Sendable {
+    struct CatalogEntryHint: Equatable, Sendable {
         let entry: ModelEntry
         let generation: UInt
     }
 
-    private var catalogProvenStartEntries: [String: CatalogProvenStart] = [:]
+    private var catalogProvenStartEntries: [String: CatalogEntryHint] = [:]
 
     /// v0.6 audit P1 (ServerManager — silent-crash detection):
     /// once the child has reported ready, continue polling /healthz
@@ -1130,23 +1130,31 @@ final class ServerManager {
     ///
     /// ``catalog`` is the authoritative snapshot (already correctly keyed to
     /// ``generation`` by ``ModelCatalogCache``). An empty ``catalog`` carries
-    /// no authority, so nothing is dropped — a transient probe failure must not
-    /// cancel the retained proof the memory-confirmation re-entry relies on.
+    /// no row authority, so a transient probe failure preserves only proofs
+    /// already derived from this same generation. An epoch change still drops
+    /// older proofs even when the refreshed probe fails.
     /// A retained entry survives only while its alias still resolves to the
     /// chat lane in this epoch and the entry was derived from this same
     /// generation. Pure (``nonisolated``) so the lifecycle is unit-testable
     /// without a sidecar or a main-actor context.
     nonisolated static func reconcilingProvenance(
-        _ store: [String: CatalogProvenStart],
+        _ store: [String: CatalogEntryHint],
         against catalog: [ModelEntry],
         generation: UInt
-    ) -> [String: CatalogProvenStart] {
-        guard !store.isEmpty, !catalog.isEmpty else { return store }
-        return store.filter { _, record in
+    ) -> [String: CatalogEntryHint] {
+        guard !store.isEmpty else { return store }
+        let currentEpoch = store.filter { _, record in
             // A fallback derived from an earlier catalog epoch is stale by
             // definition: it must be re-derived from this authoritative
             // snapshot before it may be trusted.
-            guard record.generation == generation else { return false }
+            record.generation == generation
+        }
+        // An empty array is the catalog subprocess-failure sentinel. It cannot
+        // disprove entries from this epoch, but an epoch advance is authority
+        // in its own right: old hints must not cross it even when the refreshed
+        // subprocess fails.
+        guard !catalog.isEmpty else { return currentEpoch }
+        return currentEpoch.filter { _, record in
             // The authoritative snapshot removes the alias (no row) or
             // reclassifies its lane (no longer chat): the chat fallback must
             // not survive it.
@@ -1155,6 +1163,22 @@ final class ServerManager {
             }) else { return false }
             return current.kind == .chat
         }
+    }
+
+    /// Accept a UI catalog hint only when its source epoch is explicit and is
+    /// still the epoch being served. A bare entry cannot be relabelled with the
+    /// current generation after an await: the UI row may have come from an
+    /// older snapshot.
+    nonisolated static func validatedCatalogHint(
+        alias: String,
+        hint: CatalogEntryHint?,
+        generation: UInt
+    ) -> CatalogEntryHint? {
+        guard let hint,
+              hint.generation == generation,
+              hint.entry.alias.caseInsensitiveCompare(alias) == .orderedSame
+        else { return nil }
+        return hint
     }
 
     /// Instance wrapper over ``reconcilingProvenance`` — reconcile the retained
@@ -1174,14 +1198,14 @@ final class ServerManager {
     /// Issue #2364 test seam — seed the retained chat-lane provenance so a
     /// lifecycle test can drive reclassification invalidation without a live
     /// sidecar. Production code never calls this.
-    internal func _testSetCatalogProvenStart(_ entries: [String: CatalogProvenStart]) {
+    internal func _testSetCatalogProvenStart(_ entries: [String: CatalogEntryHint]) {
         catalogProvenStartEntries = entries
     }
 
     /// Issue #2364 test seam — observe the retained chat-lane provenance after
     /// a reconciliation, and exercise the instance reconcile against an
     /// authoritative snapshot exactly as ``start`` does.
-    internal var _testCatalogProvenStartEntries: [String: CatalogProvenStart] {
+    internal var _testCatalogProvenStartEntries: [String: CatalogEntryHint] {
         catalogProvenStartEntries
     }
 
@@ -1368,10 +1392,18 @@ final class ServerManager {
         replacementGroup: ResidentModelReplacementGroup? = nil,
         imageMode: ResidentImageMode? = nil,
         residencyEligible: Bool = true,
-        catalogEntryHint: ModelEntry? = nil
+        catalogEntryHint: CatalogEntryHint? = nil
     ) async -> Bool {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        let catalogGeneration = downloads?.cacheGeneration ?? 0
+        if let validatedHint = Self.validatedCatalogHint(
+            alias: trimmed,
+            hint: catalogEntryHint,
+            generation: catalogGeneration
+        ) {
+            catalogProvenStartEntries[trimmed.lowercased()] = validatedHint
+        }
         let requestedPerformanceFlags = perfLaunchFlagsProvider?(trimmed) ?? []
         var requestedCatalogSupportsImageInput = false
         var probedCatalogEntry: ModelEntry?
@@ -1379,7 +1411,6 @@ final class ServerManager {
         // authoritatively. This probe is needed only to decide whether an
         // already-running text-lane sidecar can accept a resident load.
         if child != nil, let binary = binaryPath {
-            let catalogGeneration = downloads?.cacheGeneration ?? 0
             let catalogSnapshot = await ModelCatalogCache.shared.entries(
                 binary: binary,
                 generation: catalogGeneration
@@ -1404,8 +1435,11 @@ final class ServerManager {
         let provenCatalogEntry = Self.readyCatalogEntry(
             alias: trimmed,
             probed: probedCatalogEntry,
-            hint: catalogEntryHint
+            hint: catalogProvenStartEntries[trimmed.lowercased()]?.entry
         )
+        let provenCatalogHint = provenCatalogEntry.map {
+            CatalogEntryHint(entry: $0, generation: catalogGeneration)
+        }
         let requiresImageLaneRestart = Self.requiresProcessRestartForImageCapability(
             catalogSupportsImageInput: requestedCatalogSupportsImageInput,
             userOverrides: requestedPerformanceFlags,
@@ -1681,7 +1715,7 @@ final class ServerManager {
             hfPath: hfPath,
             memoryRequestID: memoryRequestID,
             memoryAdmission: replacementMemoryAdmission,
-            catalogEntryHint: provenCatalogEntry
+            catalogEntryHint: provenCatalogHint
         )
         // ``start`` also returns without spawning when the pre-load
         // memory guard parks the load on a confirmation prompt. Reading
@@ -2110,7 +2144,7 @@ final class ServerManager {
         memoryRequestID: UUID? = nil,
         isLaunchAutoStart: Bool = false,
         memoryAdmission: MemoryAdmissionContext? = nil,
-        catalogEntryHint: ModelEntry? = nil
+        catalogEntryHint: CatalogEntryHint? = nil
     ) async {
         // Issue #278: a manual restart is the user taking over the
         // lifecycle — reset the budget at entry so a previously
@@ -2146,17 +2180,13 @@ final class ServerManager {
             )
             return
         }
-        if let hintedEntry = Self.readyCatalogEntry(
+        let startCatalogGeneration = downloads?.cacheGeneration ?? 0
+        if let validatedHint = Self.validatedCatalogHint(
             alias: trimmedAlias,
-            probed: nil,
-            hint: catalogEntryHint
+            hint: catalogEntryHint,
+            generation: startCatalogGeneration
         ) {
-            // Retain with the catalog generation the entry was derived from
-            // so a later authoritative snapshot can invalidate it (#2364).
-            catalogProvenStartEntries[trimmedAlias.lowercased()] = CatalogProvenStart(
-                entry: hintedEntry,
-                generation: downloads?.cacheGeneration ?? 0
-            )
+            catalogProvenStartEntries[trimmedAlias.lowercased()] = validatedHint
         }
 
         // Pre-load memory guard (#324). Loading a model whose footprint,
@@ -2318,8 +2348,7 @@ final class ServerManager {
         let catalogEntry = Self.readyCatalogEntry(
             alias: trimmedAlias,
             probed: probedCatalogEntry,
-            hint: catalogEntryHint
-                ?? catalogProvenStartEntries[trimmedAlias.lowercased()]?.entry
+            hint: catalogProvenStartEntries[trimmedAlias.lowercased()]?.entry
         )
         if Task.isCancelled || didSignalShutdown { return }
         guard !isOperating, child == nil else { return }

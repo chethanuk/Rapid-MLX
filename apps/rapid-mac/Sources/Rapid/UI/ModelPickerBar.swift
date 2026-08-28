@@ -101,6 +101,9 @@ struct ModelPickerBar: View {
     /// See ``ModelPickerVisibility`` for the threshold and copy.
     @AppStorage(ModelPickerVisibility.showAllStorageKey) private var showAllModels: Bool = false
     @State private var catalog: [ModelEntry] = []
+    /// Generation that produced ``catalog``. Kept beside the rows so a click
+    /// cannot relabel a stale entry with a newer download generation.
+    @State private var catalogGeneration: UInt = 0
     @State private var loadingCatalog = false
     @State private var showCustom = false
     @State private var customDraft = ""
@@ -1570,7 +1573,12 @@ struct ModelPickerBar: View {
             await server.start(
                 alias: trimmed,
                 hfPath: hfPath,
-                catalogEntryHint: catalogEntry
+                catalogEntryHint: catalogEntry.map {
+                    ServerManager.CatalogEntryHint(
+                        entry: $0,
+                        generation: catalogGeneration
+                    )
+                }
             )
         }
     }
@@ -1983,11 +1991,15 @@ struct ModelPickerBar: View {
         // Route the catalog read through the shared cache (#1470) so re-entering
         // settings does not re-spawn the lister subprocess. Keep the ``loaded``
         // name so the phantom-alias filter below (``entries``) is unchanged.
+        let generation = downloads.cacheGeneration
         let loaded = await ModelCatalogCache.shared.entries(
             binary: binary,
-            generation: downloads.cacheGeneration
+            generation: generation
         )
-        guard !Task.isCancelled, catalogRefreshGeneration == refreshGeneration else { return }
+        guard !Task.isCancelled,
+              catalogRefreshGeneration == refreshGeneration,
+              generation == downloads.cacheGeneration
+        else { return }
         // Belt-and-braces against a phantom alias reaching the UI.
         // ``ModelCatalog.parseAvailable`` already drops engine banner
         // lines, but this guard means a NEW banner shape can at worst
@@ -1996,6 +2008,7 @@ struct ModelPickerBar: View {
         // ``recommendedDefault`` below.
         let entries = loaded.filter { !ModelDisplayName.isUnresolved($0.alias) }
         self.catalog = entries
+        catalogGeneration = generation
         // Default selection: only apply if the current alias is blank or
         // not in the catalog (catalog absence still means manual pick).
         if alias.isEmpty || !entries.contains(where: { $0.alias == alias }) {

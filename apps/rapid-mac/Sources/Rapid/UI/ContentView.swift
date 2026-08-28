@@ -796,7 +796,12 @@ struct ContentView: View {
                 hfPath: hfPath,
                 estimatedMemoryGB: nil,
                 replacementGroup: .assistant,
-                catalogEntryHint: catalogEntry
+                catalogEntryHint: catalogEntry.map {
+                    ServerManager.CatalogEntryHint(
+                        entry: $0,
+                        generation: catalogGeneration
+                    )
+                }
             )
         }
     }
@@ -828,7 +833,12 @@ struct ContentView: View {
                 hfPath: hfPath,
                 estimatedMemoryGB: nil,
                 replacementGroup: .assistant,
-                catalogEntryHint: entry
+                catalogEntryHint: entry.map {
+                    ServerManager.CatalogEntryHint(
+                        entry: $0,
+                        generation: catalogGeneration
+                    )
+                }
             )
         }
     }
@@ -850,7 +860,12 @@ struct ContentView: View {
                 hfPath: hfPath,
                 estimatedMemoryGB: nil,
                 replacementGroup: .assistant,
-                catalogEntryHint: catalogEntry
+                catalogEntryHint: catalogEntry.map {
+                    ServerManager.CatalogEntryHint(
+                        entry: $0,
+                        generation: catalogGeneration
+                    )
+                }
             )
         }
     }
@@ -929,6 +944,7 @@ struct ContentView: View {
             server: server,
             cachedModels: catalogEntries,
             catalogLoaded: catalogLoaded,
+            catalogGeneration: catalogGeneration,
             onSkip: {
                 modelChoiceRecoveryRequested = false
                 quickstartDismissedThisSession = true
@@ -1436,7 +1452,12 @@ struct ContentView: View {
             await server.start(
                 alias: resume,
                 isLaunchAutoStart: true,
-                catalogEntryHint: catalogEntry
+                catalogEntryHint: catalogEntry.map {
+                    ServerManager.CatalogEntryHint(
+                        entry: $0,
+                        generation: catalogGeneration
+                    )
+                }
             )
         case .promptDownload(let pending):
             let footprint = ModelSizing.estimate(alias: pending)

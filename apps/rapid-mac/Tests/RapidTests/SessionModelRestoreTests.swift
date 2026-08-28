@@ -207,11 +207,11 @@ struct SessionModelRestoreTests {
     }
 
     @Test(
-        "ensureServing carries chat provenance when its ready-time catalog probe fails",
+        "ensureServing rejects a UI hint contradicted by the authoritative catalog",
         .timeLimit(.minutes(1))
     )
     @MainActor
-    func ensureServingPersistsHintedChatAfterProbeFailure() async throws {
+    func ensureServingRejectsHintMissingFromCatalog() async throws {
         let suite = "SessionModelRestoreTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -234,12 +234,15 @@ struct SessionModelRestoreTests {
             hfPath: chat.hfRepo,
             estimatedMemoryGB: nil,
             replacementGroup: .assistant,
-            catalogEntryHint: chat
+            catalogEntryHint: ServerManager.CatalogEntryHint(
+                entry: chat,
+                generation: 0
+            )
         )
 
         #expect(ready)
         #expect(server.servingAlias == chat.alias)
-        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == chat.alias)
+        #expect(defaults.string(forKey: SessionModelRestore.chatAliasStorageKey) == "previous-chat")
         await server.stop()
     }
 
@@ -254,7 +257,7 @@ struct SessionModelRestoreTests {
         "Cat 2364: removing the alias in a newer authoritative catalog invalidates its retained chat fallback"
     )
     func provenanceInvalidatedWhenAuthoritativeCatalogRemovesAlias() {
-        let fallback = ServerManager.CatalogProvenStart(
+        let fallback = ServerManager.CatalogEntryHint(
             entry: chat, generation: 7
         )
         let retained = [chat.alias.lowercased(): fallback]
@@ -273,7 +276,7 @@ struct SessionModelRestoreTests {
         "Cat 2364: reclassifying the alias to audio in a newer authoritative catalog invalidates its retained chat fallback"
     )
     func provenanceInvalidatedWhenAuthoritativeCatalogReclassifiesLane() {
-        let fallback = ServerManager.CatalogProvenStart(
+        let fallback = ServerManager.CatalogEntryHint(
             entry: chat, generation: 7
         )
         let retained = [chat.alias.lowercased(): fallback]
@@ -302,7 +305,7 @@ struct SessionModelRestoreTests {
         "Cat 2364: a chat fallback survives while the authoritative catalog still classifies it as chat"
     )
     func provenanceSurvivesUnchangedAuthoritativeCatalog() {
-        let fallback = ServerManager.CatalogProvenStart(
+        let fallback = ServerManager.CatalogEntryHint(
             entry: chat, generation: 7
         )
         let retained = [chat.alias.lowercased(): fallback]
@@ -323,7 +326,7 @@ struct SessionModelRestoreTests {
         "Cat 2364: a catalog-epoch change bounds the fallback lifecycle even when the alias stays chat"
     )
     func provenanceIsBoundedToItsCatalogEpoch() {
-        let fallback = ServerManager.CatalogProvenStart(
+        let fallback = ServerManager.CatalogEntryHint(
             entry: chat, generation: 7
         )
         let retained = [chat.alias.lowercased(): fallback]
@@ -341,10 +344,47 @@ struct SessionModelRestoreTests {
     }
 
     @Test(
-        "Cat 2364: a failed (empty) catalog probe does not wipe retained provenance"
+        "Cat 2364: an epoch advance invalidates retained provenance even when the refreshed probe fails"
+    )
+    func provenanceDoesNotCrossEpochOnEmptyProbe() {
+        let fallback = ServerManager.CatalogEntryHint(
+            entry: chat, generation: 7
+        )
+
+        let reconciled = ServerManager.reconcilingProvenance(
+            [chat.alias.lowercased(): fallback],
+            against: [],
+            generation: 8
+        )
+
+        #expect(reconciled.isEmpty)
+    }
+
+    @Test("Cat 2364: a UI hint is accepted only in its source catalog epoch")
+    func catalogHintCarriesItsSourceEpoch() {
+        let hint = ServerManager.CatalogEntryHint(entry: chat, generation: 7)
+
+        #expect(
+            ServerManager.validatedCatalogHint(
+                alias: chat.alias,
+                hint: hint,
+                generation: 7
+            ) == hint
+        )
+        #expect(
+            ServerManager.validatedCatalogHint(
+                alias: chat.alias,
+                hint: hint,
+                generation: 8
+            ) == nil
+        )
+    }
+
+    @Test(
+        "Cat 2364: a failed (empty) catalog probe preserves same-epoch provenance"
     )
     func provenanceSurvivesEmptyProbe() {
-        let fallback = ServerManager.CatalogProvenStart(
+        let fallback = ServerManager.CatalogEntryHint(
             entry: chat, generation: 7
         )
         let retained = [chat.alias.lowercased(): fallback]
@@ -385,7 +425,7 @@ struct SessionModelRestoreTests {
 
         // A chat-proven start was retained under catalog generation 7.
         server._testSetCatalogProvenStart([
-            chat.alias.lowercased(): ServerManager.CatalogProvenStart(
+            chat.alias.lowercased(): ServerManager.CatalogEntryHint(
                 entry: chat, generation: 7
             ),
         ])

@@ -1452,6 +1452,10 @@ struct QuickstartView: View {
     /// fixture keep rendering a settled list; ContentView passes the real flag.
     var catalogLoaded: Bool = true
 
+    /// Generation that produced ``cachedModels``. Catalog hints carry this
+    /// source identity so an entry cannot outlive the snapshot that proved it.
+    var catalogGeneration: UInt = 0
+
     /// This Mac, read once per view lifetime. Same pattern and same source as
     /// ``ModelPickerBar`` and ``SettingsModelManagementPanel``, so onboarding's
     /// "won't fit" decision is the one the rest of the app already makes.
@@ -4500,7 +4504,12 @@ struct QuickstartView: View {
             Task {
                 await server.start(
                     alias: coordinator.selection.alias,
-                    catalogEntryHint: catalogEntry
+                    catalogEntryHint: catalogEntry.map {
+                        ServerManager.CatalogEntryHint(
+                            entry: $0,
+                            generation: catalogGeneration
+                        )
+                    }
                 )
             }
         case .openModelManagement, .openWebSearchSettings:
@@ -4592,7 +4601,10 @@ struct QuickstartView: View {
                 await server.start(
                     alias: cached.alias,
                     hfPath: cached.hfRepo,
-                    catalogEntryHint: cached
+                    catalogEntryHint: ServerManager.CatalogEntryHint(
+                        entry: cached,
+                        generation: catalogGeneration
+                    )
                 )
             }
         }
@@ -4692,7 +4704,12 @@ struct QuickstartView: View {
                 await server.start(
                     alias: coordinator.selection.alias,
                     hfPath: coordinator.selection.hfRepo,
-                    catalogEntryHint: catalogEntry
+                    catalogEntryHint: catalogEntry.map {
+                        ServerManager.CatalogEntryHint(
+                            entry: $0,
+                            generation: catalogGeneration
+                        )
+                    }
                 )
             }
         case .cancelled:
