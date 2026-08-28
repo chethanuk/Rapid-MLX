@@ -2297,19 +2297,22 @@ final class ServerManager {
         // before `isOperating = true` preserves the cancellable startup
         // contract; re-check every entry guard after actor reentrancy.
         let catalogGeneration = downloads?.cacheGeneration ?? 0
-        let catalogSnapshot = await ModelCatalogCache.shared.entries(
-            binary: binary,
-            generation: catalogGeneration
-        )
         // #2364: a newer authoritative snapshot may have removed the alias or
         // reclassified it out of the chat lane between this start and the
-        // previous one. Reconcile the retained fallback against it NOW, so a
-        // stale chat classification cannot be reused when a later probe fails.
+        // previous one. Reconcile the retained fallback against that snapshot
+        // NOW — before the ready fallback is consulted below — so a stale chat
+        // classification cannot be reused when a later probe fails.
         reconcileCatalogProvenStart(
-            against: catalogSnapshot,
+            against: await ModelCatalogCache.shared.entries(
+                binary: binary,
+                generation: catalogGeneration
+            ),
             generation: catalogGeneration
         )
-        let probedCatalogEntry = catalogSnapshot.first {
+        let probedCatalogEntry = await ModelCatalogCache.shared.entries(
+            binary: binary,
+            generation: catalogGeneration
+        ).first {
             $0.alias.caseInsensitiveCompare(trimmedAlias) == .orderedSame
         }
         let catalogEntry = Self.readyCatalogEntry(
