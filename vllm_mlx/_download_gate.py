@@ -368,6 +368,20 @@ def persist_pulled_variant(repo_id: str, variant: str) -> None:
         pass
 
 
+def clear_pulled_variant(repo_id: str) -> None:
+    """Forget a prior narrowed-pull choice after a successful ordinary pull.
+
+    The marker describes the user's latest successful pull mode, not every
+    variant that may happen to remain in the cache.  Clearing is best-effort
+    for the same reason writing is: cache metadata must never turn a completed
+    model download into a failed command.
+    """
+    try:
+        os.remove(_variant_marker_path(repo_id))
+    except OSError:
+        pass
+
+
 def pulled_variant(repo_id: str) -> str | None:
     """The subfolder a previous ``pull --bits/--format`` fetched for ``repo_id``.
 

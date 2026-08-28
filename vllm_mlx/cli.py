@@ -6957,6 +6957,15 @@ def _pull_repository(args, *, allow_patterns_override: list[str] | None = None):
         # ``network_fetch`` is the mirror's authoritative "any bytes fetched
         # this pull" verdict (covers a fetched zero-byte file, codex #4).
         _was_cached = not _mirror_out.get("network_fetch", True)
+        # A successful ordinary pull supersedes any earlier explicit
+        # ``--bits/--format`` choice for this repo. Keep cache metadata aligned
+        # even on the mirror-success early return.
+        try:
+            from vllm_mlx._download_gate import clear_pulled_variant
+
+            clear_pulled_variant(repo_id)
+        except Exception:
+            pass
         _print_pull_summary(
             repo_id,
             snapshot_dir,
@@ -7058,18 +7067,21 @@ def _pull_repository(args, *, allow_patterns_override: list[str] | None = None):
         _after = _blob_identifier(_cache_root)
         _was_cached = (_before == _after and _before != ()) and not _mirror_fetched
         # #2340: persist the pulled variant so a later ``serve <repo>`` can
-        # join the same subfolder. Only the narrowed ``--bits/--format`` path
-        # records one; a whole-repo pull leaves no marker and serve keeps its
-        # normal (root or catalog-subfolder) resolution. Best-effort — the
-        # pull itself is already done and valid at this point.
-        if variant_allow is not None:
-            _variant_name = f"{_bits}bit" if _bits else (_fmt or "")
-            try:
+        # join the same subfolder. A later successful ordinary pull clears an
+        # older marker so stale cache metadata cannot override that newer
+        # choice. Best-effort — the pull itself is already done and valid.
+        try:
+            if variant_allow is not None:
+                _variant_name = f"{_bits}bit" if _bits else (_fmt or "")
                 from vllm_mlx._download_gate import persist_pulled_variant
 
                 persist_pulled_variant(repo_id, _variant_name)
-            except Exception:
-                pass
+            else:
+                from vllm_mlx._download_gate import clear_pulled_variant
+
+                clear_pulled_variant(repo_id)
+        except Exception:
+            pass
     except HFValidationError:
         # Malformed HF repo id (e.g. ``foo/bar/baz``) — surface the same
         # friendly "unknown model" hint the alias path uses instead of a

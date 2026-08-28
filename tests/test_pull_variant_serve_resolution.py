@@ -10,7 +10,7 @@ The pulled variant is persisted as a small marker in the HF cache at pull time
 These tests pin that:
 
 1. ``persist_pulled_variant`` / ``pulled_variant`` round-trip: a narrowed pull
-   records the folder, and an unrecorded repo reads back ``None``.
+   records the folder, while a later ordinary pull clears that choice.
 2. the core #2340 scenario: a repo id pulled with ``--bits`` resolves, at load
    time, to that exact snapshot subfolder, even when a catalog reverse lookup
    names a different default subfolder.
@@ -41,6 +41,7 @@ from vllm_mlx.utils.tokenizer import _resolve_subfolder_checkpoint
 # can select the subfolder.
 RAW_REPO = "acme/MultiVariant-MLX"
 CATALOG_REPO = "LiquidAI/LFM2.5-2.6B-MLX"
+CATALOG_ALIAS = "lfm2.5-2.6b-4bit"
 
 
 def _multi_variant_tree():
@@ -78,6 +79,20 @@ def test_persist_overwrites_a_previous_variant(marker_path):
 def test_persist_empty_is_a_noop(marker_path):
     _download_gate.persist_pulled_variant(RAW_REPO, "")
     assert _download_gate.pulled_variant(RAW_REPO) is None
+    assert not marker_path.exists()
+
+
+def test_clear_removes_a_previous_variant(marker_path):
+    _download_gate.persist_pulled_variant(RAW_REPO, "8bit")
+
+    _download_gate.clear_pulled_variant(RAW_REPO)
+
+    assert _download_gate.pulled_variant(RAW_REPO) is None
+    assert not marker_path.exists()
+
+
+def test_clear_missing_marker_is_a_noop(marker_path):
+    _download_gate.clear_pulled_variant(RAW_REPO)
     assert not marker_path.exists()
 
 
@@ -161,6 +176,37 @@ def test_pulled_variant_overrides_catalog_default(monkeypatch, tmp_path, marker_
 
     assert resolved == os.path.join(str(snapshot), "8bit")
     assert seen == {"repo_id": CATALOG_REPO, "allow_patterns": ["8bit/*"]}
+
+
+def test_explicit_alias_overrides_repo_variant_marker(
+    monkeypatch, tmp_path, marker_path
+):
+    """An explicit 4-bit alias keeps its meaning despite an 8-bit repo marker."""
+    from vllm_mlx.model_aliases import resolve_model, resolve_subfolder
+
+    assert resolve_model(CATALOG_ALIAS) == CATALOG_REPO
+    assert resolve_subfolder(CATALOG_ALIAS) == "4bit"
+
+    snapshot = tmp_path / "snapshots" / "feedface"
+    (snapshot / "4bit").mkdir(parents=True)
+    (snapshot / "4bit" / "config.json").write_text("{}")
+    (snapshot / "4bit" / "model.safetensors").write_bytes(b"\x00" * 16)
+    seen: dict[str, object] = {}
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        seen["repo_id"] = repo_id
+        seen["allow_patterns"] = kwargs.get("allow_patterns")
+        return str(snapshot)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    _download_gate.persist_pulled_variant(CATALOG_REPO, "8bit")
+
+    resolved = _resolve_subfolder_checkpoint(CATALOG_ALIAS)
+
+    assert resolved == os.path.join(str(snapshot), "4bit")
+    assert seen == {"repo_id": CATALOG_REPO, "allow_patterns": ["4bit/*"]}
 
 
 def test_serve_uses_format_marker_folder(monkeypatch, tmp_path, marker_path):
@@ -296,3 +342,50 @@ def test_pull_persist_failure_still_completes_the_pull(capsys):
         cli.pull_command(args)  # must not raise
     out = capsys.readouterr().out
     assert "R2 mirror skipped" in out
+
+
+def test_successful_ordinary_hf_pull_clears_previous_variant(marker_path):
+    """Switching back to an ordinary pull must not leave a stale selector."""
+    import argparse
+
+    from vllm_mlx import cli
+
+    _download_gate.persist_pulled_variant(RAW_REPO, "8bit")
+    args = argparse.Namespace(
+        model=RAW_REPO,
+        bits=None,
+        format=None,
+        _original_alias=RAW_REPO,
+    )
+
+    with (
+        patch.object(cli, "_try_mirror_prefetch", return_value=False),
+        patch("huggingface_hub.snapshot_download", return_value="/cache/snapshot"),
+    ):
+        cli.pull_command(args)
+
+    assert _download_gate.pulled_variant(RAW_REPO) is None
+
+
+def test_successful_ordinary_mirror_pull_clears_previous_variant(marker_path):
+    """The mirror-success early return applies the same marker transition."""
+    import argparse
+
+    from vllm_mlx import cli
+
+    _download_gate.persist_pulled_variant(RAW_REPO, "8bit")
+    args = argparse.Namespace(
+        model=RAW_REPO,
+        bits=None,
+        format=None,
+        _original_alias=RAW_REPO,
+    )
+
+    def mirror_success(repo_id, *, out):
+        out["network_fetch"] = False
+        return True
+
+    with patch.object(cli, "_try_mirror_prefetch", side_effect=mirror_success):
+        cli.pull_command(args)
+
+    assert _download_gate.pulled_variant(RAW_REPO) is None

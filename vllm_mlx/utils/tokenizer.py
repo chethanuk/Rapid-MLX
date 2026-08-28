@@ -1031,16 +1031,19 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
 
     repo_id = resolve_model(model_name)
 
-    # #2340: a repo pulled with ``--bits/--format`` recorded its chosen variant
-    # in the HF cache. Recover it before consulting the catalog: the marker is
-    # the user's latest explicit pull choice, whereas a reverse catalog lookup
-    # can only recover the repo's default subfolder after the CLI has resolved
-    # an alias to its bare repo id. Without this precedence, ``pull --bits 8``
-    # followed by ``serve <repo>`` silently loads the catalog's 4-bit default.
-    # ``pulled_variant`` is best-effort and returns ``None`` when the repo was
-    # never narrowed (or the marker is invalid/unreadable) — those cases retain
-    # the historical catalog-subfolder or whole-repo-root resolution.
-    subfolder = pulled_variant(repo_id) or resolve_subfolder(model_name)
+    # #2340 precedence is intentional:
+    #
+    # 1. An explicit alias names a specific catalog checkpoint and must win.
+    # 2. A bare repo id uses the latest successful ``pull --bits/--format``
+    #    marker, when present.
+    # 3. Otherwise retain the historical reverse-catalog default/root lookup.
+    #
+    # This lets ``pull --bits 8 <repo>`` followed by ``serve <repo>`` recover
+    # 8bit without letting stale repo-level cache metadata change what
+    # ``serve lfm2.5-2.6b-4bit`` explicitly means.
+    catalog_subfolder = resolve_subfolder(model_name)
+    explicit_alias_subfolder = catalog_subfolder if model_name != repo_id else None
+    subfolder = explicit_alias_subfolder or pulled_variant(repo_id) or catalog_subfolder
     if not subfolder:
         return model_name
     # ``resolve_subfolder`` answers for BOTH spellings — the alias the user
