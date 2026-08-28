@@ -20,6 +20,14 @@ from vllm_mlx.output_collector import RequestOutputCollector  # noqa: E402
 from vllm_mlx.scheduler import BackpressureError, Scheduler  # noqa: E402
 
 
+def test_engine_rejects_unknown_serving_lane_reason():
+    with pytest.raises(ValueError, match="unknown serving_lane_reason"):
+        BatchedEngine(
+            "fake/text-checkpoint",
+            serving_lane_reason="vision_weight_unavailable",
+        )
+
+
 @pytest.mark.asyncio
 async def test_missing_vision_weights_update_live_lane_reason(monkeypatch):
     from vllm_mlx.models import mllm as mllm_mod
