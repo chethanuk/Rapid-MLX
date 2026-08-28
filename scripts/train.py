@@ -56,7 +56,9 @@ class TrainError(Exception):
     """Fatal condition that aborts a departure cleanly (reported BLOCKED)."""
 
 
-def run(args: list[str], *, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
+def run(
+    args: list[str], *, check: bool = True, capture: bool = True
+) -> subprocess.CompletedProcess:
     """Run a subprocess; return the CompletedProcess."""
     res = subprocess.run(args, capture_output=capture, text=True)
     if check and res.returncode != 0:
@@ -83,14 +85,20 @@ def stamp_now() -> tuple[str, str]:
 
 def list_boarding() -> list[dict]:
     """List open PRs carrying the ``train:boarding`` label."""
-    return gh_json([
-        "pr", "list",
-        "--repo", REPO,
-        "--state", "open",
-        "--label", "train:boarding",
-        "--json",
-        "number,title,headRefName,headRefOid,mergeable,reviewDecision",
-    ])
+    return gh_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "open",
+            "--label",
+            "train:boarding",
+            "--json",
+            "number,title,headRefName,headRefOid,mergeable,reviewDecision",
+        ]
+    )
 
 
 def head_green(head_sha: str) -> tuple[bool, list[str]]:
@@ -103,8 +111,12 @@ def head_green(head_sha: str) -> tuple[bool, list[str]]:
     makes the head not green.
     """
     try:
-        statuses = gh_json(["api", f"repos/{REPO}/commits/{head_sha}/status"])["statuses"]
-        check_runs = gh_json(["api", f"repos/{REPO}/commits/{head_sha}/check-runs"])["check_runs"]
+        statuses = gh_json(["api", f"repos/{REPO}/commits/{head_sha}/status"])[
+            "statuses"
+        ]
+        check_runs = gh_json(["api", f"repos/{REPO}/commits/{head_sha}/check-runs"])[
+            "check_runs"
+        ]
     except TrainError:
         # A brand-new head may not have statuses yet; treat as not-yet-green.
         return False, list(REQUIRED_CHECKS)
@@ -155,11 +167,21 @@ def evaluate(prs: list[dict]) -> tuple[list[dict], list[dict]]:
         n = pr["number"]
         head = pr["headRefOid"]
         if pr.get("mergeable") == "CONFLICTING":
-            ejected.append({**pr, "reason": "conflicts with base (mergeable=CONFLICTING); rebase required"})
+            ejected.append(
+                {
+                    **pr,
+                    "reason": "conflicts with base (mergeable=CONFLICTING); rebase required",
+                }
+            )
             continue
         green, bad = head_green(head)
         if not green:
-            ejected.append({**pr, "reason": f"required checks not green on exact head: {failure_links(bad)}"})
+            ejected.append(
+                {
+                    **pr,
+                    "reason": f"required checks not green on exact head: {failure_links(bad)}",
+                }
+            )
             continue
         if pr.get("reviewDecision") == "REVIEW_REQUIRED":
             ejected.append({**pr, "reason": "review not converged (REVIEW_REQUIRED)"})
@@ -176,7 +198,9 @@ def merge_order(prs: list[dict]) -> list[dict]:
     return prs
 
 
-def build_train(branch: str, base: str, prs: list[dict]) -> tuple[list[dict], list[dict]]:
+def build_train(
+    branch: str, base: str, prs: list[dict]
+) -> tuple[list[dict], list[dict]]:
     """Create ``branch`` from ``base`` and --no-ff merge each PR head in order.
 
     Returns (merged, conflict_ejected). On a merge conflict we abort the merge,
@@ -191,8 +215,7 @@ def build_train(branch: str, base: str, prs: list[dict]) -> tuple[list[dict], li
         head = pr["headRefOid"]
         title = pr["title"]
         merge = run(
-            ["git", "merge", "--no-ff", head,
-             "-m", f"train: merge #{n} {title}"],
+            ["git", "merge", "--no-ff", head, "-m", f"train: merge #{n} {title}"],
             check=False,
         )
         if merge.returncode == 0:
@@ -201,7 +224,12 @@ def build_train(branch: str, base: str, prs: list[dict]) -> tuple[list[dict], li
         # Conflict or merge failure: abort, record which files conflicted, eject.
         conflicted = _conflicted_files(merge.stdout + "\n" + merge.stderr)
         run(["git", "merge", "--abort"], check=False)
-        ejected.append({**pr, "reason": f"merge conflict on train: {conflicted or 'unknown files'} (failing job: see merge output)"})
+        ejected.append(
+            {
+                **pr,
+                "reason": f"merge conflict on train: {conflicted or 'unknown files'} (failing job: see merge output)",
+            }
+        )
     return merged, ejected
 
 
@@ -241,21 +269,37 @@ def open_train_pr(branch: str, title: str, merged: list[dict]) -> int:
         # Carry the member title and its Fixes line if present in the body.
         detail = gh_json(["api", f"repos/{REPO}/pulls/{pr['number']}"])
         fix = _extract_fix(detail.get("body") or "")
-        body_lines.append(f"- #{pr['number']} {pr['title']}" + (f" ({fix})" if fix else ""))
+        body_lines.append(
+            f"- #{pr['number']} {pr['title']}" + (f" ({fix})" if fix else "")
+        )
     body = "\n".join(body_lines)
-    out = gh_json([
-        "pr", "create", "--repo", REPO, "--base", "main", "--head", branch,
-        "--title", f"train: departure {title} " + ", ".join(f"#{p['number']}" for p in merged),
-        "--body", body,
-        "--label", "train",
-    ])
+    out = gh_json(
+        [
+            "pr",
+            "create",
+            "--repo",
+            REPO,
+            "--base",
+            "main",
+            "--head",
+            branch,
+            "--title",
+            f"train: departure {title} " + ", ".join(f"#{p['number']}" for p in merged),
+            "--body",
+            body,
+            "--label",
+            "train",
+        ]
+    )
     return int(out["number"])
 
 
 def _extract_fix(body: str) -> str | None:
     for line in body.splitlines():
         line = line.strip()
-        if line.lower().startswith(("fixes ", "closes ", "part of ", "fix #", "closes #", "part of #")):
+        if line.lower().startswith(
+            ("fixes ", "closes ", "part of ", "fix #", "closes #", "part of #")
+        ):
             return line
     return None
 
@@ -302,9 +346,17 @@ def delete_branch(branch: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dry-run", action="store_true", help="resolve + plan only; no push/PR/merge/report")
-    ap.add_argument("--once", action="store_true", help="run a single departure cycle (default)")
-    ap.add_argument("--bisect", action="store_true", help="force bisect on any red train")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="resolve + plan only; no push/PR/merge/report",
+    )
+    ap.add_argument(
+        "--once", action="store_true", help="run a single departure cycle (default)"
+    )
+    ap.add_argument(
+        "--bisect", action="store_true", help="force bisect on any red train"
+    )
     args = ap.parse_args()
 
     print("== loco driver: fetch origin ==")
@@ -329,7 +381,9 @@ def main() -> int:
     print(f"\nTrain branch: {train_branch}")
 
     # Build the train on a fresh branch off origin/main (checks conflicts).
-    merged, conflict_ejected = build_train(train_branch, "origin/main", merge_order(boarded))
+    merged, conflict_ejected = build_train(
+        train_branch, "origin/main", merge_order(boarded)
+    )
     for e in conflict_ejected:
         print(f"  EJECT (conflict) #{e['number']}: {e['reason']}")
 
@@ -342,10 +396,14 @@ def main() -> int:
     print("\n== Train plan ==")
     for pr in merged:
         print(f"  #{pr['number']} {pr['title']}  ({pr['headRefOid'][:10]})")
-    print(f"  Ejected: {[(e['number'], e['reason']) for e in ejected + conflict_ejected]}")
+    print(
+        f"  Ejected: {[(e['number'], e['reason']) for e in ejected + conflict_ejected]}"
+    )
 
     if args.dry_run:
-        print("\n--dry-run: not pushing/opening PR/merging/reporting. Cleaning up local branch.")
+        print(
+            "\n--dry-run: not pushing/opening PR/merging/reporting. Cleaning up local branch."
+        )
         run(["git", "checkout", "-"], check=False)
         run(["git", "branch", "-D", train_branch], check=False)
         return 0
@@ -360,7 +418,9 @@ def main() -> int:
     train_head = gh_json(["api", f"repos/{REPO}/pulls/{train_pr}"])["head"]["sha"]
     label = f"#{train_pr}"
     if not wait_green(train_head, label):
-        report(f"TRAIN {train_branch} BLOCKED required checks did not go green ({stamp_title})")
+        report(
+            f"TRAIN {train_branch} BLOCKED required checks did not go green ({stamp_title})"
+        )
         return 2
 
     print("\nTrain required checks green — merging with a merge commit.")
@@ -371,26 +431,31 @@ def main() -> int:
     not_merged = members_merged(train_pr, member_nums)
     merge_sha = ""
     try:
-        merge_sha = gh_json(["api", f"repos/{REPO}/pulls/{train_pr}"])["merge_commit_sha"] or ""
+        merge_sha = (
+            gh_json(["api", f"repos/{REPO}/pulls/{train_pr}"])["merge_commit_sha"] or ""
+        )
     except TrainError:
         pass
 
     if not_merged:
         for n in not_merged:
-            comment(str(n), f"MEMBER NOT MARKED MERGED after train #{train_pr} landed — investigate.")
+            comment(
+                str(n),
+                f"MEMBER NOT MARKED MERGED after train #{train_pr} landed — investigate.",
+            )
         report(
             f"TRAIN {train_branch} LANDED {merge_sha} (#{train_pr}) "
-            f"members: {', '.join('#'+str(n) for n in member_nums)} "
-            f"ejected: {', '.join('#'+str(e['number']) for e in ejected + conflict_ejected)} "
-            f"NOT-MERGED: {', '.join('#'+str(n) for n in not_merged)}"
+            f"members: {', '.join('#' + str(n) for n in member_nums)} "
+            f"ejected: {', '.join('#' + str(e['number']) for e in ejected + conflict_ejected)} "
+            f"NOT-MERGED: {', '.join('#' + str(n) for n in not_merged)}"
         )
         delete_branch(train_branch)
         return 3
 
     report(
         f"TRAIN {train_branch} LANDED {merge_sha} (#{train_pr}) "
-        f"members: {', '.join('#'+str(n) for n in member_nums)} "
-        f"ejected: {', '.join('#'+str(e['number']) for e in ejected + conflict_ejected)}"
+        f"members: {', '.join('#' + str(n) for n in member_nums)} "
+        f"ejected: {', '.join('#' + str(e['number']) for e in ejected + conflict_ejected)}"
     )
     delete_branch(train_branch)
     print("\nTrain landed and branch cleaned up.")
