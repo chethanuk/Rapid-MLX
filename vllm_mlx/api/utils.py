@@ -1421,6 +1421,37 @@ VISION_SERVING_LANE_REASONS = frozenset(
 )
 
 
+def validate_serving_lane_reason(
+    reason: str,
+    *,
+    is_mllm: bool,
+    auto_text_fallback: bool | None = None,
+) -> None:
+    """Validate a serving-lane reason against its effective lane metadata."""
+    if reason not in SERVING_LANE_REASONS:
+        raise ValueError(
+            f"unknown serving_lane_reason {reason!r}: must be one of "
+            f"{sorted(SERVING_LANE_REASONS)}. Add it to SERVING_LANE_REASONS "
+            f"and the Desktop copy contract if it is genuinely engine-emitted."
+        )
+    if auto_text_fallback is not None:
+        expected_auto_fallback = reason in AUTO_TEXT_FALLBACK_REASONS
+        if auto_text_fallback != expected_auto_fallback:
+            raise ValueError(
+                f"{reason!r} requires auto_text_fallback="
+                f"{expected_auto_fallback}, got {auto_text_fallback}: only "
+                f"{sorted(AUTO_TEXT_FALLBACK_REASONS)} downgrade a vision-capable "
+                f"model to the text lane. Update the reason roster and dedicated "
+                f"Desktop copy together if that classification changes."
+            )
+    expected_mllm = reason in VISION_SERVING_LANE_REASONS
+    if is_mllm != expected_mllm:
+        raise ValueError(
+            f"{reason!r} requires is_mllm={expected_mllm}, got {is_mllm}: "
+            f"vision-lane reasons are {sorted(VISION_SERVING_LANE_REASONS)}"
+        )
+
+
 @dataclass(frozen=True)
 class ServingLaneDecision:
     """Metadata-derived serving lane and stable machine-readable reason."""
@@ -1430,28 +1461,11 @@ class ServingLaneDecision:
     auto_text_fallback: bool = False
 
     def __post_init__(self) -> None:
-        if self.reason not in SERVING_LANE_REASONS:
-            raise ValueError(
-                f"unknown serving_lane_reason {self.reason!r}: must be one of "
-                f"{sorted(SERVING_LANE_REASONS)}. Add it to SERVING_LANE_REASONS "
-                f"and the Desktop copy contract if it is genuinely engine-emitted."
-            )
-        expected_auto_fallback = self.reason in AUTO_TEXT_FALLBACK_REASONS
-        if self.auto_text_fallback != expected_auto_fallback:
-            raise ValueError(
-                f"{self.reason!r} requires auto_text_fallback="
-                f"{expected_auto_fallback}, got {self.auto_text_fallback}: only "
-                f"{sorted(AUTO_TEXT_FALLBACK_REASONS)} downgrade a vision-capable "
-                f"model to the text lane. Update the reason roster and dedicated "
-                f"Desktop copy together if that classification changes."
-            )
-        expected_mllm = self.reason in VISION_SERVING_LANE_REASONS
-        if self.is_mllm != expected_mllm:
-            raise ValueError(
-                f"{self.reason!r} requires is_mllm={expected_mllm}, got "
-                f"{self.is_mllm}: vision-lane reasons are "
-                f"{sorted(VISION_SERVING_LANE_REASONS)}"
-            )
+        validate_serving_lane_reason(
+            self.reason,
+            is_mllm=self.is_mllm,
+            auto_text_fallback=self.auto_text_fallback,
+        )
 
 
 def resolve_serving_lane_decision(
