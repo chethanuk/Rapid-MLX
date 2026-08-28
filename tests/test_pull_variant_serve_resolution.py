@@ -251,9 +251,10 @@ def test_no_marker_resolves_repo_root_as_before(monkeypatch, tmp_path):
     assert _resolve_subfolder_checkpoint(RAW_REPO) == RAW_REPO
 
 
-def test_absent_variant_raises_actionable_message(monkeypatch, tmp_path, marker_path):
-    """A marker pointing at a folder that is neither present nor complete must
-    fail with an actionable message, not silently load the repo root."""
+def test_incomplete_variant_raises_actionable_message(
+    monkeypatch, tmp_path, marker_path
+):
+    """A present folder without weights must not be treated as a checkpoint."""
     snapshot = tmp_path / "snap"
     (snapshot / "4bit").mkdir(parents=True)
     # Only config.json — no weights. Incomplete, so it must be refused.
@@ -268,7 +269,31 @@ def test_absent_variant_raises_actionable_message(monkeypatch, tmp_path, marker_
     )
     _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
 
-    with pytest.raises(RuntimeError, match="4bit"):
+    with pytest.raises(RuntimeError, match="present but incomplete"):
+        _resolve_subfolder_checkpoint(RAW_REPO)
+
+
+def test_absent_variant_raises_actionable_message(monkeypatch, tmp_path, marker_path):
+    """A marker whose folder is absent names a valid recovery command."""
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+
+    import huggingface_hub
+
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda repo_id, **kw: str(snapshot),
+    )
+    _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"does not exist after download.*"
+            r"rapid-mlx pull --format 4bit acme/MultiVariant-MLX"
+        ),
+    ):
         _resolve_subfolder_checkpoint(RAW_REPO)
 
 

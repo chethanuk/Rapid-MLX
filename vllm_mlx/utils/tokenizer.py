@@ -1108,9 +1108,9 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
             f"{repo_id} resolves to subfolder {subfolder!r} but {resolved} "
             "does not exist after download — the publisher has probably "
             "reorganized the repo, or the variant was pulled to a different "
-            "cache. Re-run `pull --bits/--format` for the variant (or update "
-            "the alias) rather than loading the repo root, which is not a "
-            "checkpoint."
+            f"cache. Re-run `rapid-mlx pull --format {subfolder} {repo_id}` "
+            "(or update the alias) rather than loading the repo root, which "
+            "is not a checkpoint."
         )
     # A directory is not a checkpoint. An interrupted or disk-full pull
     # leaves the folder present with its shards missing, and a publisher who

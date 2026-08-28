@@ -355,15 +355,25 @@ def persist_pulled_variant(repo_id: str, variant: str) -> None:
     if not _valid_variant_subfolder(variant):
         return
     try:
+        import tempfile
+
         refs_dir = os.path.dirname(_variant_marker_path(repo_id))
         os.makedirs(refs_dir, exist_ok=True)
         target = _variant_marker_path(repo_id)
-        temporary = f"{target}.{os.getpid()}.tmp"
+        fd, temporary = tempfile.mkstemp(
+            dir=refs_dir,
+            prefix=".rapidmlx-variant.",
+            suffix=".tmp",
+        )
         try:
-            with open(temporary, "w", encoding="utf-8") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(variant)
-        finally:
             os.replace(temporary, target)
+        finally:
+            try:
+                os.remove(temporary)
+            except FileNotFoundError:
+                pass
     except OSError:
         pass
 
