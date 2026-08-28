@@ -1972,6 +1972,7 @@ class BatchedEngine(BaseEngine):
         num_images: int = 0,
         enable_thinking: bool | None = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """Apply chat template to messages.
 
@@ -2029,6 +2030,7 @@ class BatchedEngine(BaseEngine):
             enable_thinking=enable_thinking,
             model_name=self._model_name,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
     @staticmethod
@@ -2657,6 +2659,7 @@ class BatchedEngine(BaseEngine):
 
         # Extract enable_thinking before passing kwargs downstream
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # PFlash routing hints (#287). ``requires_prompt_integrity`` is
         # set by the route layer for response_format / structured-output
         # requests — those are hard-protected (no opt-out flag exists).
@@ -2680,6 +2683,7 @@ class BatchedEngine(BaseEngine):
             template_tools,
             num_images=len(all_images),
             enable_thinking=enable_thinking,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prompt, output_router_seed = self._prepare_harmony_no_thinking_prompt(
             prompt,
@@ -3403,6 +3407,7 @@ class BatchedEngine(BaseEngine):
 
         # Extract enable_thinking before passing kwargs downstream
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # PFlash routing hints (#287) — parity with chat(). Tools are
         # NOT auto-folded into ``requires_prompt_integrity``; the
         # ``has_tools`` flag plus ``skip_when_tools`` is the user-
@@ -3419,6 +3424,7 @@ class BatchedEngine(BaseEngine):
             template_tools,
             num_images=len(all_images),
             enable_thinking=enable_thinking,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prompt, output_router_seed = self._prepare_harmony_no_thinking_prompt(
             prompt,
@@ -3734,6 +3740,7 @@ class BatchedEngine(BaseEngine):
         # into ``shared_apply_chat_template`` identically to the
         # non-guided ``chat()`` path.
         enable_thinking = kwargs.pop("enable_thinking", None)
+        chat_template_kwargs = kwargs.pop("chat_template_kwargs", None)
         # Build prompt from messages. Route through the central
         # ``shared_apply_chat_template`` wrapper so the role-marker
         # sanitisation runs on user/tool message content here too —
@@ -3747,6 +3754,7 @@ class BatchedEngine(BaseEngine):
             tools=None,
             enable_thinking=enable_thinking,
             model_name=getattr(self, "_model_name", "") or "",
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         # Run guided generation on the mlx-step worker. The model was

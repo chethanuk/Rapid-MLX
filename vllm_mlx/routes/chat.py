@@ -4415,6 +4415,15 @@ async def _create_chat_completion_impl(
     if resolved_thinking is not None:
         chat_kwargs["enable_thinking"] = resolved_thinking
 
+    # Thread client-supplied ``chat_template_kwargs`` through to the engine
+    # so model-specific template variables (e.g. Qwen3.8 ``reasoning_effort``)
+    # reach ``apply_chat_template`` (#2474). ``enable_thinking`` is already
+    # resolved above; the engine-side merge never overwrites server-resolved
+    # keys.
+    ctk = getattr(request, "chat_template_kwargs", None)
+    if isinstance(ctk, dict) and ctk:
+        chat_kwargs["chat_template_kwargs"] = ctk
+
     # Context-length pre-check (DoS defense + UX, rapid-desktop#273 / #463).
     # See ``service/helpers.py::enforce_context_length_for_messages`` for
     # the rationale (8 MiB body still holds ~2M tokens → context window
