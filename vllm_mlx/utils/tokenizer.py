@@ -1027,6 +1027,21 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     from ..model_aliases import resolve_model, resolve_subfolder
 
     subfolder = resolve_subfolder(model_name)
+
+    from huggingface_hub import snapshot_download
+
+    from .._download_gate import _snapshot_is_complete, pulled_variant
+
+    # #2340: a raw repo id (no catalog alias) that was pulled with
+    # ``--bits/--format`` recorded its chosen variant in the HF cache. Recover
+    # it so ``serve <repo>`` after ``pull --bits 4 <repo>`` joins the same
+    # subfolder instead of pointing at the weightless repo root.
+    # ``pulled_variant`` is best-effort and returns ``None`` when the repo was
+    # never narrowed (or the marker is unreadable) — both fall through to the
+    # historical whole-repo-root resolution below.
+    if subfolder is None:
+        repo_id = resolve_model(model_name)
+        subfolder = pulled_variant(repo_id)
     if not subfolder:
         return model_name
     # ``resolve_subfolder`` answers for BOTH spellings — the alias the user
@@ -1036,10 +1051,6 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     # pre-resolution, so normalize here instead of assuming someone
     # upstream already did.
     repo_id = resolve_model(model_name)
-
-    from huggingface_hub import snapshot_download
-
-    from .._download_gate import _snapshot_is_complete
 
     patterns = [f"{subfolder}/*"]
 
@@ -1094,10 +1105,12 @@ def _resolve_subfolder_checkpoint(model_name: str) -> str:
     resolved = os.path.join(local, subfolder)
     if not os.path.isdir(resolved):
         raise RuntimeError(
-            f"{repo_id} declares subfolder {subfolder!r} but {resolved} "
+            f"{repo_id} resolves to subfolder {subfolder!r} but {resolved} "
             "does not exist after download — the publisher has probably "
-            "reorganized the repo. Update the alias rather than loading the "
-            "repo root, which is not a checkpoint."
+            "reorganized the repo, or the variant was pulled to a different "
+            "cache. Re-run `pull --bits/--format` for the variant (or update "
+            "the alias) rather than loading the repo root, which is not a "
+            "checkpoint."
         )
     # A directory is not a checkpoint. An interrupted or disk-full pull
     # leaves the folder present with its shards missing, and a publisher who

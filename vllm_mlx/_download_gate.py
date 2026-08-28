@@ -307,6 +307,81 @@ def pin_main_ref(repo_id: str, revision: str) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Pull-persisted variant marker (#2340).
+#
+# ``pull --bits N / --format name`` fetches only ONE subfolder of a
+# multi-variant repo (``LiquidAI/LFM2.5-2.6B-MLX`` → ``4bit/``, ``8bit/``,
+# ``bf16/`` ...). Nothing downstream, however, remembers which one was
+# fetched: a raw repo id has no catalog subfolder, so ``serve <repo>``
+# resolves the repo ROOT, which ships no weights. The marker below records
+# the pulled variant in the HF cache so the serve/load path can join the
+# same subfolder — the pulled variant is the SSOT for what can be served.
+#
+# It mirrors the ``pin_main_ref`` shape: a tiny file written atomically
+# under ``models--<repo>/refs/``, best-effort, never on the hot path.
+# ---------------------------------------------------------------------------
+
+
+def _variant_marker_path(repo_id: str) -> str:
+    """The HF-cache path holding a ``--bits/--format`` pulled variant name.
+
+    Lives in the same ``refs/`` directory the loader keys off for the
+    snapshot sha (``refs/main``), namespaced so it can never collide with a
+    real branch ref. Pure path computation — no network, no state.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:
+        HF_HUB_CACHE = os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface", "hub"
+        )
+    return os.path.join(
+        HF_HUB_CACHE,
+        f"models--{repo_id.replace('/', '--')}",
+        "refs",
+        ".rapidmlx-variant",
+    )
+
+
+def persist_pulled_variant(repo_id: str, variant: str) -> None:
+    """Atomically record the subfolder a narrowed ``pull --bits/--format`` fetched.
+
+    Called only on the narrowed pull path (after the variant was validated to
+    exist and its files were fetched). Best-effort: a failure to write leaves
+    the pull valid and merely means the serve path falls back to (honest)
+    whole-repo-root resolution for that repo.
+    """
+    if not variant:
+        return
+    try:
+        refs_dir = os.path.dirname(_variant_marker_path(repo_id))
+        os.makedirs(refs_dir, exist_ok=True)
+        target = _variant_marker_path(repo_id)
+        temporary = f"{target}.{os.getpid()}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as fh:
+                fh.write(variant)
+        finally:
+            os.replace(temporary, target)
+    except OSError:
+        pass
+
+
+def pulled_variant(repo_id: str) -> str | None:
+    """The subfolder a previous ``pull --bits/--format`` fetched for ``repo_id``.
+
+    ``None`` means "no variant has been recorded" — the caller keeps whatever
+    resolution it had (catalog subfolder, or the repo root for a flat repo).
+    """
+    try:
+        with open(_variant_marker_path(repo_id), encoding="utf-8") as fh:
+            variant = fh.read().strip()
+        return variant or None
+    except OSError:
+        return None
+
+
 def _model_info_with_timeout(repo_id: str, timeout: float):
     """Call ``HfApi().model_info`` with a hard timeout.
 
