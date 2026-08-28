@@ -44,7 +44,9 @@ def test_repeated_aliases_have_one_working_set_footprint() -> None:
     expected: dict[str, float] = {}
     for tier in load_recommendation_tiers():
         for pick in tier.picks:
-            assert expected.setdefault(pick.alias, pick.footprint_gb) == pick.footprint_gb
+            assert (
+                expected.setdefault(pick.alias, pick.footprint_gb) == pick.footprint_gb
+            )
             assert recommendation_footprint_gb(pick.alias) == pick.footprint_gb
     assert recommendation_footprint_gb("qwen3.8-27b-4bit") == 20.0
     assert recommendation_footprint_gb("private/model") is None

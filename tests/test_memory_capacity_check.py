@@ -152,9 +152,7 @@ def test_32gb_recommendation_uses_catalog_footprint_without_false_hard_warning(
     """
     _patch_size_bytes(monkeypatch, size_gb=15.2)
     with patch.dict("sys.modules", {"psutil": _fake_psutil(32.0, used_gb=8.0)}):
-        _check_memory_capacity(
-            "/resolved/qwen3.8", alias="qwen3.8-27b-4bit"
-        )
+        _check_memory_capacity("/resolved/qwen3.8", alias="qwen3.8-27b-4bit")
     assert capsys.readouterr().out == ""
 
 
@@ -167,9 +165,7 @@ def test_32gb_recommendation_warning_quotes_the_same_20gb_when_pressure_is_real(
     """
     _patch_size_bytes(monkeypatch, size_gb=15.2)
     with patch.dict("sys.modules", {"psutil": _fake_psutil(32.0, used_gb=11.0)}):
-        _check_memory_capacity(
-            "/resolved/qwen3.8", alias="qwen3.8-27b-4bit"
-        )
+        _check_memory_capacity("/resolved/qwen3.8", alias="qwen3.8-27b-4bit")
     out = capsys.readouterr().out
     assert "Memory pressure note" in out
     assert "Catalog working set:       20.0 GB" in out
@@ -181,9 +177,7 @@ def test_below_minimum_tier_keeps_the_conservative_hard_warning(monkeypatch, cap
     """A catalog alias is not a host recommendation below the 8 GB floor."""
     _patch_size_bytes(monkeypatch, size_gb=2.0)
     with patch.dict("sys.modules", {"psutil": _fake_psutil(4.0, used_gb=1.0)}):
-        _check_memory_capacity(
-            "/resolved/lfm", alias="lfm2.5-2.6b-4bit"
-        )
+        _check_memory_capacity("/resolved/lfm", alias="lfm2.5-2.6b-4bit")
     out = capsys.readouterr().out
     assert "likely too large" in out
     assert "100% projected utilization" in out
@@ -193,9 +187,7 @@ def test_lower_tier_pick_keeps_measured_policy_on_a_larger_mac(monkeypatch, caps
     """A 24 GB pick remains supported when launched on a 32 GB host."""
     _patch_size_bytes(monkeypatch, size_gb=8.0)
     with patch.dict("sys.modules", {"psutil": _fake_psutil(32.0, used_gb=15.0)}):
-        _check_memory_capacity(
-            "/resolved/bonsai", alias="bonsai-27b-2bit"
-        )
+        _check_memory_capacity("/resolved/bonsai", alias="bonsai-27b-2bit")
     assert capsys.readouterr().out == ""
 
 
