@@ -1998,12 +1998,9 @@ def load_model(
     # metadata is authoritative for auto-config just as an explicit alias is.
     _bare_repo_has_pulled_variant = False
     if effective_model_alias is None:
-        try:
-            from ._download_gate import pulled_variant
+        from ._download_gate import pulled_variant
 
-            _bare_repo_has_pulled_variant = pulled_variant(model_name) is not None
-        except Exception:
-            pass
+        _bare_repo_has_pulled_variant = pulled_variant(model_name) is not None
     _model_config = None if _bare_repo_has_pulled_variant else _profile
     if _profile is not None and _profile.recommended_sampling:
         _alias_recommended_sampling = dict(_profile.recommended_sampling)
