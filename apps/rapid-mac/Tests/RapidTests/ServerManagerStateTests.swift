@@ -48,6 +48,106 @@ struct ServerManagerStateTests {
         #expect(exited)
     }
 
+    private final class ExitObservationBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Int32] = []
+
+        func record(_ status: Int32) {
+            lock.withLock { values.append(status) }
+        }
+
+        var snapshot: [Int32] {
+            lock.withLock { values }
+        }
+    }
+
+    @Test("Process exit is observed by the event source and reaped exactly once")
+    func processExitIsObservedByEventSource() async throws {
+        let observations = ExitObservationBox()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        let child = try ProcessGroupChild.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "exit 31"],
+            standardInput: .nullDevice,
+            standardOutput: stdout,
+            standardError: stderr
+        ) { child in
+            observations.record(child.terminationStatus)
+        }
+        defer {
+            if child.isProcessGroupAlive {
+                child.signalProcessGroup(SIGKILL)
+            }
+        }
+
+        let exited = await waitUntil(deadline: Date().addingTimeInterval(3)) {
+            !child.isProcessGroupAlive
+        }
+        #expect(exited)
+        #expect(!child.isRunning)
+        #expect(child.terminationStatus == 31)
+        // The transition is published exactly once by a single reaper.
+        #expect(observations.snapshot == [31])
+    }
+
+    @Test("Process liveness reaps an exited leader when the event source is delayed")
+    func processLivenessHasNonblockingReapFallback() async throws {
+        let observations = ExitObservationBox()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        // startMonitorImmediately: false — only the non-blocking liveness
+        // reap (isProcessGroupAlive) can publish the transition, not the
+        // event source.
+        let child = try ProcessGroupChild.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "exit 31"],
+            standardInput: .nullDevice,
+            standardOutput: stdout,
+            standardError: stderr,
+            startMonitorImmediately: false
+        ) { child in
+            observations.record(child.terminationStatus)
+        }
+        defer {
+            if child.isProcessGroupAlive {
+                child.signalProcessGroup(SIGKILL)
+            }
+        }
+
+        let reaped = await waitUntil(deadline: Date().addingTimeInterval(3)) {
+            !child.isProcessGroupAlive
+        }
+        #expect(reaped)
+        #expect(!child.isRunning)
+        #expect(observations.snapshot == [31])
+    }
+
+    @Test("The child-exit monitor never blocks a shared GCD worker")
+    func childExitMonitorDoesNotBlockSharedWorker() throws {
+        // Regression guard for #2363: the prior monitor ran a blocking
+        // `waitpid(pid, &status, 0)` on `DispatchQueue.global(qos:.utility)`,
+        // reserving a shared worker for the lifetime of the child and
+        // starving restarts on saturated hosted runners. Exit must be
+        // observed via a `DispatchSourceProcess(.exit)` on a dedicated
+        // serial queue instead.
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/Rapid/Server/ServerManager.swift"),
+            encoding: .utf8
+        )
+        let stripped = source.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        #expect(stripped.contains(
+            "DispatchSource.makeProcessSource(identifier:processIdentifier,eventMask:.exit"
+        ), "startMonitor must observe exits via a DispatchSourceProcess.")
+        #expect(!stripped.contains(
+            "DispatchQueue.global(qos:.utility).async{[weakself]in"
+        ), "startMonitor must not park a blocking waitpid on the shared pool.")
+    }
+
     @Test("dismissTerminalState: .crashed with a binary path → .idle")
     func dismissCrashedWithBinary() {
         let mgr = ServerManager(
