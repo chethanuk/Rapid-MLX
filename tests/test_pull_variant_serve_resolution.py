@@ -56,7 +56,7 @@ def _multi_variant_tree():
 @pytest.fixture
 def marker_path(tmp_path, monkeypatch):
     """Point the variant marker at a fresh tmp file and return its path."""
-    target = tmp_path / "models--acme--MultiVariant-MLX" / "refs" / ".rapidmlx-variant"
+    target = tmp_path / "models--acme--MultiVariant-MLX" / ".rapid-mlx" / "variant"
     monkeypatch.setattr(
         _download_gate, "_variant_marker_path", lambda repo_id: str(target)
     )
@@ -398,7 +398,21 @@ def test_marker_path_falls_back_when_hub_constants_unavailable(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "huggingface_hub.constants", _NoConstants())
     path = _download_gate._variant_marker_path(RAW_REPO)
-    assert path.endswith("models--acme--MultiVariant-MLX/refs/.rapidmlx-variant")
+    assert path.endswith("models--acme--MultiVariant-MLX/.rapid-mlx/variant")
+
+
+def test_marker_does_not_corrupt_hub_cache_scan(tmp_path, marker_path):
+    """Rapid-MLX metadata must stay outside Hub's commit-ref namespace."""
+    from huggingface_hub import scan_cache_dir
+
+    snapshot = marker_path.parents[1] / "snapshots" / "deadbeef"
+    snapshot.mkdir(parents=True)
+    _download_gate.persist_pulled_variant(RAW_REPO, "4bit")
+
+    cache = scan_cache_dir(tmp_path)
+
+    assert not cache.warnings
+    assert {repo.repo_id for repo in cache.repos} == {RAW_REPO}
 
 
 def test_persist_swallows_a_write_oserror(monkeypatch, marker_path):

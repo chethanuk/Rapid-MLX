@@ -318,17 +318,20 @@ def pin_main_ref(repo_id: str, revision: str) -> None:
 # the pulled variant in the HF cache so the serve/load path can join the
 # same subfolder — the pulled variant is the SSOT for what can be served.
 #
-# It mirrors the ``pin_main_ref`` shape: a tiny file written atomically
-# under ``models--<repo>/refs/``, best-effort, never on the hot path.
+# It mirrors the atomic-write shape of ``pin_main_ref`` but lives outside the
+# Hub-managed ``refs/`` directory. Every file under ``refs/`` is interpreted as
+# a commit ref by ``scan_cache_dir``; application metadata there corrupts Hub
+# cache scans. The repository-local ``.rapid-mlx/`` directory is ignored by
+# that scanner and is deleted naturally with the cached repository.
 # ---------------------------------------------------------------------------
 
 
 def _variant_marker_path(repo_id: str) -> str:
     """The HF-cache path holding a ``--bits/--format`` pulled variant name.
 
-    Lives in the same ``refs/`` directory the loader keys off for the
-    snapshot sha (``refs/main``), namespaced so it can never collide with a
-    real branch ref. Pure path computation — no network, no state.
+    Lives under a Rapid-MLX-owned directory beside the Hub-managed
+    ``refs/``/``snapshots/`` trees, so Hub cache scans never interpret the
+    variant as a commit hash. Pure path computation — no network, no state.
     """
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
@@ -339,8 +342,8 @@ def _variant_marker_path(repo_id: str) -> str:
     return os.path.join(
         HF_HUB_CACHE,
         f"models--{repo_id.replace('/', '--')}",
-        "refs",
-        ".rapidmlx-variant",
+        ".rapid-mlx",
+        "variant",
     )
 
 

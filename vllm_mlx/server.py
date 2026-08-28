@@ -2413,8 +2413,14 @@ async def _load_dynamic_resident_model(
     effective_force_text = profile_force_text
     serving_lane_reason = "not_applicable"
     if modality == "text":
+        # Keep an explicit alias authoritative when the control plane also
+        # supplies its canonical path. A genuine path override still wins;
+        # only use the alias spelling when it resolves to that same checkpoint.
+        checkpoint_identity = (
+            model_name if resolve_model(model_name) == resolved_path else resolved_path
+        )
         serving_checkpoint = _resolve_serving_checkpoint(
-            resolved_path,
+            checkpoint_identity,
             force_text=profile_force_text,
             # Residency loads carry no spec-decode request; keep the lane
             # contract identical to startup (whose default is also "none").
