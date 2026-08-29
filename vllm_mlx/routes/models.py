@@ -148,9 +148,8 @@ def _resolve_speculative_decoding(
             resolve_speculative_request_policy,
         )
 
-        config = getattr(scheduler, "config", None)
         policy = resolve_speculative_request_policy(
-            getattr(config, "spec_decode", None)
+            getattr(scheduler, "spec_decode_runtime_method", None)
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(

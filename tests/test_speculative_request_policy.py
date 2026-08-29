@@ -42,7 +42,7 @@ def test_other_speculative_methods_do_not_inherit_mtp_tool_policy():
 def test_model_profile_reads_policy_from_matching_live_scheduler(monkeypatch):
     from vllm_mlx.routes import models as models_route
 
-    scheduler = SimpleNamespace(config=SimpleNamespace(spec_decode="mtp"))
+    scheduler = SimpleNamespace(spec_decode_runtime_method="mtp")
     engine = object()
     monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: engine)
     monkeypatch.setattr(models_route, "_scheduler_of", lambda candidate: scheduler)
@@ -58,6 +58,103 @@ def test_model_profile_reads_policy_from_matching_live_scheduler(monkeypatch):
         "method": "mtp",
         "request_fallback_features": ["tools"],
     }
+
+
+def test_model_profile_does_not_advertise_requested_but_uninstalled_method(
+    monkeypatch,
+):
+    from vllm_mlx.routes import models as models_route
+
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(spec_decode="mtp"),
+        spec_decode_runtime_method=None,
+    )
+    engine = object()
+    monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: engine)
+    monkeypatch.setattr(models_route, "_scheduler_of", lambda candidate: scheduler)
+
+    assert models_route._resolve_speculative_decoding("served-model") is None
+
+
+@pytest.mark.parametrize(
+    ("installer_succeeds", "expected_method"),
+    [(True, "mtp"), (False, None)],
+)
+def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
+    monkeypatch,
+    installer_succeeds,
+    expected_method,
+):
+    import vllm_mlx.scheduler as scheduler_module
+    from vllm_mlx.request import SamplingParams
+
+    batch_generator = SimpleNamespace()
+    monkeypatch.setattr(
+        scheduler_module,
+        "BatchGenerator",
+        lambda *args, **kwargs: batch_generator,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_mtp_vendored",
+        lambda *args, **kwargs: installer_succeeds,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_dense_sampler_fastpath",
+        lambda _batch_generator: None,
+    )
+    monkeypatch.setattr(
+        "vllm_mlx.singleton_cache_fastpath.install_singleton_cache_fastpath",
+        lambda: None,
+    )
+
+    scheduler = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    scheduler.model = object()
+    scheduler.tokenizer = object()
+    scheduler.model_config = SimpleNamespace(
+        supports_spec_decode=True,
+        name="served-model",
+    )
+    scheduler.requests = {}
+    scheduler.uid_to_request_id = {}
+    scheduler.uid_to_request_processors = {}
+    scheduler.spec_decode_runtime_method = "stale"
+    scheduler._get_stop_tokens = lambda: set()
+    scheduler.config = SimpleNamespace(
+        prefill_batch_size=1,
+        completion_batch_size=1,
+        prefill_step_size=1,
+        kv_cache_quantization=False,
+        kv_cache_turboquant=None,
+        spec_decode="mtp",
+        mtp_model_type="qwen4_exp",
+        mtp_max_k=3,
+        mtp_disable_auto_k=False,
+        model_name="served-model",
+        mtp_sidecar=None,
+        enable_suffix_decoding=False,
+    )
+
+    created = scheduler._create_batch_generator(SamplingParams(max_tokens=8))
+
+    assert created is batch_generator
+    assert scheduler.spec_decode_runtime_method == expected_method
+
+
+def test_closing_batch_generator_retires_published_speculative_runtime():
+    import vllm_mlx.scheduler as scheduler_module
+
+    closed = []
+    scheduler = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    scheduler.batch_generator = SimpleNamespace(close=lambda: closed.append(True))
+    scheduler.spec_decode_runtime_method = "mtp"
+
+    scheduler._close_batch_generator()
+
+    assert closed == [True]
+    assert scheduler.batch_generator is None
+    assert scheduler.spec_decode_runtime_method is None
 
 
 def test_model_card_carries_live_speculative_policy(monkeypatch):
