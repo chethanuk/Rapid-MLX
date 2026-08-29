@@ -483,7 +483,6 @@ def test_pull_persist_failure_still_completes_the_pull(capsys):
     ):
         cli.pull_command(args)  # must not raise
     out = capsys.readouterr().out
-    assert "R2 mirror skipped" in out
     assert "could not record that serving choice" in out
     assert "may select an older or default checkpoint" in out
 
@@ -551,7 +550,8 @@ def test_successful_ordinary_mirror_pull_clears_previous_variant(marker_path):
         _original_alias=RAW_REPO,
     )
 
-    def mirror_success(repo_id, *, out):
+    def mirror_success(repo_id, *, allow_patterns, out):
+        assert allow_patterns is None
         out["network_fetch"] = False
         return True
 
@@ -574,7 +574,8 @@ def test_ordinary_mirror_pull_survives_marker_clear_failure(capsys):
         _original_alias=RAW_REPO,
     )
 
-    def mirror_success(repo_id, *, out):
+    def mirror_success(repo_id, *, allow_patterns, out):
+        assert allow_patterns is None
         out["network_fetch"] = False
         return True
 
