@@ -12,6 +12,7 @@ on ``qwen3.5-9b-4bit`` doesn't have to hand-tune sliders.
 """
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -168,6 +169,7 @@ def _resolve_speculative_decoding(
         return None
     runtime_method = getattr(scheduler, "spec_decode_runtime_method", None)
     attempted = getattr(scheduler, "spec_decode_runtime_attempted", False)
+    runtime_state: Literal["pending", "active", "unavailable"]
     if runtime_method == policy.method:
         runtime_state = "active"
     elif attempted:

@@ -115,6 +115,7 @@ def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
     installer_succeeds,
     expected_method,
 ):
+    pytest.importorskip("mlx")
     import vllm_mlx.scheduler as scheduler_module
     from vllm_mlx.request import SamplingParams
 
@@ -175,6 +176,7 @@ def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
 
 
 def test_closing_batch_generator_retires_published_speculative_runtime():
+    pytest.importorskip("mlx")
     import vllm_mlx.scheduler as scheduler_module
 
     closed = []

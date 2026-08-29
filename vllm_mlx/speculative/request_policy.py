@@ -10,6 +10,9 @@ report the effective request path without reproducing scheduler internals.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+SpeculativeRequestFallbackFeature = Literal["tools"]
 
 
 @dataclass(frozen=True)
@@ -17,7 +20,7 @@ class SpeculativeRequestPolicy:
     """Configured method and request features that trigger safe fallback."""
 
     method: str
-    request_fallback_features: tuple[str, ...] = ()
+    request_fallback_features: tuple[SpeculativeRequestFallbackFeature, ...] = ()
 
 
 def resolve_speculative_request_policy(
@@ -38,7 +41,9 @@ def resolve_speculative_request_policy(
     normalized = method.strip().lower()
     if normalized in ("", "none"):
         return None
-    fallback_features = ("tools",) if normalized == "mtp" else ()
+    fallback_features: tuple[SpeculativeRequestFallbackFeature, ...] = (
+        ("tools",) if normalized == "mtp" else ()
+    )
     return SpeculativeRequestPolicy(
         method=normalized,
         request_fallback_features=fallback_features,
