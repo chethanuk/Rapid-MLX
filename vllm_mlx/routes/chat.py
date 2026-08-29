@@ -82,6 +82,7 @@ from ..service.helpers import (
     SSE_RESPONSE_HEADERS,
     _append_tool_use_suffix,
     _apply_reasoning_cutoff_notice,
+    _build_prompt_with_thinking_compat,
     _build_usage,
     _check_admission_or_503,
     _disconnect_guard,
@@ -4449,6 +4450,7 @@ async def _create_chat_completion_impl(
         tools=request.tools,
         max_tokens=chat_kwargs.get("max_tokens"),
         enable_thinking=resolved_thinking,
+        chat_template_kwargs=chat_kwargs.get("chat_template_kwargs"),
     )
 
     # LINE① (#558, codex r4 #1) — HARD context-window allowance check. With
@@ -4981,10 +4983,12 @@ async def _create_chat_completion_impl(
         # Validate chat template eagerly so template errors return 400
         if not engine.is_mllm:
             try:
-                engine.build_prompt(
+                _build_prompt_with_thinking_compat(
+                    engine.build_prompt,
                     messages,
                     tools=chat_kwargs.get("tools"),
                     enable_thinking=chat_kwargs.get("enable_thinking"),
+                    chat_template_kwargs=chat_kwargs.get("chat_template_kwargs"),
                 )
             except Exception as e:
                 err_msg = str(e)

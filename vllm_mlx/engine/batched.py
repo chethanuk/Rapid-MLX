@@ -1935,6 +1935,7 @@ class BatchedEngine(BaseEngine):
         tools: list[dict] | None = None,
         enable_thinking: bool | None = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """Render the chat prompt for ``messages`` + ``tools`` without starting
         generation.
@@ -1956,6 +1957,7 @@ class BatchedEngine(BaseEngine):
             tools=template_tools,
             enable_thinking=enable_thinking,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
         prepared, _ = self._prepare_harmony_no_thinking_prompt(
             prompt,

@@ -1383,6 +1383,8 @@ def apply_chat_template(
     # below (and the ``reasoning_effort`` pop in the second retry) handles
     # that exactly as it does today.
     for key, value in (chat_template_kwargs or {}).items():
+        if key in ("tokenize", "add_generation_prompt", "enable_thinking", "tools"):
+            continue
         if key not in template_kwargs:
             template_kwargs[key] = value
 
