@@ -5441,7 +5441,7 @@ flow_dictation() {
     crash_command="$(ps -p "$crash_pid" -o command= 2>/dev/null || true)"
     [[ "$crash_command" == *"serve fake-alias"* ]] \
         || die "Dictation crash fixture refused to signal an unowned process"
-    local paused_seen=0
+    local terminal_seen=0 paused_seen=0
     audio_starts_before_foreground="$(jq -rs \
         'map(select(.event == "server_started" and .alias == "fake-whisper-small")) | length' \
         "$OUT/fake-events.jsonl")"
@@ -5453,6 +5453,19 @@ on run argv
 end run
 APPLESCRIPT
     kill "$crash_pid"
+    for ((i=0; i<40; i++)); do
+        see_main "$OUT/dictation-crashed-background.json"
+        if jq -e '.data.ui_elements[]?
+                  | select(.identifier == "Dictation.Status"
+                           and (((.description // .value // .label // "") | tostring)
+                                | startswith("Listening paused — press")))' \
+                 "$OUT/dictation-crashed-background.json" >/dev/null; then
+            terminal_seen=1; break
+        fi
+        sleep 0.05
+    done
+    [[ "$terminal_seen" == 1 ]] \
+        || die "Dictation did not observe the crashed sidecar before foreground activation"
     osascript - "$APP_PID" > "$OUT/dictation-foreground.json" <<'APPLESCRIPT'
 on run argv
     set targetPID to (item 1 of argv) as integer
