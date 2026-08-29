@@ -73,6 +73,32 @@ struct IPPinnedHTTPTransportTests {
             return false
         }
     }
+
+    @Test("A DNS hostname pinned to IPv6 keeps its Host header unbracketed")
+    func dnsHostnamePinnedToIPv6KeepsUnbracketedHostHeader() throws {
+        let address = try #require(ParsedIP("2001:db8::1"))
+
+        let hostHeader = IPPinnedHTTPTransport.hostHeader(
+            host: "example.com",
+            address: address,
+            port: 443
+        )
+
+        #expect(hostHeader == "example.com")
+    }
+
+    @Test("An IPv6 literal host uses the required bracket syntax")
+    func ipv6LiteralHostUsesBracketSyntax() throws {
+        let address = try #require(ParsedIP("2001:db8::1"))
+
+        let hostHeader = IPPinnedHTTPTransport.hostHeader(
+            host: "[2001:db8::1]",
+            address: address,
+            port: 443
+        )
+
+        #expect(hostHeader == "[2001:db8::1]")
+    }
 }
 
 private struct TestWatchdogDeadline: Error {}

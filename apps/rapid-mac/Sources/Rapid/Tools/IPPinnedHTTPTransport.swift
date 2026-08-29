@@ -115,7 +115,7 @@ enum IPPinnedHTTPTransport {
         return Data(headers.utf8)
     }
 
-    private static func hostHeader(
+    static func hostHeader(
         host: String,
         address: ParsedIP,
         port: UInt16
@@ -123,7 +123,8 @@ enum IPPinnedHTTPTransport {
         let bareHost = host.hasPrefix("[") && host.hasSuffix("]")
             ? String(host.dropFirst().dropLast())
             : host
-        let hostText = address.family == .v6 ? "[\(bareHost)]" : bareHost
+        let isIPv6Literal = address.family == .v6 && bareHost.contains(":")
+        let hostText = isIPv6Literal ? "[\(bareHost)]" : bareHost
         return (port == 80 || port == 443) ? hostText : "\(hostText):\(port)"
     }
 
