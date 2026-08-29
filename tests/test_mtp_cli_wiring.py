@@ -1537,11 +1537,20 @@ def test_install_mtp_vendored_gate_fails_closed_on_missing_request_metadata(
                 min_p=0.0,
             )
         ),
+        SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                temperature=0.7,
+                top_p=float("nan"),
+                top_k=0,
+                min_p=0.0,
+            )
+        ),
     ],
     ids=[
         "missing-sampling-params",
         "unresolved-temperature",
         "invalid-sampling-value",
+        "non-finite-sampling-value",
     ],
 )
 def test_install_mtp_vendored_sampling_metadata_shapes_fail_closed(request_stub):
@@ -1564,6 +1573,96 @@ def test_install_mtp_vendored_sampling_metadata_shapes_fail_closed(request_stub)
 
     assert batch_gen._mtp_vendored_stats["ft_non_greedy"] == 1
     assert gb.orig_step_calls == 1
+
+
+def test_install_mtp_vendored_missing_processor_history_fails_closed():
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from vllm_mlx.scheduler import _install_mtp_vendored
+
+    penalty = lambda tokens, logits: logits
+    request_stub = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.0,
+            seed=None,
+        ),
+        _mtp_safe_logits_processors=(penalty,),
+    )
+    batch_gen, gb = _make_batch_gen_with_gb()
+    gb.uids = [44]
+    gb.tokens = []
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+
+    def plain_step():
+        gb.orig_step_calls += 1
+        return [], []
+
+    gb._step = plain_step
+
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests={"req-44": request_stub},
+        uid_to_request_id={44: "req-44"},
+        uid_to_request_processors={44: [penalty]},
+    )
+    gb._step()
+
+    assert batch_gen._mtp_vendored_stats["ft_logits_processors"] == 1
+    assert gb.orig_step_calls == 1
+
+
+def test_install_mtp_vendored_initial_skip_log_is_deduplicated_on_uid_reuse(
+    caplog,
+):
+    import logging
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from vllm_mlx.scheduler import _install_mtp_vendored
+
+    def seeded_request():
+        return SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                temperature=0.7,
+                top_p=0.95,
+                top_k=20,
+                min_p=0.0,
+                seed=7,
+            )
+        )
+
+    uid_to_request_id = {45: "req-a"}
+    batch_gen, gb = _make_batch_gen_with_gb()
+    gb.uids = [45]
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests={"req-a": seeded_request(), "req-b": seeded_request()},
+        uid_to_request_id=uid_to_request_id,
+    )
+
+    with caplog.at_level(logging.INFO):
+        gb._step()
+        uid_to_request_id[45] = "req-b"
+        gb._step()
+
+    skip_logs = [
+        record
+        for record in caplog.records
+        if "remains on plain decode" in record.getMessage()
+    ]
+    assert len(skip_logs) == 1
+    assert gb.orig_step_calls == 2
 
 
 def test_install_mtp_vendored_falls_back_to_orig_step_on_batch_size_growth(monkeypatch):
