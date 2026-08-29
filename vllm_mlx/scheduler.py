@@ -742,6 +742,7 @@ def _install_mtp_vendored(
     model: Any,
     requests: dict[str, Any] | None = None,
     uid_to_request_id: dict[int, str] | None = None,
+    uid_to_request_processors: dict[int, list] | None = None,
     max_k: int = 3,
     disable_auto_k: bool = False,
     controller_key: str | None = None,
@@ -919,6 +920,7 @@ def _install_mtp_vendored(
     # uid can log both "B>1" and "non-greedy" if it hits both, but
     # each reason surfaces at most once per uid lifetime.
     _handoff_logged: set[tuple[int, str]] = set()
+    _initial_skip_logged: set[tuple[int, str]] = set()
 
     def _log_mtp_mid_stream_handoff_once(uid: int, reason: str, detail: str) -> None:
         """Emit a WARN log for a mid-stream MTP → plain-decode handoff,
@@ -953,6 +955,18 @@ def _install_mtp_vendored(
             uid,
             reason,
             detail,
+        )
+
+    def _log_mtp_initial_skip_once(uid: int, reason: str) -> None:
+        """Surface a request that never entered MTP without log spam."""
+        key = (uid, reason)
+        if key in _initial_skip_logged:
+            return
+        _initial_skip_logged.add(key)
+        logger.info(
+            "[MTP-vendored] uid=%s remains on plain decode: %s.",
+            uid,
+            reason,
         )
 
     def _cleanup_uid(uid: int) -> None:
@@ -1009,18 +1023,43 @@ def _install_mtp_vendored(
         if getattr(sp, "seed", None) is not None:
             return None, "request-local seeded RNG is not yet supported"
 
+        # The scheduler's uid-keyed map is the processor source of truth. At
+        # the PromptProcessingBatch -> persistent GenerationBatch transition,
+        # mlx-lm can expose the live uid before its positional processor row is
+        # populated. Reading only ``gb.logits_processors[0]`` at that seam made
+        # Desktop's standard repetition penalty look like a custom-processor
+        # mismatch and permanently parked the request on plain decode (#2654).
+        #
+        # Keep the positional fallback for standalone/benchmark callers that
+        # do not own scheduler admission state. Production always passes the
+        # uid map; custom, grammar, tool, and reasoning processors remain in
+        # that authoritative list and therefore still fail closed below.
         row_processors: list[Any] = []
-        all_processors = getattr(gb, "logits_processors", None)
-        if all_processors:
-            row = all_processors[0]
-            if row:
-                row_processors = list(row)
+        if uid_to_request_processors is not None:
+            row_processors = list(uid_to_request_processors.get(uid, ()))
+        else:
+            all_processors = getattr(gb, "logits_processors", None)
+            if all_processors:
+                row = all_processors[0]
+                if row:
+                    row_processors = list(row)
         safe_processors = list(getattr(req, "_mtp_safe_logits_processors", ()))
-        if len(row_processors) != len(safe_processors) or any(
-            actual is not safe
+        identities_match = len(row_processors) == len(safe_processors) and all(
+            actual is safe
             for actual, safe in zip(row_processors, safe_processors, strict=True)
-        ):
-            return None, "custom or stateful logits processor is active"
+        )
+        if not identities_match:
+            active_types = ",".join(
+                type(processor).__name__ for processor in row_processors
+            )
+            safe_types = ",".join(
+                type(processor).__name__ for processor in safe_processors
+            )
+            return None, (
+                "custom or stateful logits processor is active "
+                f"(active={len(row_processors)} [{active_types or '-'}], "
+                f"safe={len(safe_processors)} [{safe_types or '-'}])"
+            )
 
         try:
             fingerprint = (
@@ -1279,6 +1318,7 @@ def _install_mtp_vendored(
                 )
                 _record_terminal_disable(uid)
             else:
+                _log_mtp_initial_skip_once(uid, sampling_skip_reason)
                 _mark_disabled(uid)
             return _orig_step()
 
@@ -3820,6 +3860,7 @@ class Scheduler:
                     model=self.model,
                     requests=self.requests,
                     uid_to_request_id=self.uid_to_request_id,
+                    uid_to_request_processors=self.uid_to_request_processors,
                     # 0.9.13 PR-B: EV depth controller knobs.
                     max_k=getattr(self.config, "mtp_max_k", 3),
                     disable_auto_k=getattr(self.config, "mtp_disable_auto_k", False),

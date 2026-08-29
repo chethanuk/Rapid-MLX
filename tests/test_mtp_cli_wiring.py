@@ -2493,7 +2493,10 @@ def test_install_mtp_vendored_passes_request_sampling_and_safe_penalty_context(
     batch_gen, gb = _make_batch_gen_with_gb()
     gb.uids = [55]
     gb.tokens = [[101, 102]]
-    gb.logits_processors = [[penalty]]
+    # mlx-lm can expose the persistent uid before the parallel processor row
+    # is populated at the prefill -> decode seam. The scheduler's uid-keyed
+    # admission state must carry the safe standard penalty through that gap.
+    gb.logits_processors = []
     gb._next_tokens = mx.array([500], dtype=mx.uint32)
     gb._next_logprobs = [mx.array([0.0])]
     request_stub = SimpleNamespace(
@@ -2512,6 +2515,7 @@ def test_install_mtp_vendored_passes_request_sampling_and_safe_penalty_context(
         model=_StubModel(),
         requests={"req-55": request_stub},
         uid_to_request_id={55: "req-55"},
+        uid_to_request_processors={55: [penalty]},
     )
     gb._step()
 
@@ -2522,6 +2526,58 @@ def test_install_mtp_vendored_passes_request_sampling_and_safe_penalty_context(
     assert seen["logits_processors"] == [penalty]
     assert seen["initial_tokens"] == [101, 102]
     assert gb.orig_step_calls == 0
+
+
+def test_install_mtp_vendored_uid_processor_source_rejects_custom_processor(
+    monkeypatch,
+):
+    """The uid-keyed seam fix must not admit an extra stateful processor."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from vllm_mlx.scheduler import _install_mtp_vendored
+    from vllm_mlx.spec_decode.mtp import generator as _gen_mod
+
+    generator_calls = {"count": 0}
+
+    def _unexpected_generator(*args, **kwargs):
+        generator_calls["count"] += 1
+        raise AssertionError("custom processor must keep request on plain decode")
+
+    monkeypatch.setattr(_gen_mod, "mtp_generate_step", _unexpected_generator)
+
+    batch_gen, gb = _make_batch_gen_with_gb()
+    gb.uids = [56]
+    gb.tokens = [[101, 102]]
+    gb.logits_processors = []
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+    penalty = lambda tokens, logits: logits
+    custom = lambda tokens, logits: logits
+    request_stub = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            min_p=0.05,
+            seed=None,
+        ),
+        _mtp_safe_logits_processors=(penalty,),
+    )
+
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests={"req-56": request_stub},
+        uid_to_request_id={56: "req-56"},
+        uid_to_request_processors={56: [penalty, custom]},
+    )
+    gb._step()
+
+    assert generator_calls["count"] == 0
+    assert gb.orig_step_calls == 1
+    assert batch_gen._mtp_vendored_stats["ft_logits_processors"] == 1
 
 
 def test_install_mtp_vendored_mid_stream_generator_failure_raises(monkeypatch):
