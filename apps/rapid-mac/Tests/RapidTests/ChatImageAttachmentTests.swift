@@ -338,6 +338,40 @@ struct ChatImageAttachmentTests {
         #expect(messages[0].imageDeliveryStatus == .retryable)
     }
 
+    @Test("stopping an in-flight image request restores its unused retry")
+    @MainActor
+    func streamCancellationClearsPendingDelivery() async throws {
+        ImageCancellationProtocol.reset()
+        let image = try ChatImageAttachment(
+            filename: "photo.png",
+            mimeType: "image/png",
+            data: Data("cancelled-photo".utf8)
+        )
+        let model = ChatViewModel(
+            client: ChatStreamClient(
+                baseURL: URL(string: "fake://image-cancellation")!,
+                session: ImageCancellationProtocol.session()
+            ),
+            persistsConversations: false
+        )
+
+        model.send(
+            "Describe this",
+            alias: "vision-model",
+            supportsImageInput: true,
+            imageAttachments: [image]
+        )
+        try await Self.waitUntil { ImageCancellationProtocol.didStart }
+        #expect(model.messages.first?.imageDeliveryStatus == .pending)
+
+        model.stop()
+        try await Self.waitForStream(model)
+
+        #expect(ImageCancellationProtocol.didStop)
+        #expect(model.messages.first?.imageDeliveryStatus == nil)
+        #expect(model.messages.last?.status == .complete)
+    }
+
     @Test("a second terminal image failure quarantines only that image turn")
     @MainActor
     func secondTerminalFailureQuarantinesImage() async throws {
@@ -808,6 +842,63 @@ struct ChatImageAttachmentTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(!model.isStreaming, "the canned chat request must finish")
+    }
+
+    @MainActor
+    private static func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(condition(), "the canned transport event must arrive")
+    }
+}
+
+private final class ImageCancellationProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var started = false
+    nonisolated(unsafe) private static var stopped = false
+
+    static var didStart: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return started
+    }
+
+    static var didStop: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    static func reset() {
+        lock.lock()
+        started = false
+        stopped = false
+        lock.unlock()
+    }
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ImageCancellationProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.started = true
+        Self.lock.unlock()
+        // Intentionally never answer. Cancelling ChatViewModel's in-flight
+        // task must cancel URLSession and route through the real catch path.
+    }
+
+    override func stopLoading() {
+        Self.lock.lock()
+        Self.stopped = true
+        Self.lock.unlock()
     }
 }
 

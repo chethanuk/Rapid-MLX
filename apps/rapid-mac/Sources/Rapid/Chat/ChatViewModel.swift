@@ -1105,6 +1105,13 @@ final class ChatViewModel {
     func stopAndPersist() {
         inflight?.cancel()
         guard isStreaming else { return }
+        // App termination snapshots synchronously, before the cancelled
+        // stream task can reach its catch block. No request remains live, so
+        // every `.pending` image delivery is abandoned rather than persisted
+        // as an attachment that can never be inherited again.
+        for index in messages.indices where messages[index].imageDeliveryStatus == .pending {
+            messages[index].imageDeliveryStatus = nil
+        }
         // Finalise through the SHARED cancellation contract before snapshotting.
         // Persisting a message still marked ``.streaming`` writes a turn that
         // reopens after relaunch as a permanent typing indicator, with no live
@@ -2884,6 +2891,11 @@ Your previous draft refused the question by claiming you lack real-time access o
                 self.writeStreamMessage(at: placeholderIndex, epoch: epoch, current)
             }
         } catch where Self.isCancellation(error) {
+            applyImageDeliveryEvent(
+                messageID: request.imageMessageID,
+                event: .abandoned,
+                epoch: epoch
+            )
             // v0.4.29 pin: cancel MUST land as .complete (not .failed)
             // so the half-streamed content the user already saw stays
             // in the transcript with normal styling. Flipping to
