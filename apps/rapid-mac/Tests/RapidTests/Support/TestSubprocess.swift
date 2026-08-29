@@ -85,11 +85,11 @@ enum TestSubprocess {
         }
         if let currentDirectoryURL {
             let result = currentDirectoryURL.path.withCString { path in
-                if #available(macOS 26.0, *) {
-                    posix_spawn_file_actions_addchdir(&fileActions, path)
-                } else {
-                    posix_spawn_file_actions_addchdir_np(&fileActions, path)
-                }
+                // The non-portable Darwin spelling is present across the
+                // oldest CI SDK through macOS 26. The standardized spelling
+                // is runtime-available on 26 but absent from older SDK headers,
+                // so merely placing it behind #available does not compile.
+                posix_spawn_file_actions_addchdir_np(&fileActions, path)
             }
             try check(result)
         }
