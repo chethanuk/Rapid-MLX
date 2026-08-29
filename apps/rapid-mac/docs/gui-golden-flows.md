@@ -22,7 +22,7 @@ On a self-hosted Mac, prepare the host once as an administrator:
 
 ```sh
 sudo DevToolsSecurity -enable
-sudo automationmodetool enable-automationmode-without-authentication
+/usr/bin/automationmodetool enable-automationmode-without-authentication
 ```
 
 The second command is Apple's CI/lab mechanism for preventing an unattended

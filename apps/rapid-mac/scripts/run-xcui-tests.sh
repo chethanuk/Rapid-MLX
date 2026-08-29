@@ -56,7 +56,7 @@ if [[ "$(uname -s)" == "Darwin" && "${RAPID_XCUI_SKIP_HOST_PREFLIGHT:-0}" != "1"
     automation_status="$(/usr/bin/automationmodetool 2>&1 || true)"
     if [[ "$automation_status" == *"requires user authentication"* ]]; then
         echo "error: this CI host requires interactive authentication before every XCUITest session" >&2
-        echo "error: run 'sudo automationmodetool enable-automationmode-without-authentication' once on the host" >&2
+        echo "error: as the logged-in GUI user, run '/usr/bin/automationmodetool enable-automationmode-without-authentication' once on the host (do not use sudo)" >&2
         echo "$automation_status" >&2
         exit 1
     fi
