@@ -42,6 +42,21 @@ AudioType = Literal["tts", "stt"]
 
 
 @dataclass(frozen=True)
+class AudioRuntimeAsset:
+    """One external repository required by an audio family at inference time.
+
+    Some audio runtimes keep reusable assets (for example voice packs) in a
+    repository separate from the quantized checkpoint.  Keeping that
+    relationship in the catalog lets ``rapid-mlx pull`` prepare a genuinely
+    offline-runnable alias without teaching the downloader about individual
+    model families.
+    """
+
+    repo_id: str
+    allow_patterns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AudioAliasEntry:
     """Resolved metadata for an audio alias.
 
@@ -81,6 +96,7 @@ _REGISTRY: dict[str, AudioAliasEntry] | None = None
 # forward index so :func:`resolve_audio_alias` can answer for full HF
 # ids the same way it answers for short aliases.
 _HF_ID_INDEX: dict[str, str] = {}
+_RUNTIME_ASSETS: dict[str, tuple[AudioRuntimeAsset, ...]] = {}
 
 
 def _registry_path() -> str:
@@ -106,6 +122,52 @@ def _load_registry() -> dict[str, AudioAliasEntry]:
     path = _registry_path()
     with open(path) as f:
         raw = json.load(f)
+
+    runtime_assets: dict[str, tuple[AudioRuntimeAsset, ...]] = {}
+    raw_runtime_assets = raw.get("_runtime_assets", {})
+    if not isinstance(raw_runtime_assets, dict):
+        raise ValueError("audio aliases.json: _runtime_assets must be an object")
+    for family, assets in raw_runtime_assets.items():
+        if not isinstance(family, str) or not family:
+            raise ValueError(
+                "audio aliases.json: _runtime_assets family keys must be non-empty strings"
+            )
+        if not isinstance(assets, list):
+            raise ValueError(
+                f"audio aliases.json: _runtime_assets.{family} must be an array"
+            )
+        parsed: list[AudioRuntimeAsset] = []
+        seen_repos: set[str] = set()
+        for index, asset in enumerate(assets):
+            if not isinstance(asset, dict):
+                raise ValueError(
+                    f"audio aliases.json: _runtime_assets.{family}[{index}] "
+                    "must be an object"
+                )
+            repo_id = asset.get("repo_id")
+            patterns = asset.get("allow_patterns")
+            if not isinstance(repo_id, str) or repo_id.count("/") != 1:
+                raise ValueError(
+                    f"audio aliases.json: _runtime_assets.{family}[{index}].repo_id "
+                    "must be a HuggingFace namespace/name"
+                )
+            if repo_id in seen_repos:
+                raise ValueError(
+                    f"audio aliases.json: duplicate runtime asset {repo_id!r} "
+                    f"for family {family!r}"
+                )
+            if (
+                not isinstance(patterns, list)
+                or not patterns
+                or not all(isinstance(pattern, str) and pattern for pattern in patterns)
+            ):
+                raise ValueError(
+                    f"audio aliases.json: _runtime_assets.{family}[{index}]."
+                    "allow_patterns must be an array of non-empty strings"
+                )
+            seen_repos.add(repo_id)
+            parsed.append(AudioRuntimeAsset(repo_id, tuple(patterns)))
+        runtime_assets[family] = tuple(parsed)
 
     entries: dict[str, AudioAliasEntry] = {}
     for key, value in raw.items():
@@ -147,6 +209,14 @@ def _load_registry() -> dict[str, AudioAliasEntry]:
             notes=value.get("notes", ""),
         )
 
+    unknown_families = set(runtime_assets) - {
+        entry.family for entry in entries.values()
+    }
+    if unknown_families:
+        names = ", ".join(sorted(unknown_families))
+        raise ValueError(
+            f"audio aliases.json: runtime assets declared for unknown family: {names}"
+        )
     _REGISTRY = entries
     # Reverse index keyed on the lowercased HF id so ``serve_command``
     # can route a request like ``rapid-mlx serve mlx-community/Kokoro-
@@ -155,6 +225,8 @@ def _load_registry() -> dict[str, AudioAliasEntry]:
     _HF_ID_INDEX.clear()
     for alias, entry in entries.items():
         _HF_ID_INDEX.setdefault(entry.hf_id.lower(), alias)
+    _RUNTIME_ASSETS.clear()
+    _RUNTIME_ASSETS.update(runtime_assets)
     return entries
 
 
@@ -215,6 +287,20 @@ def list_audio_aliases() -> list[AudioAliasEntry]:
     ``whisper*`` / ``parakeet*`` groups cluster together visually.
     """
     return sorted(_load_registry().values(), key=lambda e: e.alias)
+
+
+def runtime_assets_for(name: str | None) -> tuple[AudioRuntimeAsset, ...]:
+    """Return catalog-declared external runtime assets for an audio name.
+
+    ``name`` accepts the same short-alias and full-HF-id forms as
+    :func:`resolve_audio_alias`.  Non-audio names intentionally return an
+    empty tuple so the general pull path stays unchanged.
+    """
+
+    entry = resolve_audio_alias(name)
+    if entry is None:
+        return ()
+    return _RUNTIME_ASSETS.get(entry.family, ())
 
 
 def stt_aliases() -> dict[str, str]:
