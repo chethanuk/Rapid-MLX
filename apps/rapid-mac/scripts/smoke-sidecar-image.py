@@ -34,13 +34,20 @@ def _wall_clock_deadline(timeout: float):
             f"HTTP request exceeded {timeout:g}s wall-clock deadline"
         )
 
+    started = time.monotonic()
     previous_handler = signal.signal(signal.SIGALRM, _expire)
     previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        previous_remaining, previous_interval = previous_timer
+        if previous_remaining > 0:
+            previous_remaining = max(
+                1e-6, previous_remaining - (time.monotonic() - started)
+            )
         signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, previous_remaining, previous_interval)
 
 
 def _bound_local_listener() -> socket.socket:
@@ -271,6 +278,9 @@ def main() -> int:
         )
         return 0
     except Exception:
+        if process is not None:
+            # Flush the most relevant final failure output before surfacing it.
+            _stop_process(process)
         print(f"image smoke server log: {log_path}")
         print(log_path.read_text(errors="replace"))
         raise

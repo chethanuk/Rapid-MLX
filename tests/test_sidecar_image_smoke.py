@@ -106,6 +106,29 @@ def test_request_deadline_bounds_a_never_finishing_response(monkeypatch) -> None
     assert time.monotonic() - started < 0.5
 
 
+def test_request_deadline_preserves_existing_alarm_budget(monkeypatch) -> None:
+    timer_calls = []
+    monotonic_values = iter((100.0, 102.0))
+
+    monkeypatch.setattr(_MODULE.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(_MODULE.signal, "signal", lambda *_args: "previous-handler")
+
+    def fake_setitimer(*args):
+        timer_calls.append(args)
+        return (5.0, 1.0) if len(timer_calls) == 1 else (0.0, 0.0)
+
+    monkeypatch.setattr(_MODULE.signal, "setitimer", fake_setitimer)
+
+    with _MODULE._wall_clock_deadline(10.0):
+        pass
+
+    assert timer_calls == [
+        (_MODULE.signal.ITIMER_REAL, 10.0),
+        (_MODULE.signal.ITIMER_REAL, 0),
+        (_MODULE.signal.ITIMER_REAL, 3.0, 1.0),
+    ]
+
+
 _FAKE_SIDECAR = """#!/usr/bin/env python3
 import http.server
 import json
