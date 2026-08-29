@@ -5247,11 +5247,13 @@ flow_model_switch_active_request() {
            | select(.identifier == "ModelSwitchGuard.Cancel")' \
         "$OUT/switch-guard.json" >/dev/null \
         || die "active stream did not present the native switch guard"
-    # Press the dialog's semantic Cancel action directly. Posting Escape can
+    # Click the semantic Cancel button's bounds directly. Posting Escape can
     # succeed at the CoreGraphics boundary while the hosted confirmation
-    # dialog ignores it, leaving both the guard and target selection on screen.
-    # AXPress fails closed if the actual user action was not available.
-    "$AX_DRIVER" press "$APP_PID" ModelSwitchGuard.Cancel \
+    # dialog ignores it, and hosted macOS can expose a native dialog button
+    # while returning kAXErrorActionUnsupported for AXPress. A bounds click is
+    # the same explicit user action and still fails closed unless the stable
+    # product-owned identifier resolves to a visible control.
+    "$AX_DRIVER" click-center "$APP_PID" ModelSwitchGuard.Cancel \
         > "$OUT/switch-cancelled.json" \
         || die "switch guard did not honor the native Cancel action"
 
