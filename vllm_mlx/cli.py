@@ -6242,6 +6242,7 @@ def _available_models_json_payload() -> dict:
             "is_hybrid": bool(getattr(p, "is_hybrid", False)),
             "is_moe": bool(getattr(p, "is_moe", False)),
             "supports_spec_decode": bool(getattr(p, "supports_spec_decode", False)),
+            "supports_native_mtp": bool(getattr(p, "supports_native_mtp", False)),
             "mtp_draft_model": getattr(p, "mtp_draft_model", None),
             "mtp_speculative_tokens": getattr(p, "mtp_speculative_tokens", None),
             "modality": _modality(p),
@@ -6397,7 +6398,11 @@ def models_command(args):
         p = profiles[alias]
         tools = p.tool_call_parser or "—"
         reasoning = p.reasoning_parser or "—"
-        if p.mtp_draft_model:
+        if getattr(p, "supports_native_mtp", False):
+            spec = "✓ MTP"
+            tier = "n/a"
+            preset = f"MTP@native@{p.mtp_speculative_tokens}"
+        elif p.mtp_draft_model:
             spec = "✓ MTP"
             tier = "n/a"
             preset = f"MTP@{p.mtp_draft_model}@{p.mtp_speculative_tokens}"
@@ -6410,7 +6415,11 @@ def models_command(args):
             spec = "✓" if p.supports_spec_decode else "✗"
             tier = p.suffix_decoding_tier
             preset = "Suffix" if p.supports_spec_decode else "—"
-        if p.is_hybrid and not p.mtp_draft_model:
+        if (
+            p.is_hybrid
+            and not p.mtp_draft_model
+            and not getattr(p, "supports_native_mtp", False)
+        ):
             preset = "—"
 
         # DFlash column — eligible aliases show ✓, everything else "—" so
