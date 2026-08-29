@@ -106,29 +106,70 @@ def test_model_profile_reports_unavailable_after_runtime_install_gate_miss(
     assert info.runtime_state == "unavailable"
 
 
-@pytest.mark.parametrize(
-    ("installer_succeeds", "expected_method"),
-    [(True, "mtp"), (False, None)],
-)
-def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
-    monkeypatch,
-    installer_succeeds,
-    expected_method,
-):
-    pytest.importorskip("mlx")
-    import vllm_mlx.scheduler as scheduler_module
-    from vllm_mlx.request import SamplingParams
+def test_model_profile_reads_legacy_suffix_configuration(monkeypatch):
+    from vllm_mlx.routes import models as models_route
+
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(
+            spec_decode="none",
+            enable_suffix_decoding=True,
+        ),
+        spec_decode_runtime_method="suffix",
+        spec_decode_runtime_attempted=True,
+    )
+    monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: object())
+    monkeypatch.setattr(models_route, "_scheduler_of", lambda _engine: scheduler)
+
+    info = models_route._resolve_speculative_decoding("served-model")
+
+    assert info is not None
+    assert info.method == "suffix"
+    assert info.runtime_state == "active"
+
+
+def test_model_profile_omits_disabled_speculative_configuration(monkeypatch):
+    from vllm_mlx.routes import models as models_route
+
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(
+            spec_decode="none",
+            enable_suffix_decoding=False,
+        )
+    )
+    monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: object())
+    monkeypatch.setattr(models_route, "_scheduler_of", lambda _engine: scheduler)
+
+    assert models_route._resolve_speculative_decoding("served-model") is None
+
+
+def test_model_profile_fails_closed_when_policy_probe_raises(monkeypatch):
+    from vllm_mlx.routes import models as models_route
+    from vllm_mlx.speculative import request_policy
+
+    scheduler = SimpleNamespace(config=SimpleNamespace(spec_decode="mtp"))
+    monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: object())
+    monkeypatch.setattr(models_route, "_scheduler_of", lambda _engine: scheduler)
+
+    def fail_probe(_method):
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(
+        request_policy,
+        "resolve_speculative_request_policy",
+        fail_probe,
+    )
+
+    assert models_route._resolve_speculative_decoding("served-model") is None
+
+
+def _stub_runtime_scheduler(monkeypatch, scheduler_module, **config_overrides):
+    """Build the narrow real-Scheduler seam shared by installer-state tests."""
 
     batch_generator = SimpleNamespace()
     monkeypatch.setattr(
         scheduler_module,
         "BatchGenerator",
         lambda *args, **kwargs: batch_generator,
-    )
-    monkeypatch.setattr(
-        scheduler_module,
-        "_install_mtp_vendored",
-        lambda *args, **kwargs: installer_succeeds,
     )
     monkeypatch.setattr(
         scheduler_module,
@@ -153,25 +194,91 @@ def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
     scheduler.spec_decode_runtime_method = "stale"
     scheduler.spec_decode_runtime_attempted = True
     scheduler._get_stop_tokens = lambda: set()
-    scheduler.config = SimpleNamespace(
-        prefill_batch_size=1,
-        completion_batch_size=1,
-        prefill_step_size=1,
-        kv_cache_quantization=False,
-        kv_cache_turboquant=None,
+    config = {
+        "prefill_batch_size": 1,
+        "completion_batch_size": 1,
+        "prefill_step_size": 1,
+        "kv_cache_quantization": False,
+        "kv_cache_turboquant": None,
+        "spec_decode": "none",
+        "mtp_model_type": "qwen4_exp",
+        "mtp_max_k": 3,
+        "mtp_disable_auto_k": False,
+        "model_name": "served-model",
+        "mtp_sidecar": None,
+        "dspark_num_speculative_tokens": 5,
+        "enable_suffix_decoding": False,
+        "suffix_max_draft": 8,
+        "suffix_max_suffix_len": 64,
+        "suffix_min_confidence": 0.5,
+        "suffix_min_draft_len": 2,
+    }
+    config.update(config_overrides)
+    scheduler.config = SimpleNamespace(**config)
+    return scheduler, batch_generator
+
+
+@pytest.mark.parametrize(
+    ("installer_succeeds", "expected_method"),
+    [(True, "mtp"), (False, None)],
+)
+def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
+    monkeypatch,
+    installer_succeeds,
+    expected_method,
+):
+    pytest.importorskip("mlx")
+    import vllm_mlx.scheduler as scheduler_module
+    from vllm_mlx.request import SamplingParams
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_mtp_vendored",
+        lambda *args, **kwargs: installer_succeeds,
+    )
+    scheduler, batch_generator = _stub_runtime_scheduler(
+        monkeypatch,
+        scheduler_module,
         spec_decode="mtp",
-        mtp_model_type="qwen4_exp",
-        mtp_max_k=3,
-        mtp_disable_auto_k=False,
-        model_name="served-model",
-        mtp_sidecar=None,
-        enable_suffix_decoding=False,
     )
 
     created = scheduler._create_batch_generator(SamplingParams(max_tokens=8))
 
     assert created is batch_generator
     assert scheduler.spec_decode_runtime_method == expected_method
+    assert scheduler.spec_decode_runtime_attempted is True
+
+
+@pytest.mark.parametrize("method", ["dspark", "suffix"])
+def test_scheduler_publishes_other_successfully_installed_runtimes(
+    monkeypatch,
+    method,
+):
+    pytest.importorskip("mlx")
+    import vllm_mlx.scheduler as scheduler_module
+    from vllm_mlx.request import SamplingParams
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_dspark",
+        lambda *args, **kwargs: method == "dspark",
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_install_suffix_decoding",
+        lambda *args, **kwargs: method == "suffix",
+    )
+    scheduler, batch_generator = _stub_runtime_scheduler(
+        monkeypatch,
+        scheduler_module,
+        spec_decode="dspark" if method == "dspark" else "none",
+        enable_suffix_decoding=method == "suffix",
+    )
+
+    created = scheduler._create_batch_generator(SamplingParams(max_tokens=8))
+
+    assert created is batch_generator
+    assert scheduler.spec_decode_runtime_method == method
     assert scheduler.spec_decode_runtime_attempted is True
 
 
