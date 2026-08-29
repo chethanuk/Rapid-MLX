@@ -1,3 +1,4 @@
+import plistlib
 from pathlib import Path
 
 import yaml
@@ -154,6 +155,17 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert "isExecutableFile" in source
     assert "RapidUITests-$(date +%s)-$$.xcresult" in runner
+
+
+def test_xcui_runner_can_reserve_its_loopback_listener():
+    project = (
+        MAC / "Tests/RapidUITests/RapidUITests.xcodeproj/project.pbxproj"
+    ).read_text()
+    entitlements_path = MAC / "Tests/RapidUITests/RapidUITests.entitlements"
+    entitlements = plistlib.loads(entitlements_path.read_bytes())
+
+    assert project.count("CODE_SIGN_ENTITLEMENTS = RapidUITests.entitlements;") == 2
+    assert entitlements == {"com.apple.security.network.server": True}
 
 
 def test_swift_source_parent_traversal_resolves_rapid_mac_fixture():
