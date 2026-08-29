@@ -1049,7 +1049,7 @@ if [[ -n "${SIDECAR_IMAGE_SMOKE_MODEL:-}" ]]; then
     fi
     PYTHONPATH="$STAGE/site-packages" PYTHONNOUSERSITE=1 \
         "$STAGE/python/bin/python3.12" \
-        "$REPO_ROOT/apps/rapid-mac/scripts/smoke-sidecar-image.py" \
+        "$REPO_ROOT/scripts/smoke-sidecar-image.py" \
         "${SIDECAR_IMAGE_SMOKE_ARGS[@]}"
 else
     echo "==> real image-generation smoke: not configured (set SIDECAR_IMAGE_SMOKE_MODEL for release candidates)"

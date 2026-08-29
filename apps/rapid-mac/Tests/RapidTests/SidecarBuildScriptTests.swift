@@ -121,7 +121,7 @@ struct SidecarBuildScriptTests {
                 "The bundle build must prove qwen-image itself imports without torch.")
         #expect(script.contains("SIDECAR_IMAGE_SMOKE_MODEL"),
                 "Release-candidate builds must opt into a real image-generation model.")
-        #expect(script.contains("$REPO_ROOT/apps/rapid-mac/scripts/smoke-sidecar-image.py"),
+        #expect(script.contains("$REPO_ROOT/scripts/smoke-sidecar-image.py"),
                 "The image runtime needs a real generated-PNG gate, not only an import probe.")
         let visionSmoke = script.range(of: "smoke-sidecar-vision.py")?.lowerBound
         let imageSmoke = script.range(of: "smoke-sidecar-image.py")?.lowerBound

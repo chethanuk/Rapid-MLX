@@ -204,7 +204,8 @@ def test_main_executes_socket_activated_image_generation_journey(
 
 def test_release_workflow_serializes_flux_after_vision_smoke() -> None:
     workflow = (_ROOT / ".github/workflows/auto-release.yml").read_text()
-    build = (_ROOT / "apps/rapid-mac/scripts/build-sidecar.sh").read_text()
+    build_script = _ROOT / "apps/rapid-mac/scripts/build-sidecar.sh"
+    build = build_script.read_text()
     assert "steps.sidecar-pins.outputs.flux_model" in workflow
     assert "steps.sidecar-pins.outputs.flux_revision" in workflow
     assert "SIDECAR_IMAGE_SMOKE_MODEL" in workflow
@@ -212,7 +213,13 @@ def test_release_workflow_serializes_flux_after_vision_smoke() -> None:
     assert build.index("smoke-sidecar-vision.py") < build.index(
         "smoke-sidecar-image.py"
     )
-    assert '"$REPO_ROOT/apps/rapid-mac/scripts/smoke-sidecar-image.py"' in build
+    assert '"$REPO_ROOT/scripts/smoke-sidecar-image.py"' in build
+    # build-sidecar.sh defines REPO_ROOT as its parent directory
+    # (apps/rapid-mac), not the git root. Mirror that resolution and prove the
+    # invoked file exists instead of merely accepting a plausible string.
+    build_repo_root = build_script.parent.parent
+    assert build_repo_root / "scripts/smoke-sidecar-image.py" == _SCRIPT
+    assert _SCRIPT.is_file()
     assert '"$SIDE/python/bin/python3.12"' in workflow
 
 
