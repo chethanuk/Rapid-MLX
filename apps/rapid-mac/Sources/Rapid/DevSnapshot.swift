@@ -83,7 +83,8 @@ enum DevSnapshot {
         snapshotStarDefaults.removePersistentDomain(forName: "rapid.dev-snapshot.github-star")
         let snapshotStarPrompt = GitHubStarPromptCoordinator(
             defaults: snapshotStarDefaults,
-            quietWindow: .zero
+            quietWindow: .zero,
+            presentationActive: true
         )
         snapshotPerfDefaults.removePersistentDomain(forName: "rapid.dev-snapshot.perf")
         let snapshotPerfConfig = ModelPerfConfigStore(defaults: snapshotPerfDefaults)

@@ -34,19 +34,27 @@ final class GitHubStarPromptCoordinator {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private let quietWindow: Duration
+    @ObservationIgnored private let waitForQuietWindow: @MainActor (Duration) async -> Void
     @ObservationIgnored private var context: PresentationContext = .ready
     @ObservationIgnored private var presentationPending = false
     @ObservationIgnored private var presentationTask: Task<Void, Never>?
     @ObservationIgnored private var keyboardMonitor: Any?
+    @ObservationIgnored private var presentationActive: Bool
 
     init(
         defaults: UserDefaults = .standard,
         now: @escaping () -> Date = Date.init,
-        quietWindow: Duration = GitHubStarPromptCoordinator.quietWindow
+        quietWindow: Duration = GitHubStarPromptCoordinator.quietWindow,
+        presentationActive: Bool = false,
+        waitForQuietWindow: @escaping @MainActor (Duration) async -> Void = { duration in
+            try? await Task.sleep(for: duration)
+        }
     ) {
         self.defaults = defaults
         self.now = now
         self.quietWindow = quietWindow
+        self.presentationActive = presentationActive
+        self.waitForQuietWindow = waitForQuietWindow
     }
 
     /// Records one delivered chat reply, dictation transcript, or generated
@@ -88,17 +96,28 @@ final class GitHubStarPromptCoordinator {
     }
 
     func startMonitoringUserActivity() {
-        guard keyboardMonitor == nil else { return }
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            self?.noteUserActivity()
-            return event
+        presentationActive = true
+        if keyboardMonitor == nil {
+            keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+                self?.noteUserActivity()
+                return event
+            }
         }
+        if presentationPending { schedulePresentationCheck() }
     }
 
     func stopMonitoringUserActivity() {
-        guard let keyboardMonitor else { return }
-        NSEvent.removeMonitor(keyboardMonitor)
-        self.keyboardMonitor = nil
+        presentationActive = false
+        presentationTask?.cancel()
+        presentationTask = nil
+        if isPresented {
+            isPresented = false
+            presentationPending = true
+        }
+        if let keyboardMonitor {
+            NSEvent.removeMonitor(keyboardMonitor)
+            self.keyboardMonitor = nil
+        }
     }
 
     /// Close and Later are intentionally equivalent: both respect the user's
@@ -140,7 +159,10 @@ final class GitHubStarPromptCoordinator {
 
     private func schedulePresentationCheck() {
         presentationTask?.cancel()
-        guard presentationPending, !context.isBusy, !context.hasBlockingSurface else {
+        guard presentationActive,
+              presentationPending,
+              !context.isBusy,
+              !context.hasBlockingSurface else {
             presentationTask = nil
             return
         }
@@ -150,8 +172,8 @@ final class GitHubStarPromptCoordinator {
             return
         }
 
-        presentationTask = Task { [weak self, quietWindow] in
-            try? await Task.sleep(for: quietWindow)
+        presentationTask = Task { [weak self, quietWindow, waitForQuietWindow] in
+            await waitForQuietWindow(quietWindow)
             guard !Task.isCancelled else { return }
             self?.presentIfReady()
         }
@@ -161,6 +183,7 @@ final class GitHubStarPromptCoordinator {
         presentationTask = nil
         guard presentationPending,
               !isPresented,
+              presentationActive,
               !context.isBusy,
               !context.hasBlockingSurface,
               !defaults.bool(forKey: Keys.completed),
