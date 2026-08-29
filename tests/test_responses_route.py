@@ -14,8 +14,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-pytestmark = pytest.mark.requires_mlx
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -2004,6 +2002,7 @@ def test_deepseek_codex_implicit_temperature_uses_low_entropy_default(monkeypatc
     )
 
 
+@pytest.mark.requires_mlx
 def test_deepseek_thinking_false_suppresses_reopened_think_token(monkeypatch):
     from types import SimpleNamespace
 

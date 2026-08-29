@@ -10,8 +10,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytestmark = pytest.mark.requires_mlx
-
 from vllm_mlx.prefix_cache import (
     CacheEntry,
     PrefixCacheManager,
@@ -445,6 +443,7 @@ class TestSchedulerIntegration:
         assert request.cached_tokens == 0
         assert request.remaining_tokens is None
 
+    @pytest.mark.requires_mlx
     def test_scheduler_config_cache_options(self):
         """Test scheduler config has cache options."""
         from vllm_mlx.scheduler import SchedulerConfig

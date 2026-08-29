@@ -26,8 +26,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.requires_mlx
-
 from vllm_mlx import cli
 
 # ---------------------------------------------------------------------------
@@ -319,6 +317,7 @@ def _capture_uvicorn_run(monkeypatch):
     return captured
 
 
+@pytest.mark.requires_mlx
 def test_serve_command_dispatches_uvicorn_with_fd_when_listen_fd_set(
     stub_heavy_serve_deps,
 ):
@@ -602,6 +601,7 @@ def test_strict_auto_default_retries_failed_nonfatal_parser_detection(
     ]
 
 
+@pytest.mark.requires_mlx
 def test_serve_command_dispatches_uvicorn_with_host_port_when_listen_fd_unset(
     stub_heavy_serve_deps,
 ):
@@ -625,6 +625,7 @@ def test_serve_command_dispatches_uvicorn_with_host_port_when_listen_fd_unset(
     assert cfg.bind_listen_fd is None
 
 
+@pytest.mark.requires_mlx
 def test_serve_command_default_max_tokens_does_not_mutate_args(
     stub_heavy_serve_deps,
 ):
@@ -653,6 +654,7 @@ def test_serve_command_default_max_tokens_does_not_mutate_args(
     assert captured_load["kwargs"]["max_tokens_is_explicit"] is False
 
 
+@pytest.mark.requires_mlx
 def test_serve_command_skips_port_preflight_when_listen_fd_set(
     stub_heavy_serve_deps,
 ):
@@ -692,6 +694,7 @@ def test_serve_command_skips_port_preflight_when_listen_fd_set(
     assert "port" not in captured
 
 
+@pytest.mark.requires_mlx
 def test_serve_command_resets_stale_bind_fields_between_invocations(
     stub_heavy_serve_deps,
 ):
