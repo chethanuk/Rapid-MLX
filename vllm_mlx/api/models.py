@@ -13,7 +13,7 @@ import math
 import re
 import time
 import uuid
-from typing import Literal
+from typing import Literal, SupportsFloat
 
 from pydantic import (
     BaseModel,
@@ -126,10 +126,9 @@ def _validate_timeout(v: object) -> object:
         raise ValueError("timeout must be a number of seconds, not a boolean")
     if v is None:
         return None
-    try:
-        timeout = float(v)
-    except (TypeError, ValueError):
+    if not isinstance(v, SupportsFloat):
         return v
+    timeout = float(v)
     if not math.isfinite(timeout):
         raise ValueError("timeout must be a finite number of seconds (not NaN or inf)")
     if timeout == 0:

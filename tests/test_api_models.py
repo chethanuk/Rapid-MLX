@@ -685,6 +685,9 @@ class TestStopAndTimeoutHelpers:
             with pytest.raises(ValueError, match="not a boolean"):
                 _validate_timeout(bad)
 
+    def test_validate_timeout_defers_non_numeric_types_to_pydantic(self):
+        assert _validate_timeout(["seconds"]) == ["seconds"]
+
     def test_validate_timeout_nonfinite_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf")):
             with pytest.raises(ValueError):
