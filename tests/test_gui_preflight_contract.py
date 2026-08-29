@@ -18,6 +18,10 @@ machine — it would only quietly restore the misdiagnosis on an unhealthy one.
 
 from __future__ import annotations
 
+import json
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -281,6 +285,77 @@ def test_harness_reaps_its_own_fake_before_relaunch_without_global_sweep():
     assert relaunch.index("cleanup_fake_sidecars") < relaunch.index(
         '"$PERSONA/launch.sh"'
     )
+
+
+def test_fake_sidecar_cleanup_waits_then_escalates_without_touching_operator(tmp_path):
+    """Regression for #2676: cleanup must finish before persona deletion."""
+    graceful_code = """
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.05)
+"""
+    stubborn_code = """
+import signal
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(0.05)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", graceful_code, "serve", "fake-graceful"]
+        ),
+        subprocess.Popen(
+            [sys.executable, "-c", stubborn_code, "serve", "fake-stubborn"]
+        ),
+        subprocess.Popen(
+            [sys.executable, "-c", graceful_code, "serve", "operator-owned"]
+        ),
+    ]
+    graceful, stubborn, operator = processes
+    events = tmp_path / "fake-events.jsonl"
+    events.write_text(
+        "\n".join(
+            json.dumps({"event": "server_started", "pid": proc.pid, "alias": alias})
+            for proc, alias in (
+                (graceful, "fake-graceful"),
+                (stubborn, "fake-stubborn"),
+            )
+        )
+        + "\n"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'harness="$1"; event_out="$2"; set --; '
+                'source "$harness"; OUT="$event_out"; cleanup_fake_sidecars',
+                "cleanup-test",
+                str(HARNESS),
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert graceful.wait(timeout=1) == 0
+        assert stubborn.wait(timeout=1) == -signal.SIGKILL
+        assert operator.poll() is None
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
 
 
 def test_fresh_install_fixture_contains_the_real_starter():

@@ -154,6 +154,58 @@ require_observed_phase() {
     [[ "$observed" == 1 ]] || die "required $phase phase was not observed"
 }
 
+recorded_fake_sidecar_is_live() {
+    local fake_pid="$1" fake_alias="$2" command
+    command="$(ps -p "$fake_pid" -o command= 2>/dev/null || true)"
+    [[ "$command" == *"serve $fake_alias"* ]]
+}
+
+stop_recorded_fake_sidecar() {
+    local fake_pid="$1" fake_alias="$2"
+    recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+
+    # Follow the server lifecycle used by the engine: request a graceful stop,
+    # wait for it to finish releasing its resources, then force only the exact
+    # recorded process if it ignores the deadline. Merely sending SIGTERM and
+    # immediately deleting the persona races Python's final cache writes.
+    kill "$fake_pid" 2>/dev/null || true
+    local attempt
+    for attempt in {1..40}; do
+        recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+        sleep 0.05
+    done
+
+    # Re-check the command immediately before SIGKILL. A recycled pid or a
+    # process whose argv no longer names the recorded alias is not ours.
+    recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+    kill -KILL "$fake_pid" 2>/dev/null || true
+    for attempt in {1..40}; do
+        recorded_fake_sidecar_is_live "$fake_pid" "$fake_alias" || return 0
+        sleep 0.05
+    done
+
+    printf '[gui-golden] owned fake sidecar pid=%s alias=%s did not exit\n' \
+        "$fake_pid" "$fake_alias" >&2
+    return 1
+}
+
+cleanup_fake_sidecars() {
+    local status=0 fake_pid fake_alias
+    if [[ -n "$OUT" && -f "$OUT/fake-events.jsonl" ]]; then
+        # Pair each pid with the alias it was started for, and require the live
+        # command to still name THAT alias. This is both the ownership boundary
+        # and the recycled-pid guard; operator processes remain untouched.
+        while IFS=$'\t' read -r fake_pid fake_alias; do
+            [[ "$fake_pid" =~ ^[0-9]+$ ]] || continue
+            [[ -n "$fake_alias" && "$fake_alias" != "null" ]] || continue
+            stop_recorded_fake_sidecar "$fake_pid" "$fake_alias" || status=1
+        done < <(jq -r 'select(.event == "server_started")
+                        | "\(.pid)\t\(.alias // "")"' \
+                     "$OUT/fake-events.jsonl" 2>/dev/null | sort -u)
+    fi
+    return "$status"
+}
+
 # When sourced, expose only the executable contract helpers above. Return
 # before cleanup traps, app launch, filesystem mutation, or tool preflight.
 # Direct execution cannot be bypassed with an environment variable.
@@ -222,9 +274,15 @@ cleanup_persona() {
         wait "$APP_PID" 2>/dev/null || true
     fi
     APP_PID=""
-    cleanup_fake_sidecars
+    local sidecars_stopped=1
+    cleanup_fake_sidecars || sidecars_stopped=0
     if [[ "$KEEP" == 0 && -n "$BUNDLE_ID" ]]; then
         defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
+    fi
+    if [[ "$sidecars_stopped" == 0 ]]; then
+        printf '[gui-golden] preserving persona because an owned sidecar is still live: %s\n' \
+            "$PERSONA" >&2
+        return 1
     fi
     if [[ "$KEEP" == 0 && -n "$PERSONA" && -d "$PERSONA" ]]; then
         rm -rf "$PERSONA"
@@ -232,29 +290,6 @@ cleanup_persona() {
     PERSONA=""
     BUNDLE_ID=""
     PERSONA_ENV=()
-}
-
-cleanup_fake_sidecars() {
-    if [[ -n "$OUT" && -f "$OUT/fake-events.jsonl" ]]; then
-        # Pair each pid with the alias it was started for, and require the
-        # live command to still name THAT alias. A bare `serve fake-alias`
-        # match missed `serve fake-image-alias` entirely and left the image
-        # flow's sidecar listening after the run — an orphan that then
-        # contaminates the next local run. Matching the recorded alias keeps
-        # the recycled-pid guard the substring test was there for, without
-        # having to remember to extend it for every new fixture alias.
-        while IFS=$'\t' read -r fake_pid fake_alias; do
-            [[ "$fake_pid" =~ ^[0-9]+$ ]] || continue
-            [[ -n "$fake_alias" && "$fake_alias" != "null" ]] || continue
-            local command
-            command="$(ps -p "$fake_pid" -o command= 2>/dev/null || true)"
-            if [[ "$command" == *"serve $fake_alias"* ]]; then
-                kill "$fake_pid" 2>/dev/null || true
-            fi
-        done < <(jq -r 'select(.event == "server_started")
-                        | "\(.pid)\t\(.alias // "")"' \
-                     "$OUT/fake-events.jsonl" 2>/dev/null | sort -u)
-    fi
 }
 
 cleanup_operator_server() {
