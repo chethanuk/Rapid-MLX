@@ -1192,8 +1192,12 @@ def test_qwen4_state_cache_preserves_type_across_prefix_cache_lifecycle(tmp_path
     second.cache = [mx.array([[3.0]]), mx.array([[4.0]])]
 
     batched = Qwen4ExpStateCache.merge([first, second])
+    batched.left_padding = mx.array([0, 3])
+    batched.lengths = mx.array([5, 2])
     extracted = batched.extract(0)
     assert isinstance(extracted, Qwen4ExpStateCache)
+    np.testing.assert_array_equal(np.array(extracted.left_padding), np.array([0]))
+    np.testing.assert_array_equal(np.array(extracted.lengths), np.array([5]))
     extracted.record_slot_snapshots(0, [mx.array([1.0])])
     extracted.record_slot_snapshots(1, [mx.array([2.0])], finalize=True)
     extracted.rollback_state = None
