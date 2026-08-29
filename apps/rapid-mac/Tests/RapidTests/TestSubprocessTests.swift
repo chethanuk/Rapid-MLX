@@ -106,8 +106,51 @@ struct TestSubprocessTests {
         let pidText = try String(contentsOf: pidFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let descendantPID = try #require(pid_t(pidText))
+        // launchd may need a moment to reap the already-terminated orphan on
+        // a saturated parallel run. The subprocess helper has returned and
+        // the child is no longer executing; wait only for the PID to vanish.
+        for _ in 0..<100 where Darwin.kill(descendantPID, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(Darwin.kill(descendantPID, 0) == -1)
         #expect(errno == ESRCH)
+    }
+
+    @Test("an escaped descendant retaining pipes cannot defeat the timeout bound")
+    func escapedDescendantCannotHoldCaptureOpen() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-test-subprocess-escaped-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        do {
+            _ = try await TestSubprocess.run(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    #"/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(my $fh, q(>), $ARGV[0]) or die $!; print {$fh} qq($$\n); close $fh; sleep 30' "$1" &"#,
+                    "rapid-test-subprocess",
+                    pidFile.path,
+                ],
+                timeout: 0.2,
+                sampleOnTimeout: false
+            )
+            Issue.record("an escaped descendant holding pipes should time out")
+        } catch is TestSubprocessError {
+            // Expected. The direct shell has exited, while the detached Perl
+            // process still owns inherited pipe descriptors.
+        }
+
+        #expect(clock.now - start < .seconds(5))
+        for _ in 0..<50 where !FileManager.default.fileExists(atPath: pidFile.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let escapedPID = try #require(pid_t(pidText))
+        defer { _ = Darwin.kill(escapedPID, SIGKILL) }
+        #expect(Darwin.kill(escapedPID, 0) == 0)
     }
 
     @Test("blocking Process waits stay confined to native watchdog threads")

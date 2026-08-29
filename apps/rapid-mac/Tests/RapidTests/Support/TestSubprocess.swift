@@ -25,8 +25,10 @@ enum TestSubprocessError: Error, CustomStringConvertible {
 /// enough such waits can prevent the tasks responsible for making the child
 /// exit from running at all. This helper instead waits on a native thread,
 /// independent of Swift concurrency, while a second native-thread watchdog
-/// bounds both process exit and pipe drainage. A timeout samples the process
-/// group into the captured test log, then escalates group-wide TERM to KILL.
+/// bounds both process exit and pipe drainage. A timeout emits one bounded
+/// sample for the process-group leader, then escalates group-wide TERM to KILL
+/// and closes the capture descriptors so an escaped descendant cannot retain
+/// them indefinitely.
 enum TestSubprocess {
     static func run(
         executableURL: URL,
@@ -144,20 +146,26 @@ enum TestSubprocess {
         Thread.detachNewThread {
             guard state.beginTimeoutIfIncomplete(after: timeout) else { return }
             if sampleOnTimeout {
-                sample(processGroup: spawnedPID, duration: sampleDuration, command: command)
+                sample(pid: spawnedPID, duration: sampleDuration, command: command)
             }
-            Darwin.kill(-spawnedPID, SIGTERM)
-            guard !state.waitForCompletion(seconds: 2) else { return }
-            Darwin.kill(-spawnedPID, SIGKILL)
+            terminate(
+                pid: spawnedPID,
+                state: state,
+                stdoutCapture: stdoutCapture,
+                stderrCapture: stderrCapture
+            )
         }
 
         let exit = await withTaskCancellationHandler {
             await state.value()
         } onCancel: {
-            Darwin.kill(-spawnedPID, SIGTERM)
             Thread.detachNewThread {
-                guard !state.waitForCompletion(seconds: 2) else { return }
-                Darwin.kill(-spawnedPID, SIGKILL)
+                terminate(
+                    pid: spawnedPID,
+                    state: state,
+                    stdoutCapture: stdoutCapture,
+                    stderrCapture: stderrCapture
+                )
             }
         }
         async let standardOutput = stdoutCapture.value()
@@ -179,55 +187,61 @@ enum TestSubprocess {
         )
     }
 
-    private static func sample(processGroup: pid_t, duration: Int, command: String) {
-        let members = processGroupMembers(processGroup)
-        let message = "TestSubprocess: timeout; sampling process group \(processGroup) members \(members) for \(duration)s: \(command)\n"
+    private static func sample(pid: pid_t, duration: Int, command: String) {
+        // Sampling every descendant serially makes a fork-heavy timeout scale
+        // with process count. One leader sample keeps diagnostics within the
+        // caller-selected duration while the group ID remains in the message.
+        let message = "TestSubprocess: timeout; sampling process-group leader \(pid) for \(duration)s: \(command)\n"
         FileHandle.standardError.write(Data(message.utf8))
-        for pid in members.isEmpty ? [processGroup] : members {
-            sample(pid: pid, duration: duration)
-        }
-    }
-
-    private static func sample(pid: pid_t, duration: Int) {
         let sampler = Process()
         sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
         sampler.arguments = [String(pid), String(duration), "-file", "/dev/stderr"]
         sampler.standardOutput = FileHandle.standardError
         sampler.standardError = FileHandle.standardError
+        let finished = DispatchSemaphore(value: 0)
+        sampler.terminationHandler = { _ in finished.signal() }
         do {
             try sampler.run()
-            // This runs on the dedicated watchdog Thread, never a Swift
-            // cooperative executor worker.
-            sampler.waitUntilExit()
+            // Symbolication can outlive the requested sampling period. Give it
+            // one fixed grace second, then stop the diagnostic so termination
+            // never depends on an unbounded Process wait.
+            if finished.wait(timeout: .now() + .seconds(duration + 1)) == .timedOut {
+                sampler.terminate()
+                if finished.wait(timeout: .now() + .milliseconds(250)) == .timedOut {
+                    _ = Darwin.kill(sampler.processIdentifier, SIGKILL)
+                }
+            }
         } catch {
             let failure = "TestSubprocess: sample failed for pid \(pid): \(error)\n"
             FileHandle.standardError.write(Data(failure.utf8))
         }
     }
 
-    private static func processGroupMembers(_ processGroup: pid_t) -> [pid_t] {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,pgid="]
-        process.standardOutput = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return []
-        }
-        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .split(separator: "\n")
-            .compactMap { line -> pid_t? in
-                let fields = line.split(whereSeparator: \Character.isWhitespace)
-                guard fields.count == 2,
-                      let pid = pid_t(fields[0]),
-                      let group = pid_t(fields[1]),
-                      group == processGroup
-                else { return nil }
-                return pid
-            }
+    private static func terminate(
+        pid: pid_t,
+        state: TestProcessCompletionState,
+        stdoutCapture: AsyncPipeCapture,
+        stderrCapture: AsyncPipeCapture
+    ) {
+        signalProcessTree(pid: pid, signal: SIGTERM)
+        guard !state.waitForCompletion(seconds: 2) else { return }
+
+        signalProcessTree(pid: pid, signal: SIGKILL)
+
+        // A descendant can deliberately leave the process group (setsid) yet
+        // retain inherited stdout/stderr descriptors after the direct child
+        // is reaped. Closing our read ends makes timeout completion independent
+        // of that descendant and preserves the helper's hard upper bound.
+        stdoutCapture.cancel()
+        stderrCapture.cancel()
+    }
+
+    private static func signalProcessTree(pid: pid_t, signal: Int32) {
+        // Signal both the group and its leader. The direct child may have
+        // changed its own group after spawn; addressing its PID still gives
+        // the waitpid thread a deterministic path to reap it.
+        _ = Darwin.kill(-pid, signal)
+        _ = Darwin.kill(pid, signal)
     }
 
     private static func terminationStatus(from rawStatus: Int32) -> Int32 {
