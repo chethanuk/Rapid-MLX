@@ -154,49 +154,16 @@ struct SidecarBuildScriptTests {
                 "The signing baseline must match the measured post-audio bundle, less the orphaned libpython dylib dropped in step 3.")
     }
 
-    /// The interpreter strip must stay ABOVE the signing loop.
-    ///
-    /// `strip` rewrites the Mach-O, which invalidates any signature already
-    /// attached to it. Sinking the strip below step 5 would still produce a
-    /// bundle locally — the breakage only surfaces as a `codesign --verify`
-    /// failure on the user's Mac (and a notarisation reject in CI), so pin
-    /// the relative order here rather than trusting a comment.
-    @Test("The interpreter is stripped before the Mach-O signing pass")
-    func stripsInterpreterBeforeSigning() throws {
+    /// The shared libpython optimization must stay behind the tested guard.
+    @Test("The unreferenced libpython dylib uses the fail-closed guard")
+    func guardsOrphanedLibpythonRemoval() throws {
         let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
 
-        guard let strip = script.range(of: #"strip -x "$STAGE/python/bin/python3.12""#) else {
-            Issue.record("The interpreter strip step is missing; the bundle regains ~1.6 MB of symbol table.")
-            return
-        }
-        guard let signing = script.range(of: "step 5: count + sign Mach-Os") else {
-            Issue.record("Could not locate the Mach-O signing step to order against.")
-            return
-        }
-        #expect(strip.lowerBound < signing.lowerBound,
-                "strip invalidates signatures, so it must run before the Mach-Os are signed.")
-    }
-
-    /// `strip -x` keeps external symbols; a bare `strip` does not.
-    ///
-    /// The distinction matters beyond size: native wheels resolve Python's
-    /// exported symbols out of the interpreter at dlopen time, so a full
-    /// strip breaks `import mlx.core` at runtime rather than at build time.
-    @Test("The interpreter strip keeps external symbols")
-    func stripsInterpreterNonDestructively() throws {
-        let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
-
-        #expect(!script.contains(#"strip "$STAGE/python/bin/python3.12""#),
-                "A bare strip removes exported symbols the native wheels dlopen against; -x is required.")
-    }
-
-    /// The orphaned embedder dylib must stay out of the bundle.
-    @Test("The unreferenced libpython dylib is dropped")
-    func dropsOrphanedLibpython() throws {
-        let script = try String(contentsOf: Self.scriptURL, encoding: .utf8)
-
-        #expect(script.contains(#"rm -f "$STAGE/python/lib/libpython3.12.dylib""#),
-                "python-build-standalone ships a statically-linked interpreter, so its separate libpython dylib is 18 MB nothing links against.")
+        #expect(script.contains(#""$REPO_ROOT/scripts/prune-unused-libpython.sh" "$STAGE""#))
+        #expect(!script.contains(#"rm -f "$STAGE/python/lib/libpython3.12.dylib""#),
+                "build-sidecar must not bypass the consumer scan with an unconditional deletion.")
+        #expect(!script.contains(#"strip -x "$STAGE/python/bin/python3.12""#),
+                "Local CPython symbols are required for useful native crash frames.")
     }
 
     private static var scriptURL: URL {

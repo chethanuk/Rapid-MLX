@@ -98,8 +98,8 @@ COMPILEALL_JOBS="${COMPILEALL_JOBS:-0}"
 # orphaned libpython3.12.dylib — exactly one Mach-O, and one we used to sign
 # rather than a new one, so no signing-safety spike re-run is needed. The
 # console-script and sysconfig trims in the same pass are shell/pure-Python
-# and Mach-O-neutral, and the step 4.5 `strip -x` rewrites the interpreter
-# without changing the count.
+# and Mach-O-neutral. The interpreter remains unstripped so native crashes
+# retain internal CPython frame names.
 #
 # NOTE: the 174 above was itself stale — a pre-change bundle measures 173, so
 # the committed baseline had drifted by one and was being masked by
@@ -512,18 +512,11 @@ rm -rf \
     "$STAGE/python/lib/"thread* \
     "$STAGE/python/lib/"itcl* \
     "$STAGE/python/lib/python3.12/lib-dynload/"_tkinter*.so
-# Drop the orphaned libpython dylib. python-build-standalone ships BOTH a
-# statically-linked interpreter (python/bin/python3.12, __TEXT ~13 MB with
-# CPython compiled in) and the same runtime again as a standalone
-# libpython3.12.dylib for embedders. Nothing in this bundle embeds CPython:
-# an `otool -L` sweep over every .so / .dylib / the interpreter itself finds
-# zero references to it (lib-dynload extensions and every site-packages
-# native module resolve their Python symbols from the host process). 18 MB
-# and one Mach-O of pure dead weight; MACHO_BASELINE_COUNT is set to the
-# post-trim count. Verified by moving it aside and re-running the full
-# import closure (vllm_mlx, mlx_lm, transformers, scipy.signal, mlx_vlm,
-# mflux, mlx.core) plus `bin/rapid-mlx --help`.
-rm -f "$STAGE/python/lib/libpython3.12.dylib"
+# python-build-standalone includes a shared libpython for embedders in
+# addition to its statically linked interpreter. The helper scans every
+# bundled Mach-O and refuses deletion if any current or future wheel links
+# the shared library; it also refuses an incomplete or broken scan.
+"$REPO_ROOT/scripts/prune-unused-libpython.sh" "$STAGE"
 # Console scripts for modules step 3 just deleted. python-build-standalone's
 # bin/ ships launchers for pip, idlelib, 2to3, pydoc and the build-time
 # sysconfig helpers; with those packages gone each one is a shell stub that
@@ -812,23 +805,6 @@ fi
 
 cp "${REPO_ROOT}/scripts/sidecar-shim.sh" "$STAGE/bin/rapid-mlx"
 chmod +x "$STAGE/bin/rapid-mlx"
-
-# ----- step 4.5: strip the interpreter's symbol table -------------------
-#
-# python-build-standalone ships python3.12 unstripped (~42.7k symbols,
-# 18.0 MB). `strip -x` drops local symbols while keeping the exported ones
-# that lib-dynload extensions and every native wheel resolve against at
-# dlopen time — removing those would break `import mlx.core`. Saves ~1.6 MB.
-#
-# ORDER IS LOAD-BEARING: this must run BEFORE step 5 signs the Mach-Os.
-# strip rewrites the binary and invalidates any existing signature, so
-# stripping after signing would ship a bundle that fails `codesign --verify`
-# (and, post-notarisation, Gatekeeper). Keep this step above step 5.
-#
-# The interpreter is the only unstripped Mach-O worth touching: the wheel
-# .so / .dylib files arrive pre-stripped from PyPI.
-echo "==> stripping interpreter symbol table"
-strip -x "$STAGE/python/bin/python3.12"
 
 # ----- step 5: count + sign Mach-Os ------------------------------------
 
