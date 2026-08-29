@@ -630,13 +630,19 @@ def mtp_generate_step(
         draft_accept_lps: list = []
         xtc_draws: list = []
         prev_tok = main_tok
+        # Processor history for draft position j must contain the confirmed
+        # prefix plus main_tok and every earlier draft in this chain. Keeping
+        # ``prev`` fixed made d2 see ``prev + d1`` (omitting main_tok), and d3
+        # see ``prev + d2`` (omitting both), which weakens repetition/presence/
+        # frequency penalties precisely when K > 1.
+        chain_prev = prev
         cur_hidden = hidden_last
         cur_commit = cache_commit
         for _k in range(K):
             d_tok, d_lp, d_alp, d_xtc, d_hidden = _step_mtp(
                 cur_hidden,
                 prev_tok,
-                prev,
+                chain_prev,
                 cache_commit=cur_commit,
                 want_hidden=_mtp_supports_hidden and K >= 2,
             )
@@ -649,6 +655,12 @@ def mtp_generate_step(
             draft_lps.append(d_lp)
             draft_accept_lps.append(d_alp)
             xtc_draws.append(d_xtc)
+            if logits_processors:
+                chain_prev = (
+                    mx.concatenate([chain_prev, prev_tok.reshape(-1)])
+                    if chain_prev is not None
+                    else prev_tok.reshape(-1)
+                )
             prev_tok = d_tok
             # Drafter-hidden cascade: swap in the drafter's own
             # ``post_projection(h)`` for the next iteration's hidden

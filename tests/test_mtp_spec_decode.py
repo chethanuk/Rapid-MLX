@@ -2616,6 +2616,39 @@ def test_generator_penalty_processor_continues_existing_token_context():
     assert observed == [[3, 5, 7]]
 
 
+def test_generator_penalty_processor_carries_full_k3_draft_history():
+    """Each chained draft sees main_tok plus every preceding proposal."""
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    observed: list[list[int]] = []
+
+    def recorder(tokens, logits):
+        observed.append(tokens.tolist())
+        return logits
+
+    list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _MockedQwen35Model([7, 11, 12, 13, 14], [11, 12, 13]),
+            max_tokens=4,
+            max_k=3,
+            logits_processors=[recorder],
+            initial_tokens=[3, 5],
+            disable_auto_k=True,
+        )
+    )
+
+    # Cold-start target sample, then the three sequential MTP draft samples.
+    # Later entries are the batched target verification pass and are not part
+    # of the chain-local-history assertion.
+    assert observed[:4] == [
+        [3, 5, 1],
+        [3, 5, 1, 7],
+        [3, 5, 1, 7, 11],
+        [3, 5, 1, 7, 11, 12],
+    ]
+
+
 def test_prompt_lookup_point_mass_residual_removes_proposed_token():
     from vllm_mlx.spec_decode.mtp.generator import (
         _point_mass_residual_distribution,
