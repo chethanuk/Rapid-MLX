@@ -506,6 +506,34 @@ while True:
     assert result.returncode == 0, result.stderr
 
 
+def test_exit_trap_turns_cleanup_failure_into_failed_result(tmp_path):
+    """A passing journey cannot hide a retained process or persona."""
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps({"status": "pass", "exit_code": 0}))
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'harness="$1"; out="$2"; set --; source "$harness"; '
+            'OUT_ROOT="$out"; FLOW="cleanup-contract"; APP_SOURCE="fixture.app"; '
+            "RESULT_WRITTEN=1; cleanup_persona() { return 1; }; "
+            "cleanup_operator_server() { return 0; }; "
+            "cleanup_telemetry_sink() { return 0; }; "
+            "trap finish EXIT; exit 0",
+            "finish-test",
+            str(HARNESS),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    evidence = json.loads(result_path.read_text())
+    assert evidence["status"] == "fail"
+    assert evidence["exit_code"] != 0
+
+
 def test_fresh_install_fixture_contains_the_real_starter():
     """The starter assertion is meaningless if the fake catalog omits it."""
     flow = HARNESS.read_text().split("flow_fresh_install() {", 1)[1].split("\n}", 1)[0]

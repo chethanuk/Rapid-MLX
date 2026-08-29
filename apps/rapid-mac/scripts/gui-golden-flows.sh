@@ -307,14 +307,6 @@ stop_app() {
     APP_PID=""
 }
 
-# When sourced, expose only the executable contract helpers above. Return
-# before cleanup traps, app launch, filesystem mutation, or tool preflight.
-# Direct execution cannot be bypassed with an environment variable.
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    return 0
-fi
-
-pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
 write_result() {
     local status="$1" exit_code="$2" finished_epoch duration_seconds
     finished_epoch="$(date +%s)"
@@ -327,6 +319,37 @@ write_result() {
           duration_seconds: $duration_seconds, artifact_path: $artifact_path,
           exit_code: $exit_code}' > "$OUT_ROOT/result.json"
 }
+
+finish() {
+    local status=$? cleanup_failed=0
+    set +e
+    cleanup_persona || cleanup_failed=1
+    cleanup_operator_server || cleanup_failed=1
+    cleanup_telemetry_sink || cleanup_failed=1
+    if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+        status=1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        mkdir -p "$OUT_ROOT" 2>/dev/null || true
+        if [[ -d "$OUT_ROOT" ]]; then
+            # Cleanup failure overrides an earlier PASS result. A retained
+            # process/profile is a failed journey, never green evidence.
+            write_result fail "$status" 2>/dev/null || true
+            RESULT_WRITTEN=1
+        fi
+    fi
+    trap - EXIT
+    exit "$status"
+}
+
+# When sourced, expose only the executable contract helpers above. Return
+# before cleanup traps, app launch, filesystem mutation, or tool preflight.
+# Direct execution cannot be bypassed with an environment variable.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
+pb() { peekaboo "$@" --bridge-socket "$BRIDGE"; }
 flow_requires_screen_recording() {
     case "$FLOW" in
         all) return 0 ;;
@@ -397,18 +420,37 @@ cleanup_persona() {
     PERSONA_ENV=()
 }
 
-cleanup_operator_server() {
-    if [[ -n "$OPERATOR_SERVER_PID" ]] && kill -0 "$OPERATOR_SERVER_PID" 2>/dev/null; then
-        kill "$OPERATOR_SERVER_PID" 2>/dev/null || true
-        wait "$OPERATOR_SERVER_PID" 2>/dev/null || true
+stop_tracked_child() {
+    local label="$1" child_pid="$2" attempt
+    if ! process_is_running "$child_pid"; then
+        wait "$child_pid" 2>/dev/null || true
+        return 0
     fi
+    kill "$child_pid" 2>/dev/null || true
+    for attempt in {1..20}; do
+        process_is_running "$child_pid" || break
+        sleep 0.1
+    done
+    if process_is_running "$child_pid"; then
+        kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+    wait "$child_pid" 2>/dev/null || true
+    if process_is_running "$child_pid"; then
+        printf '[gui-golden] owned %s pid=%s did not exit\n' \
+            "$label" "$child_pid" >&2
+        return 1
+    fi
+}
+
+cleanup_operator_server() {
+    [[ -n "$OPERATOR_SERVER_PID" ]] || return 0
+    stop_tracked_child operator-server "$OPERATOR_SERVER_PID" || return 1
     OPERATOR_SERVER_PID=""
 }
 
 cleanup_telemetry_sink() {
-    if [[ -n "$TELEMETRY_SINK_PID" ]] && kill -0 "$TELEMETRY_SINK_PID" 2>/dev/null; then
-        kill "$TELEMETRY_SINK_PID" 2>/dev/null || true
-        wait "$TELEMETRY_SINK_PID" 2>/dev/null || true
+    if [[ -n "$TELEMETRY_SINK_PID" ]]; then
+        stop_tracked_child telemetry-sink "$TELEMETRY_SINK_PID" || return 1
     fi
     TELEMETRY_SINK_PID=""
     TELEMETRY_SINK_PORT=""
@@ -621,19 +663,6 @@ assert_share_activation_requests() {
         || die "Share did not produce exactly one valid $expected_kind Desktop activation"
 }
 
-finish() {
-    local status=$?
-    set +e
-    cleanup_persona
-    cleanup_operator_server
-    cleanup_telemetry_sink
-    if [[ "$status" -ne 0 && "$RESULT_WRITTEN" == 0 ]]; then
-        mkdir -p "$OUT_ROOT" 2>/dev/null || true
-        if [[ -d "$OUT_ROOT" ]]; then
-            write_result fail "$status" 2>/dev/null || true
-        fi
-    fi
-}
 trap finish EXIT
 # Signal handlers only select the conventional exit code. The EXIT handler is
 # the single owner of cleanup and final evidence, avoiding double-cleanup and
