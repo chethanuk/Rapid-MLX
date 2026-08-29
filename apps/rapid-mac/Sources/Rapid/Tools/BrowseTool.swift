@@ -232,16 +232,18 @@ enum BrowseTool {
         while true {
             // Validate (incl. DNS) BEFORE connecting to this hop's host, then
             // pin the socket to the exact validated address.
-            let validatedAddress = try await BrowseSSRFGuard.validatedAddress(current)
+            let validatedAddresses = try await BrowseSSRFGuard.validatedAddresses(current)
             let hopURL = current
 
             // Hard wall-clock ceiling per hop — see ``requestTimeout``.
             let raw = try await withDeadline(requestTimeout) {
-                try await IPPinnedHTTPTransport.fetch(
-                    url: hopURL,
-                    address: validatedAddress,
-                    byteLimit: maxResponseBytes
-                )
+                try await firstSuccessful(addresses: validatedAddresses) { address in
+                    try await IPPinnedHTTPTransport.fetch(
+                        url: hopURL,
+                        address: address,
+                        byteLimit: maxResponseBytes
+                    )
+                }
             }
             let http = raw.response
             if (300..<400).contains(http.statusCode), let loc = http.value(forHTTPHeaderField: "Location") {
@@ -299,6 +301,28 @@ enum BrowseTool {
             }
             return result
         }
+    }
+
+    /// Try each already-validated address until one fetch succeeds. This keeps
+    /// the pinned-socket security model while restoring address fallback lost by
+    /// pinning; outer cancellation remains immediate and never moves to the
+    /// next address.
+    static func firstSuccessful<T: Sendable>(
+        addresses: [ParsedIP],
+        attempt: @escaping @Sendable (ParsedIP) async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        for address in addresses {
+            do {
+                return try await attempt(address)
+            } catch {
+                if Task.isCancelled || error is CancellationError {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+        throw lastError ?? simpleError("no validated addresses")
     }
 
     // MARK: - Render

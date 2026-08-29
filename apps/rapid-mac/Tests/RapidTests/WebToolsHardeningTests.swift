@@ -135,6 +135,44 @@ struct WebToolsHardeningTests {
         #expect(address == ParsedIP("93.184.216.34"))
     }
 
+    @Test("Validated address fallback tries the next address after a failure")
+    func validatedAddressFallbackTriesNextAddress() async throws {
+        let addresses = [
+            try #require(ParsedIP("2001:db8::1")),
+            try #require(ParsedIP("2001:db8::2")),
+        ]
+        let recorder = AddressAttemptRecorder()
+
+        let result = try await BrowseTool.firstSuccessful(addresses: addresses) { address in
+            await recorder.record(address)
+            if address == addresses[0] {
+                throw TestNetworkFailure()
+            }
+            return address.canonical
+        }
+
+        #expect(result == "2001:db8::2")
+        #expect(await recorder.addresses == addresses)
+    }
+
+    @Test("Cancellation during an address attempt does not try the next address")
+    func cancellationStopsAddressFallback() async throws {
+        let addresses = [try #require(ParsedIP("2001:db8::1"))]
+        let recorder = AddressAttemptRecorder()
+
+        do {
+            _ = try await BrowseTool.firstSuccessful(addresses: addresses) { address in
+                await recorder.record(address)
+                throw CancellationError()
+            }
+            Issue.record("fallback should not swallow cancellation")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        #expect(await recorder.addresses == addresses)
+    }
+
     @Test("resolve yields empty for an NXDOMAIN reserved TLD")
     func resolveEmptyForInvalidTLD() async throws {
         // RFC 6761 guarantees ``.invalid`` never resolves; getaddrinfo returns
@@ -160,5 +198,15 @@ struct WebToolsHardeningTests {
         """#.utf8)
         let hit = WeatherTool.parseGeocodingResponse(json, location: "Springfield")
         #expect(hit == nil)
+    }
+}
+
+private struct TestNetworkFailure: Error {}
+
+private actor AddressAttemptRecorder {
+    private(set) var addresses: [ParsedIP] = []
+
+    func record(_ address: ParsedIP) {
+        addresses.append(address)
     }
 }

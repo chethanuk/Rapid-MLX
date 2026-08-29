@@ -68,10 +68,22 @@ enum BrowseSSRFGuard {
         _ = try await validatedAddress(url)
     }
 
-    /// Validate a URL and return the concrete address used for the pinned
-    /// transport. For DNS names, the first resolver answer is selected only
-    /// after every answer has passed the same public-address checks.
+    /// Validate a URL and return the first concrete address used for the
+    /// pinned transport. For DNS names, the first resolver answer is selected
+    /// only after every answer has passed the same public-address checks.
     static func validatedAddress(_ url: URL) async throws -> ParsedIP {
+        guard let host = url.host, !host.isEmpty else { throw Rejection.noHost }
+        let addresses = try await validatedAddresses(url)
+        guard let address = addresses.first else {
+            throw Rejection.unresolvable(host)
+        }
+        return address
+    }
+
+    /// Validate a URL and return every concrete address selected by DNS, in
+    /// resolver order. All returned addresses passed the same range checks, so
+    /// the caller can fall back to a later address without resolving DNS again.
+    static func validatedAddresses(_ url: URL) async throws -> [ParsedIP] {
         guard let scheme = url.scheme?.lowercased() else { throw Rejection.badURL }
         guard allowedSchemes.contains(scheme) else { throw Rejection.blockedScheme(scheme) }
         guard let host = url.host, !host.isEmpty else { throw Rejection.noHost }
@@ -88,7 +100,7 @@ enum BrowseSSRFGuard {
             if literal.isBlocked {
                 throw Rejection.blockedAddress(host: host, address: literal.canonical)
             }
-            return literal
+            return [literal]
         }
 
         let addresses = try await resolve(bareHost)
@@ -96,7 +108,7 @@ enum BrowseSSRFGuard {
         for ip in addresses where ip.isBlocked {
             throw Rejection.blockedAddress(host: host, address: ip.canonical)
         }
-        return addresses[0]
+        return addresses
     }
 
     /// Resolve a hostname to every A / AAAA address. Runs `getaddrinfo` off the
