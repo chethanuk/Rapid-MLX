@@ -5,6 +5,14 @@ import Testing
 
 @Suite("Bounded async test subprocesses", TestTimeouts.hangProne)
 struct TestSubprocessTests {
+    init() {
+        // These tests deliberately spend bounded time sampling and reaping
+        // children. Mark each case as forward progress so the suite-wide
+        // hosted-runner watchdog does not mistake that exercised timeout path
+        // for a stalled cooperative executor.
+        CIHangWatchdog.noteProgress()
+    }
+
     private static var testRoot: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     }
