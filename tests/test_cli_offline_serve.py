@@ -72,6 +72,20 @@ def test_offline_hub_mode_detects_env_switches(monkeypatch):
     assert cli._offline_hub_mode_active() is False
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("YES", True),
+        ("true", True),
+        ("0", False),
+        (None, False),
+    ],
+)
+def test_cli_env_flag_wrapper_preserves_shared_truth_table(raw, expected):
+    """The compatibility wrapper must exercise the shared parser directly."""
+    assert cli._env_flag_active(raw) is expected
+
+
 def test_offline_uncached_serve_refuses_before_download(monkeypatch, capsys):
     """Offline + uncached must exit(1) with one actionable message and NOT
     attempt the download/mirror path (no repeated "First-time download")."""
