@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -185,8 +187,73 @@ def test_runtime_asset_registry_rejects_malformed_metadata(
     )
     monkeypatch.setattr(registry, "_registry_path", lambda: str(registry_file))
     monkeypatch.setattr(registry, "_REGISTRY", None)
-    registry._HF_ID_INDEX.clear()
-    registry._RUNTIME_ASSETS.clear()
+    monkeypatch.setattr(registry, "_HF_ID_INDEX", {})
+    monkeypatch.setattr(registry, "_RUNTIME_ASSETS", {})
 
     with pytest.raises(ValueError, match=re.escape(error)):
         registry._load_registry()
+
+
+def test_concurrent_first_lookup_publishes_runtime_assets_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    registry_file = tmp_path / "aliases.json"
+    registry_file.write_text(
+        json.dumps(
+            {
+                "_runtime_assets": {
+                    "kokoro": [
+                        {
+                            "repo_id": "owner/voices",
+                            "allow_patterns": ["voices/*.safetensors"],
+                        }
+                    ]
+                },
+                "kokoro": {
+                    "type": "tts",
+                    "hf_id": "owner/kokoro",
+                    "family": "kokoro",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(registry, "_registry_path", lambda: str(registry_file))
+    monkeypatch.setattr(registry, "_REGISTRY", None)
+    monkeypatch.setattr(registry, "_HF_ID_INDEX", {})
+    monkeypatch.setattr(registry, "_RUNTIME_ASSETS", {})
+
+    first_is_parsing = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    real_json_load = json.load
+    load_calls = 0
+
+    def blocking_json_load(stream):
+        nonlocal load_calls
+        load_calls += 1
+        first_is_parsing.set()
+        assert release_first.wait(timeout=2)
+        return real_json_load(stream)
+
+    def second_lookup():
+        second_started.set()
+        return registry.runtime_assets_for("kokoro")
+
+    monkeypatch.setattr(registry.json, "load", blocking_json_load)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(registry.runtime_assets_for, "kokoro")
+        assert first_is_parsing.wait(timeout=2)
+        second = executor.submit(second_lookup)
+        assert second_started.wait(timeout=2)
+        release_first.set()
+
+        expected = (
+            registry.AudioRuntimeAsset(
+                repo_id="owner/voices",
+                allow_patterns=("voices/*.safetensors",),
+            ),
+        )
+        assert first.result(timeout=2) == expected
+        assert second.result(timeout=2) == expected
+
+    assert load_calls == 1

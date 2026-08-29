@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Literal
 
@@ -97,6 +98,7 @@ _REGISTRY: dict[str, AudioAliasEntry] | None = None
 # ids the same way it answers for short aliases.
 _HF_ID_INDEX: dict[str, str] = {}
 _RUNTIME_ASSETS: dict[str, tuple[AudioRuntimeAsset, ...]] = {}
+_REGISTRY_LOCK = threading.Lock()
 
 
 def _registry_path() -> str:
@@ -104,6 +106,17 @@ def _registry_path() -> str:
 
 
 def _load_registry() -> dict[str, AudioAliasEntry]:
+    """Return the registry, initializing its complete snapshot once."""
+
+    if _REGISTRY is not None:
+        return _REGISTRY
+    with _REGISTRY_LOCK:
+        if _REGISTRY is not None:
+            return _REGISTRY
+        return _load_registry_uncached()
+
+
+def _load_registry_uncached() -> dict[str, AudioAliasEntry]:
     """Parse ``aliases.json`` and return the alias -> entry map.
 
     The JSON file is committed alongside this module so the registry
@@ -116,8 +129,6 @@ def _load_registry() -> dict[str, AudioAliasEntry]:
     alias surface.
     """
     global _REGISTRY
-    if _REGISTRY is not None:
-        return _REGISTRY
 
     path = _registry_path()
     with open(path) as f:
@@ -217,16 +228,21 @@ def _load_registry() -> dict[str, AudioAliasEntry]:
         raise ValueError(
             f"audio aliases.json: runtime assets declared for unknown family: {names}"
         )
-    _REGISTRY = entries
     # Reverse index keyed on the lowercased HF id so ``serve_command``
     # can route a request like ``rapid-mlx serve mlx-community/Kokoro-
     # 82M-bf16`` directly back to its registry entry (HF id case varies
     # across mlx-community uploads).
-    _HF_ID_INDEX.clear()
+    hf_id_index: dict[str, str] = {}
     for alias, entry in entries.items():
-        _HF_ID_INDEX.setdefault(entry.hf_id.lower(), alias)
+        hf_id_index.setdefault(entry.hf_id.lower(), alias)
+    # Publish one coherent snapshot while holding _REGISTRY_LOCK.  Readers use
+    # _REGISTRY as the ready flag, so it must become visible only after every
+    # companion index contains the matching data.
+    _HF_ID_INDEX.clear()
+    _HF_ID_INDEX.update(hf_id_index)
     _RUNTIME_ASSETS.clear()
     _RUNTIME_ASSETS.update(runtime_assets)
+    _REGISTRY = entries
     return entries
 
 
