@@ -57,8 +57,14 @@ press_identifier() {
     # path as a user's click while retaining semantic identifier lookup.  A
     # coordinate also avoids passing a daemon-owned snapshot to the local input
     # host, where it cannot be resolved.
-    pb click --coords "$coords" --global-coords \
-        --input-strategy synthOnly --foreground --json > "$output"
+    if peekaboo click --help 2>&1 | grep -q -- --global-coords; then
+        pb click --coords "$coords" --global-coords \
+            --input-strategy synthOnly --foreground --json > "$output"
+    else
+        # Peekaboo 3.0 interprets coordinates globally by default and predates
+        # the flags that make the newer input path explicit.
+        pb click --coords "$coords" --json > "$output"
+    fi
 }
 
 command -v peekaboo >/dev/null || die "peekaboo is not installed"

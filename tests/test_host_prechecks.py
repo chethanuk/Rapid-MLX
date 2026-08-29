@@ -203,7 +203,10 @@ def test_real_dogfood_entrypoints_share_the_host_guards() -> None:
 def test_gui_ax_smoke_delivers_real_user_input() -> None:
     ax = (ROOT / "apps/rapid-mac/scripts/gui-ax-smoke.sh").read_text()
 
+    assert "peekaboo click --help" in ax
+    assert "grep -q -- --global-coords" in ax
     assert 'pb click --coords "$coords" --global-coords' in ax
+    assert 'pb click --coords "$coords" --json' in ax
     assert "--input-strategy synthOnly --foreground" in ax
     assert "pb perform-action" not in ax
     assert "pb menu click" not in ax
