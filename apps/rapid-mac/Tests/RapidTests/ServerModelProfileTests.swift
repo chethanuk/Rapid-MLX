@@ -47,6 +47,11 @@ final class ServerModelProfileTests {
           "capabilities": ["text", "vision", "tools"],
           "serving_lane": "vision",
           "serving_lane_reason": "vision_hybrid_runtime_supported",
+          "speculative_decoding": {
+            "configured": true,
+            "method": "mtp",
+            "request_fallback_features": ["tools"]
+          },
           "modality": "text"
         }
         """
@@ -65,6 +70,11 @@ final class ServerModelProfileTests {
         #expect(profile.capabilities == ["text", "vision", "tools"])
         #expect(profile.servingLane == "vision")
         #expect(profile.servingLaneReason == "vision_hybrid_runtime_supported")
+        #expect(profile.speculativeDecoding == ServerSpeculativeDecoding(
+            configured: true,
+            method: "mtp",
+            requestFallbackFeatures: ["tools"]
+        ))
         #expect(profile.modality == "text")
     }
 
@@ -92,6 +102,77 @@ final class ServerModelProfileTests {
         #expect(profile.capabilities == nil)
         #expect(profile.servingLane == nil)
         #expect(profile.servingLaneReason == nil)
+        #expect(profile.speculativeDecoding == nil)
+    }
+
+    @Test("MTP is ready before a plain request")
+    func speculativeStatusReadyWithoutTools() {
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(
+                id: "model",
+                speculativeDecoding: ServerSpeculativeDecoding(
+                    configured: true,
+                    method: "mtp",
+                    requestFallbackFeatures: ["tools"]
+                )
+            ),
+            sendsTools: false
+        )
+        #expect(availability?.methodDisplayName == "MTP")
+        #expect(availability?.state == .ready)
+        #expect(availability?.label().contains("MTP") == true)
+    }
+
+    @Test("MTP says it is paused before a tools request")
+    func speculativeStatusPausedByTools() {
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(
+                id: "model",
+                speculativeDecoding: ServerSpeculativeDecoding(
+                    configured: true,
+                    method: "mtp",
+                    requestFallbackFeatures: ["tools"]
+                )
+            ),
+            sendsTools: true
+        )
+        #expect(availability?.state == .pausedByTools)
+        #expect(availability?.help().isEmpty == false)
+    }
+
+    @Test("A method that supports tools stays ready when tools are sent")
+    func speculativeStatusUsesEngineAdvertisedFallbacks() {
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(
+                id: "model",
+                speculativeDecoding: ServerSpeculativeDecoding(
+                    configured: true,
+                    method: "future",
+                    requestFallbackFeatures: []
+                )
+            ),
+            sendsTools: true
+        )
+        #expect(availability?.state == .ready)
+    }
+
+    @Test("No configured live method produces no composer claim")
+    func speculativeStatusRequiresConfiguredMethod() {
+        #expect(SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(id: "model"),
+            sendsTools: true
+        ) == nil)
+        #expect(SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(
+                id: "model",
+                speculativeDecoding: ServerSpeculativeDecoding(
+                    configured: false,
+                    method: "mtp",
+                    requestFallbackFeatures: ["tools"]
+                )
+            ),
+            sendsTools: true
+        ) == nil)
     }
 
     @Test("Live text lane overrides a vision-capable catalog and explains why")

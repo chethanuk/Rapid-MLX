@@ -2,6 +2,46 @@
   "sourceLanguage" : "en",
   "version" : "1.0",
   "strings" : {
+    "speculative_status.ready" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 可用"
+          }
+        }
+      }
+    },
+    "speculative_status.ready.help" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 可以加速本次请求。"
+          }
+        }
+      }
+    },
+    "speculative_status.paused_tools" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已暂停"
+          }
+        }
+      }
+    },
+    "speculative_status.paused_tools.help" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已配置，但工具请求需要使用普通解码。请在“设置”→“工具”中关闭工具以使用它。"
+          }
+        }
+      }
+    },
     "Send a message…" : {
       "localizations" : {
         "zh-Hans" : {

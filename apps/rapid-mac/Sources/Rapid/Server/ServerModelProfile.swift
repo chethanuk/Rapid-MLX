@@ -1,5 +1,90 @@
 import Foundation
 
+/// Live speculative-decoding state returned by the resident engine.
+///
+/// Configuration and per-request eligibility are deliberately separate: a
+/// method can be attached to the model while one supported request feature
+/// asks the scheduler to use ordinary decoding for correctness.
+struct ServerSpeculativeDecoding: Codable, Sendable, Equatable {
+    let configured: Bool
+    let method: String?
+    let requestFallbackFeatures: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case method
+        case requestFallbackFeatures = "request_fallback_features"
+    }
+}
+
+/// Composer-facing interpretation of ``ServerSpeculativeDecoding`` for the
+/// exact request shape the Desktop is about to send.
+struct SpeculativeDecodingAvailability: Equatable, Sendable {
+    enum State: Equatable, Sendable {
+        case ready
+        case pausedByTools
+    }
+
+    let methodDisplayName: String
+    let state: State
+
+    static func resolve(
+        profile: ServerModelProfile?,
+        sendsTools: Bool
+    ) -> SpeculativeDecodingAvailability? {
+        guard let speculative = profile?.speculativeDecoding,
+              speculative.configured,
+              let method = speculative.method?.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ),
+              !method.isEmpty
+        else { return nil }
+
+        let state: State = sendsTools
+            && speculative.requestFallbackFeatures.contains("tools")
+            ? .pausedByTools
+            : .ready
+        return SpeculativeDecodingAvailability(
+            methodDisplayName: method.uppercased(),
+            state: state
+        )
+    }
+
+    func label(in bundle: Bundle = .main) -> String {
+        let key: String
+        let fallback: String
+        switch state {
+        case .ready:
+            key = "speculative_status.ready"
+            fallback = "%@ ready"
+        case .pausedByTools:
+            key = "speculative_status.paused_tools"
+            fallback = "%@ paused"
+        }
+        return String(
+            format: bundle.localizedString(forKey: key, value: fallback, table: nil),
+            methodDisplayName
+        )
+    }
+
+    func help(in bundle: Bundle = .main) -> String {
+        let key: String
+        let fallback: String
+        switch state {
+        case .ready:
+            key = "speculative_status.ready.help"
+            fallback = "%@ can accelerate this request."
+        case .pausedByTools:
+            key = "speculative_status.paused_tools.help"
+            fallback = "%@ is configured, but tools require ordinary decoding. Turn off tools in Settings → Tools to use it."
+        }
+        return String(
+            format: bundle.localizedString(forKey: key, value: fallback, table: nil),
+            methodDisplayName
+        )
+    }
+}
+
 /// Per-alias profile data returned by Rapid-MLX `/v1/models/{id}` as
 /// vendor-extension fields on top of the OpenAI-canonical shape.
 /// Mirrors the server's ``vllm_mlx.api.models.ModelInfo`` extension
@@ -94,6 +179,9 @@ struct ServerModelProfile: Codable, Sendable, Equatable {
     /// the server, so the value the desktop trusts for sliders
     /// lines up with the cap the server will actually enforce.
     let contextWindow: Int?
+    /// Live speculative-decoding configuration and the request features that
+    /// retain ordinary decoding. Nil on older sidecars and unloaded aliases.
+    let speculativeDecoding: ServerSpeculativeDecoding?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -113,6 +201,7 @@ struct ServerModelProfile: Codable, Sendable, Equatable {
         // Issue #363 — snake_case mirrors the rapid-mlx
         // ``ModelInfo.context_window`` wire shape.
         case contextWindow = "context_window"
+        case speculativeDecoding = "speculative_decoding"
     }
 
     /// Explicit memberwise init with defaults for the FU-3 floor
@@ -134,7 +223,8 @@ struct ServerModelProfile: Codable, Sendable, Equatable {
         modality: String? = nil,
         reasoningChatFloor: Int? = nil,
         reasoningToolsFloor: Int? = nil,
-        contextWindow: Int? = nil
+        contextWindow: Int? = nil,
+        speculativeDecoding: ServerSpeculativeDecoding? = nil
     ) {
         self.id = id
         self.recommendedSampling = recommendedSampling
@@ -149,6 +239,7 @@ struct ServerModelProfile: Codable, Sendable, Equatable {
         self.reasoningChatFloor = reasoningChatFloor
         self.reasoningToolsFloor = reasoningToolsFloor
         self.contextWindow = contextWindow
+        self.speculativeDecoding = speculativeDecoding
     }
 }
 
