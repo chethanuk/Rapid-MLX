@@ -208,6 +208,7 @@ def mtp_generate_step(
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
     input_embeddings: mx.array | None = None,
+    initial_tokens: list[int] | mx.array | None = None,
     temp: float = 0.0,
     top_p: float = 0.0,
     top_k: int = 0,
@@ -335,7 +336,21 @@ def mtp_generate_step(
         if _prompt_lookup_enabled:
             generated_token_ids.append(token_id)
 
-    prev_tokens: mx.array | None = None
+    # ``BatchGenerator`` has already sampled the first generated token before
+    # the MTP wrapper takes over. Stateful-by-context processors (the standard
+    # repetition / presence / frequency penalties) must therefore start from
+    # the exact token history that mlx-lm's ``TokenBuffer`` had at that seam.
+    # Copy it into the vendored generator rather than restarting processor
+    # context at the first generated token. Callers without processors keep
+    # the old allocation-free ``None`` path.
+    if logits_processors and initial_tokens is not None:
+        prev_tokens = (
+            initial_tokens.astype(mx.uint32)
+            if isinstance(initial_tokens, mx.array)
+            else mx.array(list(initial_tokens), dtype=mx.uint32)
+        )
+    else:
+        prev_tokens = None
 
     if prompt_cache is None:
         model_cache = _cache_module.make_prompt_cache(model)
@@ -950,14 +965,12 @@ def mtp_generate_step(
                 xtc_draw=first_xtc_draw,
             )
 
-            # One shared uniform for all positions' probabilistic
-            # accept tests. Ollama uses a per-position Bernoulli draw;
-            # at greedy temp=0 the draw is ignored (accept iff argmax
-            # match), so this only matters for temp>0 where the same
-            # ``u`` biases all positions the same way — closer to
-            # Ollama's per-position draw than reusing the sampler
-            # chain's XTC cell would be.
-            u = mx.random.uniform()
+            # One independent uniform per speculative position. Reusing one
+            # scalar across K positions preserves each isolated acceptance
+            # probability but correlates the sequential accept decisions,
+            # changing the joint token distribution for K>1. Independent
+            # Bernoulli draws are required by rejection sampling.
+            u = mx.random.uniform(shape=(k_len,))
             drafts_i32 = drafts_arr.astype(mx.int32)
 
             # --------------------------------------------------------
@@ -975,7 +988,7 @@ def mtp_generate_step(
                 bonus_tok_arr = toks[k_len]
             else:
                 # Vectorized per-position log-accept over the K draft
-                # positions with a shared draw ``u``.
+                # positions with one independent draw per position.
                 v_alps = accept_lps[:k_len]  # (K, V)
                 idx = drafts_i32.reshape(-1, 1)  # (K, 1)
                 v_at = mx.take_along_axis(v_alps, idx, axis=1).squeeze(-1)

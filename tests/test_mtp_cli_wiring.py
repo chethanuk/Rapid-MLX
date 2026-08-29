@@ -29,6 +29,8 @@ Deliberately out of scope (deferred to PR-B / PR-C):
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 pytestmark = pytest.mark.requires_mlx
@@ -1522,6 +1524,48 @@ def test_install_mtp_vendored_gate_fails_closed_on_missing_request_metadata(
     assert gb.orig_step_calls == 1
 
 
+@pytest.mark.parametrize(
+    "request_stub",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(sampling_params=SimpleNamespace(temperature=None)),
+        SimpleNamespace(
+            sampling_params=SimpleNamespace(
+                temperature=0.7,
+                top_p=None,
+                top_k=0,
+                min_p=0.0,
+            )
+        ),
+    ],
+    ids=[
+        "missing-sampling-params",
+        "unresolved-temperature",
+        "invalid-sampling-value",
+    ],
+)
+def test_install_mtp_vendored_sampling_metadata_shapes_fail_closed(request_stub):
+    import mlx.core as mx
+
+    from vllm_mlx.scheduler import _install_mtp_vendored
+
+    batch_gen, gb = _make_batch_gen_with_gb()
+    gb.uids = [43]
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests={"req-43": request_stub},
+        uid_to_request_id={43: "req-43"},
+    )
+    gb._step()
+
+    assert batch_gen._mtp_vendored_stats["ft_non_greedy"] == 1
+    assert gb.orig_step_calls == 1
+
+
 def test_install_mtp_vendored_falls_back_to_orig_step_on_batch_size_growth(monkeypatch):
     """Codex round-A blocker #3 + round-L BLOCKING #2 regression
     guard.
@@ -2369,14 +2413,17 @@ def test_install_mtp_vendored_logits_processors_mid_stream_falls_back_to_orig_st
     )
 
 
-def test_install_mtp_vendored_non_greedy_before_state_soft_fallthrough(monkeypatch):
-    """Companion to round-H BLOCKING #2: when the request starts
-    non-greedy (never populated ``_state``), the wrapper soft-falls
+def test_install_mtp_vendored_seeded_before_state_soft_fallthrough(monkeypatch):
+    """A request-local seed remains outside the MTP safety boundary.
+
+    When the request starts seeded (and never populated ``_state``),
+    the wrapper soft-falls
     through to ``_orig_step()`` and marks the uid as disabled to
     prevent re-entry on the next step.
 
-    This preserves the round-A "bench harness with temp>0" path
-    working under the round-H tightening.
+    The vendored generator uses MLX's process-global RNG today. Routing
+    a seeded request through it would violate the per-request replay
+    contract even though stochastic MTP itself is distribution-safe.
     """
     from types import SimpleNamespace
 
@@ -2386,8 +2433,9 @@ def test_install_mtp_vendored_non_greedy_before_state_soft_fallthrough(monkeypat
 
     batch_gen, gb = _make_batch_gen_with_gb()
     gb.uids = [11]
-    # temp > 0 from the start — MTP never primes.
-    request_stub = SimpleNamespace(sampling_params=SimpleNamespace(temperature=0.7))
+    request_stub = SimpleNamespace(
+        sampling_params=SimpleNamespace(temperature=0.7, seed=1234)
+    )
     ok = _install_mtp_vendored(
         batch_gen,
         model=_StubModel(),
@@ -2404,6 +2452,76 @@ def test_install_mtp_vendored_non_greedy_before_state_soft_fallthrough(monkeypat
     stats = batch_gen._mtp_vendored_stats
     assert stats["ft_non_greedy"] >= 1
     assert gb.orig_step_calls == 1
+
+
+def test_install_mtp_vendored_passes_request_sampling_and_safe_penalty_context(
+    monkeypatch,
+):
+    """Desktop's default sampled + repetition-penalty request engages MTP.
+
+    The processor identity marker is created alongside the scheduler's
+    standard penalty list. It is the proof that lets the wrapper forward the
+    processor and exact mlx-lm token history without accidentally admitting a
+    grammar/tool processor with mutable speculative state.
+    """
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    from vllm_mlx.scheduler import _install_mtp_vendored
+    from vllm_mlx.spec_decode.mtp import generator as _gen_mod
+
+    seen: dict[str, object] = {}
+    penalty = lambda tokens, logits: logits
+
+    class _FakeGen:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return (1234, mx.array([0.0]), False)
+
+        def close(self):
+            pass
+
+    def _recording_generator(*args, **kwargs):
+        seen.update(kwargs)
+        return _FakeGen()
+
+    monkeypatch.setattr(_gen_mod, "mtp_generate_step", _recording_generator)
+
+    batch_gen, gb = _make_batch_gen_with_gb()
+    gb.uids = [55]
+    gb.tokens = [[101, 102]]
+    gb.logits_processors = [[penalty]]
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+    request_stub = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            min_p=0.05,
+            seed=None,
+        ),
+        _mtp_safe_logits_processors=(penalty,),
+    )
+
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests={"req-55": request_stub},
+        uid_to_request_id={55: "req-55"},
+    )
+    gb._step()
+
+    assert seen["temp"] == 0.7
+    assert seen["top_p"] == 0.95
+    assert seen["top_k"] == 40
+    assert seen["min_p"] == 0.05
+    assert seen["logits_processors"] == [penalty]
+    assert seen["initial_tokens"] == [101, 102]
+    assert gb.orig_step_calls == 0
 
 
 def test_install_mtp_vendored_mid_stream_generator_failure_raises(monkeypatch):

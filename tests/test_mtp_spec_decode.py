@@ -2463,6 +2463,90 @@ def test_generator_emits_first_token_from_backbone_then_draft():
     assert snap.tokens_saved == 1
 
 
+def test_generator_sampled_verify_accepts_matching_draft():
+    """The probabilistic verifier is active when temperature is non-zero."""
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    counter = MTPAcceptCounter()
+    emitted = list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _MockedQwen35Model([7, 11, 13], [11]),
+            max_tokens=3,
+            temp=0.7,
+            top_p=0.95,
+            disable_auto_k=True,
+            accept_counter=counter,
+        )
+    )
+
+    # The scripted logits put effectively all mass on these tokens, while the
+    # non-zero temperature forces the probabilistic accept/residual branch.
+    assert [(token, drafted) for token, _lp, drafted in emitted] == [
+        (7, False),
+        (11, True),
+        (13, False),
+    ]
+    assert counter.snapshot().accepts == 1
+
+
+def test_generator_sampled_k3_draws_acceptance_independently_per_position(
+    monkeypatch,
+):
+    """K>1 rejection sampling must not correlate acceptance decisions."""
+    import vllm_mlx.spec_decode.mtp.generator as generator_mod
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    real_uniform = generator_mod.mx.random.uniform
+    shapes: list[tuple[int, ...] | None] = []
+
+    def recording_uniform(*args, **kwargs):
+        shapes.append(kwargs.get("shape"))
+        return real_uniform(*args, **kwargs)
+
+    monkeypatch.setattr(generator_mod.mx.random, "uniform", recording_uniform)
+    list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _MockedQwen35Model([7, 11, 12, 13, 14], [11, 12, 13]),
+            max_tokens=4,
+            max_k=3,
+            temp=0.7,
+            top_p=0.95,
+            disable_auto_k=True,
+            accept_counter=MTPAcceptCounter(),
+        )
+    )
+
+    assert (3,) in shapes
+
+
+def test_generator_penalty_processor_continues_existing_token_context():
+    """The first MTP target sample sees the same history as mlx-lm."""
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    observed: list[list[int]] = []
+
+    def recorder(tokens, logits):
+        observed.append(tokens.tolist())
+        return logits
+
+    list(
+        mtp_generate_step(
+            mx.array([7], dtype=mx.uint32),
+            _MockedQwen35Model([11], []),
+            max_tokens=1,
+            logits_processors=[recorder],
+            initial_tokens=[3, 5],
+            disable_auto_k=True,
+        )
+    )
+
+    assert observed == [[3, 5, 7]]
+
+
 def test_prompt_lookup_point_mass_residual_removes_proposed_token():
     from vllm_mlx.spec_decode.mtp.generator import (
         _point_mass_residual_distribution,
