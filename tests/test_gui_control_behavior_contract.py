@@ -104,6 +104,57 @@ def _run_harness_helper(tmp_path: Path, helper: str, *args: str):
     )
 
 
+@pytest.mark.parametrize(
+    "original_args",
+    [(), ("--flow", "fresh install", "--keep")],
+)
+def test_host_precheck_preserves_original_argv_on_system_bash(
+    tmp_path: Path, original_args: tuple[str, ...]
+):
+    """Direct execution preserves zero args and whitespace on macOS Bash 3.2."""
+    rapid_root = tmp_path / "rapid-mac"
+    scripts = rapid_root / "scripts"
+    scripts.mkdir(parents=True)
+
+    copied_harness = scripts / HARNESS.name
+    copied_harness.write_bytes(HARNESS.read_bytes())
+    copied_harness.chmod(0o755)
+
+    captured_argv = tmp_path / "precheck-argv.json"
+    precheck = scripts / "dogfood-host-precheck.sh"
+    precheck.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['RAPID_PRECHECK_ARGV_OUT'], 'w') as handle:\n"
+        "    json.dump(sys.argv[1:], handle)\n"
+    )
+    precheck.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CI": "false",
+            "RAPID_HOST_PRECHECK_HELD": "0",
+            "RAPID_PRECHECK_ARGV_OUT": str(captured_argv),
+        }
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(copied_harness), *original_args],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(captured_argv.read_text()) == [
+        "--",
+        str(copied_harness),
+        *original_args,
+    ]
+
+
 def _assert_in_order(body: str, *anchors: str) -> None:
     positions = [body.index(anchor) for anchor in anchors]
     assert positions == sorted(positions), (
