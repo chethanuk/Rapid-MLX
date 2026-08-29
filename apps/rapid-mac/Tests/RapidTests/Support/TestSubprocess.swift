@@ -300,6 +300,7 @@ private final class TestProcessCompletionState: @unchecked Sendable {
     func processExited(rawStatus: Int32) {
         condition.lock()
         self.rawStatus = rawStatus
+        condition.broadcast()
         let completion = completeIfReadyLocked()
         condition.unlock()
         if let completion {
@@ -310,6 +311,7 @@ private final class TestProcessCompletionState: @unchecked Sendable {
     func pipeFinished() {
         condition.lock()
         finishedPipeCount += 1
+        condition.broadcast()
         let completion = completeIfReadyLocked()
         condition.unlock()
         if let completion {
@@ -415,8 +417,6 @@ private final class AsyncPipeCapture: @unchecked Sendable {
     }
 
     private func finish() {
-        handle.readabilityHandler = nil
-        handle.closeFile()
         lock.lock()
         guard !finished else {
             lock.unlock()
@@ -427,6 +427,11 @@ private final class AsyncPipeCapture: @unchecked Sendable {
         let continuation = continuation
         self.continuation = nil
         lock.unlock()
+        // Only the caller that won the one-shot transition above mutates the
+        // FileHandle. EOF delivery and timeout cancellation can race here,
+        // but the losing path returns before touching the handle.
+        handle.readabilityHandler = nil
+        handle.closeFile()
         continuation?.resume(returning: data)
         onFinish()
     }

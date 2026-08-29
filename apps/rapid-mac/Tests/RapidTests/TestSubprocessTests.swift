@@ -56,16 +56,29 @@ struct TestSubprocessTests {
 
     @Test("cancelling the caller terminates and reaps the child")
     func cancellationReapsChild() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-test-subprocess-cancelled-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
         let task = Task {
             try await TestSubprocess.run(
                 executableURL: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", "printf '%s\\n' $$; exec sleep 30"],
+                arguments: [
+                    "-c",
+                    "printf '%s\\n' $$ > \"$1\"; exec sleep 30",
+                    "rapid-test-subprocess",
+                    pidFile.path,
+                ],
                 timeout: 30,
                 sampleOnTimeout: false
             )
         }
 
-        try await Task.sleep(for: .milliseconds(100))
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: pidFile.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let childPID = try #require(pid_t(pidText))
         task.cancel()
 
         do {
@@ -75,6 +88,11 @@ struct TestSubprocessTests {
             // Expected: cancellation reaches the caller only after the child
             // has exited and both pipe readers have observed EOF.
         }
+        for _ in 0..<100 where Darwin.kill(childPID, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(Darwin.kill(childPID, 0) == -1)
+        #expect(errno == ESRCH)
     }
 
     @Test("a descendant holding inherited pipes cannot outlive the bound")
@@ -171,7 +189,8 @@ struct TestSubprocessTests {
             let relative = String(url.path.dropFirst(Self.testRoot.path.count + 1))
             guard !allowed.contains(relative) else { continue }
             let source = try String(contentsOf: url, encoding: .utf8)
-            if source.contains(".waitUntilExit()") { offenders.append(relative) }
+            let executableSource = SourceGuardSupport.canonicalSource(source, literals: .erase)
+            if executableSource.contains(".waitUntilExit()") { offenders.append(relative) }
         }
 
         #expect(
