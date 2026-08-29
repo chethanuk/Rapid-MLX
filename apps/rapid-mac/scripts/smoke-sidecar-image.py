@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
@@ -18,6 +19,28 @@ import urllib.request
 from pathlib import Path
 
 _SIZE = re.compile(r"([1-9][0-9]*)x([1-9][0-9]*)")
+
+
+class _RequestDeadlineExceededError(RuntimeError):
+    """The complete HTTP exchange exceeded its wall-clock budget."""
+
+
+@contextlib.contextmanager
+def _wall_clock_deadline(timeout: float):
+    """Interrupt socket reads that make progress without ever completing."""
+
+    def _expire(_signum, _frame) -> None:
+        raise _RequestDeadlineExceededError(
+            f"HTTP request exceeded {timeout:g}s wall-clock deadline"
+        )
+
+    previous_handler = signal.signal(signal.SIGALRM, _expire)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _bound_local_listener() -> socket.socket:
@@ -34,7 +57,13 @@ def _request_json(url: str, payload: dict | None, timeout: float) -> dict:
         data=data,
         headers={"Content-Type": "application/json"} if data else {},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    # urllib's timeout applies per socket operation. A peer that keeps sending
+    # partial bytes can therefore keep json.load() alive forever; the release
+    # gate needs a deadline for the entire render response.
+    with (
+        _wall_clock_deadline(timeout),
+        urllib.request.urlopen(request, timeout=timeout) as response,
+    ):
         if response.status != 200:
             raise RuntimeError(f"{url} returned HTTP {response.status}")
         body = json.load(response)

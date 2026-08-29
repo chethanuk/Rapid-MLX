@@ -5,6 +5,7 @@ import importlib.util
 import json
 import socket
 import struct
+import time
 import zlib
 from pathlib import Path
 
@@ -79,6 +80,30 @@ def test_bound_listener_holds_port_until_socket_activation_handoff() -> None:
     finally:
         contender.close()
         listener.close()
+
+
+def test_request_deadline_bounds_a_never_finishing_response(monkeypatch) -> None:
+    class SlowResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            while True:
+                time.sleep(0.01)
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: SlowResponse()
+    )
+
+    started = time.monotonic()
+    with pytest.raises(_MODULE._RequestDeadlineExceededError, match="wall-clock"):
+        _MODULE._request_json("http://127.0.0.1/stream", None, 0.05)
+    assert time.monotonic() - started < 0.5
 
 
 _FAKE_SIDECAR = """#!/usr/bin/env python3
@@ -164,7 +189,7 @@ def test_release_workflow_serializes_flux_after_vision_smoke() -> None:
     assert build.index("smoke-sidecar-vision.py") < build.index(
         "smoke-sidecar-image.py"
     )
-    assert '"$REPO_ROOT/scripts/smoke-sidecar-image.py"' in build
+    assert '"$REPO_ROOT/apps/rapid-mac/scripts/smoke-sidecar-image.py"' in build
     assert '"$SIDE/python/bin/python3.12"' in workflow
 
 
