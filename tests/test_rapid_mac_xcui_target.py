@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import plistlib
+import subprocess
 
 import yaml
 
@@ -82,7 +85,14 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
 
     assert "build/Rapid-MLX Desktop.app" in runner
     assert "lsregister" in runner
-    assert "xcodebuild -version" in runner
+    assert '"$XCODEBUILD" -version' in runner
+    assert 'DERIVED_DATA="${RAPID_XCUI_DERIVED_DATA:' in runner
+    assert '-derivedDataPath "$DERIVED_DATA"' in runner
+    assert "CODE_SIGN_STYLE=Manual" in runner
+    assert "CODE_SIGNING_ALLOWED=YES" in runner
+    assert "CODE_SIGNING_REQUIRED=YES" in runner
+    assert "CODE_SIGN_IDENTITY=-" in runner
+    assert "CODE_SIGNING_ALLOWED=NO" not in runner
     assert "XCUIApplication(url: appURL)" in source
     assert 'appendingPathComponent("build/Rapid-MLX Desktop.app")' in source
     assert source.count('"CFFIXED_USER_HOME": testHome.path') == 1
@@ -146,6 +156,120 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     )
     assert "isExecutableFile" in source
     assert "RapidUITests-$(date +%s)-$$.xcresult" in runner
+    assert "build-for-testing" in runner
+    assert "test-without-building" in runner
+    assert "RAPID_XCUI_STARTUP_TIMEOUT_SECONDS" in runner
+    assert "DevToolsSecurity -status" in runner
+    assert 'launchctl print "gui/$(id -u)"' in runner
+    assert "/usr/bin/automationmodetool" in runner
+    assert "enable-automationmode-without-authentication" in runner
+    assert "exit 124" in runner
+    assert "process-tree.txt" in runner
+    assert 'awk -v root="$DERIVED_DATA"' in runner
+    assert 'awk -v root="$APP/Contents/MacOS/"' in runner
+    assert "unrelated command lines may contain credentials" in runner
+    assert "xcodebuild.sample.txt" in runner
+    assert "unified.log" in runner
+    assert "launchAndReportRapidReady" in harness
+    assert "app.launchAndReportRapidReady()" in source
+    assert "RAPID_XCUI_STARTUP_SENTINEL" in harness
+
+
+def test_xcui_runner_can_reserve_its_loopback_listener():
+    project = (
+        MAC / "Tests/RapidUITests/RapidUITests.xcodeproj/project.pbxproj"
+    ).read_text()
+    generator = (MAC / "Tests/RapidUITests/project.yml").read_text()
+    entitlements_path = MAC / "Tests/RapidUITests/RapidUITests.entitlements"
+    entitlements = plistlib.loads(entitlements_path.read_bytes())
+
+    assert project.count("CODE_SIGN_ENTITLEMENTS = RapidUITests.entitlements;") == 2
+    assert "CODE_SIGN_ENTITLEMENTS: RapidUITests.entitlements" in generator
+    assert entitlements == {"com.apple.security.network.server": True}
+
+
+def _run_fake_xcui(tmp_path: Path, mode: str) -> subprocess.CompletedProcess[str]:
+    app = tmp_path / "Rapid-MLX Desktop.app"
+    project = tmp_path / "RapidUITests.xcodeproj"
+    app.mkdir()
+    project.mkdir()
+    invocation_log = tmp_path / "invocations.log"
+    fake_xcodebuild = tmp_path / "xcodebuild"
+    fake_xcodebuild.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_XCODEBUILD_INVOCATIONS"
+case "${1:-}" in
+    -version|build-for-testing) exit 0 ;;
+    test-without-building)
+        case "$FAKE_XCUI_MODE" in
+            ready)
+                printf 'xctest_pid=%s\\n' "$$" > "$RAPID_XCUI_STARTUP_SENTINEL"
+                exit 0
+                ;;
+            no-sentinel) exit 0 ;;
+            stall)
+                trap 'exit 130' INT TERM
+                while :; do sleep 1; done
+                ;;
+        esac
+        ;;
+esac
+exit 64
+"""
+    )
+    fake_xcodebuild.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_XCODEBUILD_INVOCATIONS": str(invocation_log),
+            "FAKE_XCUI_MODE": mode,
+            "RAPID_XCUI_APP": str(app),
+            "RAPID_XCUI_PROJECT": str(project),
+            "RAPID_XCUI_XCODEBUILD": str(fake_xcodebuild),
+            "RAPID_XCUI_LSREGISTER": "/usr/bin/true",
+            "RAPID_XCUI_RESULT_BUNDLE": str(tmp_path / "result.xcresult"),
+            "RAPID_XCUI_STARTUP_TIMEOUT_SECONDS": "1",
+            "RAPID_XCUI_TERMINATION_GRACE_SECONDS": "0",
+            "RAPID_XCUI_CAPTURE_DIAGNOSTICS": "0",
+            "RAPID_XCUI_SKIP_HOST_PREFLIGHT": "1",
+        }
+    )
+    return subprocess.run(
+        [str(MAC / "scripts/run-xcui-tests.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def test_xcui_runner_disarms_startup_watchdog_after_target_launch(tmp_path):
+    result = _run_fake_xcui(tmp_path, "ready")
+
+    assert result.returncode == 0, result.stderr
+    invocations = (tmp_path / "invocations.log").read_text().splitlines()
+    assert invocations[0] == "-version"
+    assert invocations[1].startswith("build-for-testing ")
+    assert invocations[2].startswith("test-without-building ")
+
+
+def test_xcui_runner_rejects_success_without_target_launch_proof(tmp_path):
+    result = _run_fake_xcui(tmp_path, "no-sentinel")
+
+    assert result.returncode == 1
+    assert "completed without proving that the target app launched" in result.stderr
+
+
+def test_xcui_runner_bounds_prelaunch_stall_and_preserves_diagnostics(tmp_path):
+    result = _run_fake_xcui(tmp_path, "stall")
+
+    assert result.returncode == 124
+    assert "target app did not finish launching within 1s" in result.stderr
+    diagnostics = tmp_path / "result.xcresult.startup-diagnostics"
+    assert (diagnostics / "process-tree.txt").is_file()
+    assert (diagnostics / "xcodebuild-test.log").is_file()
 
 
 def test_swift_source_parent_traversal_resolves_rapid_mac_fixture():

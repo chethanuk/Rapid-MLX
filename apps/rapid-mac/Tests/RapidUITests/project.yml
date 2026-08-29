@@ -34,6 +34,7 @@ targets:
       - target: RapidUITestHost
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: RapidUITests.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.rapidmlx.rapid-uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: RapidUITestHost

@@ -11,6 +11,26 @@ Run it with full Xcode after building the app:
 ./scripts/run-xcui-tests.sh
 ```
 
+The runner builds first, then allows 90 seconds for the native XCTest worker
+to launch the Desktop target. A pre-launch stall exits 124 and writes the
+streamed Xcode log, process tree, Xcode sample, and relevant unified logs next
+to the result bundle in `*.xcresult.startup-diagnostics`. This is intentionally
+not a whole-journey timeout: once the app launch handshake returns, each GUI
+assertion keeps its own product-specific bound.
+
+On a self-hosted Mac, prepare the host once as an administrator:
+
+```sh
+sudo DevToolsSecurity -enable
+sudo automationmodetool enable-automationmode-without-authentication
+```
+
+The second command is Apple's CI/lab mechanism for preventing an unattended
+test from waiting on the recurring UI Automation password prompt. The Actions
+runner must also execute inside a logged-in Aqua session. The test runner checks
+all three conditions before compiling so host configuration failures do not
+consume the GUI lane.
+
 The target is additive; do not remove an AX journey until its semantic and
 structural assertions have equivalent native coverage.
 

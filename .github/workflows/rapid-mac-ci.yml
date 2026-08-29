@@ -471,7 +471,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: rapid-xcui-evidence-${{ matrix.group }}
-          path: ${{ runner.temp }}/Rapid*UITests.xcresult
+          path: |
+            ${{ runner.temp }}/Rapid*UITests.xcresult
+            ${{ runner.temp }}/Rapid*UITests.xcresult.startup-diagnostics
           if-no-files-found: ignore
 
       # One step per flow so a red check names the journey that broke rather

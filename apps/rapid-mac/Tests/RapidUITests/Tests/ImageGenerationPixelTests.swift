@@ -48,7 +48,7 @@ final class ImageGenerationPixelTests: XCTestCase {
             "RAPID_DESKTOP_PORT": "65000",
             "RAPID_DESKTOP_NO_PORT_SWEEP": "1",
         ]
-        app.launch()
+        app.launchAndReportRapidReady()
         defer {
             app.terminate()
             terminateFakeSidecars(recordedIn: eventLog, alias: "fake-image-alias")

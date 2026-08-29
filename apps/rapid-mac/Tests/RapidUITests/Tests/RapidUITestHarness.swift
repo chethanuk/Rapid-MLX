@@ -2,6 +2,31 @@ import AppKit
 import Darwin
 import XCTest
 
+extension XCUIApplication {
+    /// Launch the product app and acknowledge that XCTest's synchronous
+    /// launch handshake returned. The outer runner bounds only this startup
+    /// phase; normal journey-specific XCTest timeouts remain authoritative
+    /// after the sentinel is written.
+    func launchAndReportRapidReady(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        launch()
+        guard let path = ProcessInfo.processInfo.environment["RAPID_XCUI_STARTUP_SENTINEL"],
+              !path.isEmpty else { return }
+        do {
+            let payload = "xctest_pid=\(ProcessInfo.processInfo.processIdentifier)\n"
+            try payload.write(
+                to: URL(fileURLWithPath: path),
+                atomically: true,
+                encoding: .utf8
+            )
+        } catch {
+            XCTFail("Could not record successful Desktop launch: \(error)", file: file, line: line)
+        }
+    }
+}
+
 @MainActor
 final class RapidUITestHarness {
     let app: XCUIApplication
@@ -99,7 +124,7 @@ final class RapidUITestHarness {
     }
 
     func launch() {
-        app.launch()
+        app.launchAndReportRapidReady()
         XCTAssertTrue(app.windows["Rapid-MLX"].waitForExistence(timeout: 20))
         dismissFirstRunIfNeeded()
     }
@@ -116,7 +141,7 @@ final class RapidUITestHarness {
             XCTFail("Could not reserve a fresh loopback port for relaunch: \(error)")
             return
         }
-        app.launch()
+        app.launchAndReportRapidReady()
         XCTAssertTrue(app.windows["Rapid-MLX"].waitForExistence(timeout: 20))
         dismissFirstRunIfNeeded()
     }
