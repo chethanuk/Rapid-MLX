@@ -23,10 +23,10 @@ enum TestSubprocessError: Error, CustomStringConvertible {
 /// A synchronous ``Process.waitUntilExit()`` occupies a cooperative executor
 /// worker when called from an async or MainActor test. On a low-core runner,
 /// enough such waits can prevent the tasks responsible for making the child
-/// exit from running at all. This helper instead resumes from
-/// ``terminationHandler`` and gives every child a watchdog on a native thread,
-/// independent of Swift concurrency. A timeout samples the child into the
-/// captured test log, then escalates TERM to KILL.
+/// exit from running at all. This helper instead waits on a native thread,
+/// independent of Swift concurrency, while a second native-thread watchdog
+/// bounds both process exit and pipe drainage. A timeout samples the process
+/// group into the captured test log, then escalates group-wide TERM to KILL.
 enum TestSubprocess {
     static func run(
         executableURL: URL,
@@ -40,58 +40,124 @@ enum TestSubprocess {
         precondition(timeout > 0, "test subprocess timeout must be positive")
         precondition(sampleDuration > 0, "sample duration must be positive")
 
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.currentDirectoryURL = currentDirectoryURL
-        process.environment = environment
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let stdoutCapture = AsyncPipeCapture(stdoutPipe.fileHandleForReading)
-        let stderrCapture = AsyncPipeCapture(stderrPipe.fileHandleForReading)
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let state = TestProcessExitState()
-        let processBox = UncheckedProcess(process)
-        process.terminationHandler = { terminated in
-            state.complete(status: terminated.terminationStatus)
-        }
-
+        let stdoutPipe = try SpawnPipe()
+        let stderrPipe: SpawnPipe
         do {
-            try process.run()
+            stderrPipe = try SpawnPipe()
         } catch {
-            stdoutPipe.fileHandleForWriting.closeFile()
-            stderrPipe.fileHandleForWriting.closeFile()
-            stdoutCapture.cancel()
-            stderrCapture.cancel()
+            stdoutPipe.closeBoth()
             throw error
         }
-        stdoutPipe.fileHandleForWriting.closeFile()
-        stderrPipe.fileHandleForWriting.closeFile()
+
+        let state = TestProcessCompletionState()
+        let stdoutCapture = AsyncPipeCapture(
+            FileHandle(fileDescriptor: stdoutPipe.readFD, closeOnDealloc: true),
+            onFinish: { state.pipeFinished() }
+        )
+        let stderrCapture = AsyncPipeCapture(
+            FileHandle(fileDescriptor: stderrPipe.readFD, closeOnDealloc: true),
+            onFinish: { state.pipeFinished() }
+        )
+
+        var fileActions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        var writeEndsOpen = true
+        defer {
+            if writeEndsOpen {
+                Darwin.close(stdoutPipe.writeFD)
+                Darwin.close(stderrPipe.writeFD)
+            }
+        }
+        try check(posix_spawn_file_actions_init(&fileActions))
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        try check(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        try check(posix_spawn_file_actions_adddup2(&fileActions, stdoutPipe.writeFD, STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&fileActions, stderrPipe.writeFD, STDERR_FILENO))
+        for descriptor in [
+            stdoutPipe.readFD, stdoutPipe.writeFD,
+            stderrPipe.readFD, stderrPipe.writeFD,
+        ] {
+            try check(posix_spawn_file_actions_addclose(&fileActions, descriptor))
+        }
+        if let currentDirectoryURL {
+            let result = currentDirectoryURL.path.withCString { path in
+                if #available(macOS 26.0, *) {
+                    posix_spawn_file_actions_addchdir(&fileActions, path)
+                } else {
+                    posix_spawn_file_actions_addchdir_np(&fileActions, path)
+                }
+            }
+            try check(result)
+        }
+
+        // A dedicated process group lets the timeout own descendants even
+        // after the direct child exits while a grandchild still holds one of
+        // our pipe descriptors open.
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)))
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+
+        let argv = [executableURL.path] + arguments
+        let inheritedEnvironment = environment ?? ProcessInfo.processInfo.environment
+        let envp = inheritedEnvironment.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+        var pid: pid_t = 0
+        let spawnResult = withMutableCStrings(argv) { argvPointer in
+            withMutableCStrings(envp) { environmentPointer in
+                executableURL.path.withCString { executablePath in
+                    posix_spawn(
+                        &pid,
+                        executablePath,
+                        &fileActions,
+                        &attributes,
+                        argvPointer,
+                        environmentPointer
+                    )
+                }
+            }
+        }
+        Darwin.close(stdoutPipe.writeFD)
+        Darwin.close(stderrPipe.writeFD)
+        writeEndsOpen = false
+        guard spawnResult == 0 else {
+            stdoutCapture.cancel()
+            stderrCapture.cancel()
+            throw POSIXError(POSIXErrorCode(rawValue: spawnResult) ?? .EIO)
+        }
+        let spawnedPID = pid
+
+        Thread.detachNewThread {
+            var rawStatus: Int32 = 0
+            var result: pid_t
+            repeat {
+                result = Darwin.waitpid(spawnedPID, &rawStatus, 0)
+            } while result == -1 && errno == EINTR
+            if result == spawnedPID {
+                state.processExited(rawStatus: rawStatus)
+            } else {
+                state.processExited(rawStatus: 127 << 8)
+            }
+        }
 
         let command = ([executableURL.path] + arguments).joined(separator: " ")
-        let pid = process.processIdentifier
         Thread.detachNewThread {
             guard state.beginTimeoutIfIncomplete(after: timeout) else { return }
             if sampleOnTimeout {
-                sample(pid: pid, duration: sampleDuration, command: command)
+                sample(processGroup: spawnedPID, duration: sampleDuration, command: command)
             }
-            guard processBox.process.isRunning else { return }
-            processBox.process.terminate()
+            Darwin.kill(-spawnedPID, SIGTERM)
             guard !state.waitForCompletion(seconds: 2) else { return }
-            Darwin.kill(pid, SIGKILL)
+            Darwin.kill(-spawnedPID, SIGKILL)
         }
 
         let exit = await withTaskCancellationHandler {
             await state.value()
         } onCancel: {
-            guard processBox.process.isRunning else { return }
-            processBox.process.terminate()
+            Darwin.kill(-spawnedPID, SIGTERM)
             Thread.detachNewThread {
                 guard !state.waitForCompletion(seconds: 2) else { return }
-                Darwin.kill(pid, SIGKILL)
+                Darwin.kill(-spawnedPID, SIGKILL)
             }
         }
         async let standardOutput = stdoutCapture.value()
@@ -103,19 +169,26 @@ enum TestSubprocess {
             throw TestSubprocessError.timedOut(
                 command: command,
                 seconds: timeout,
-                pid: pid
+                pid: spawnedPID
             )
         }
         return TestSubprocessResult(
-            terminationStatus: exit.status,
+            terminationStatus: terminationStatus(from: exit.rawStatus),
             standardOutput: output,
             standardError: errorOutput
         )
     }
 
-    private static func sample(pid: pid_t, duration: Int, command: String) {
-        let message = "TestSubprocess: timeout; sampling pid \(pid) for \(duration)s: \(command)\n"
+    private static func sample(processGroup: pid_t, duration: Int, command: String) {
+        let members = processGroupMembers(processGroup)
+        let message = "TestSubprocess: timeout; sampling process group \(processGroup) members \(members) for \(duration)s: \(command)\n"
         FileHandle.standardError.write(Data(message.utf8))
+        for pid in members.isEmpty ? [processGroup] : members {
+            sample(pid: pid, duration: duration)
+        }
+    }
+
+    private static func sample(pid: pid_t, duration: Int) {
         let sampler = Process()
         sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
         sampler.arguments = [String(pid), String(duration), "-file", "/dev/stderr"]
@@ -131,40 +204,108 @@ enum TestSubprocess {
             FileHandle.standardError.write(Data(failure.utf8))
         }
     }
-}
 
-private final class UncheckedProcess: @unchecked Sendable {
-    let process: Process
+    private static func processGroupMembers(_ processGroup: pid_t) -> [pid_t] {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,pgid="]
+        process.standardOutput = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .split(separator: "\n")
+            .compactMap { line -> pid_t? in
+                let fields = line.split(whereSeparator: \Character.isWhitespace)
+                guard fields.count == 2,
+                      let pid = pid_t(fields[0]),
+                      let group = pid_t(fields[1]),
+                      group == processGroup
+                else { return nil }
+                return pid
+            }
+    }
 
-    init(_ process: Process) {
-        self.process = process
+    private static func terminationStatus(from rawStatus: Int32) -> Int32 {
+        let signal = rawStatus & 0x7f
+        return signal == 0 ? (rawStatus >> 8) & 0xff : signal
+    }
+
+    private static func check(_ result: Int32) throws {
+        guard result != 0 else { return }
+        throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EIO)
+    }
+
+    private static func withMutableCStrings<Result>(
+        _ strings: [String],
+        _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Result
+    ) -> Result {
+        let storage = strings.map { strdup($0) }
+        defer { storage.forEach { free($0) } }
+        var pointers = storage + [nil]
+        return pointers.withUnsafeMutableBufferPointer { buffer in
+            body(buffer.baseAddress!)
+        }
     }
 }
 
-private final class TestProcessExitState: @unchecked Sendable {
+private struct SpawnPipe {
+    let readFD: Int32
+    let writeFD: Int32
+
+    init() throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        let result = descriptors.withUnsafeMutableBufferPointer { buffer in
+            Darwin.pipe(buffer.baseAddress!)
+        }
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        readFD = descriptors[0]
+        writeFD = descriptors[1]
+    }
+
+    func closeBoth() {
+        Darwin.close(readFD)
+        Darwin.close(writeFD)
+    }
+}
+
+private final class TestProcessCompletionState: @unchecked Sendable {
     struct Exit: Sendable {
-        let status: Int32
+        let rawStatus: Int32
         let timedOut: Bool
     }
 
     private let condition = NSCondition()
     private var exit: Exit?
+    private var rawStatus: Int32?
+    private var finishedPipeCount = 0
     private var timedOut = false
     private var continuation: CheckedContinuation<Exit, Never>?
 
-    func complete(status: Int32) {
+    func processExited(rawStatus: Int32) {
         condition.lock()
-        guard exit == nil else {
-            condition.unlock()
-            return
-        }
-        let value = Exit(status: status, timedOut: timedOut)
-        exit = value
-        let continuation = continuation
-        self.continuation = nil
-        condition.broadcast()
+        self.rawStatus = rawStatus
+        let completion = completeIfReadyLocked()
         condition.unlock()
-        continuation?.resume(returning: value)
+        if let completion {
+            completion.continuation?.resume(returning: completion.value)
+        }
+    }
+
+    func pipeFinished() {
+        condition.lock()
+        finishedPipeCount += 1
+        let completion = completeIfReadyLocked()
+        condition.unlock()
+        if let completion {
+            completion.continuation?.resume(returning: completion.value)
+        }
     }
 
     func value() async -> Exit {
@@ -197,6 +338,19 @@ private final class TestProcessExitState: @unchecked Sendable {
         while exit == nil && condition.wait(until: deadline) {}
         return exit != nil
     }
+
+    private func completeIfReadyLocked() -> (
+        continuation: CheckedContinuation<Exit, Never>?,
+        value: Exit
+    )? {
+        guard exit == nil, let rawStatus, finishedPipeCount == 2 else { return nil }
+        let value = Exit(rawStatus: rawStatus, timedOut: timedOut)
+        exit = value
+        let continuation = continuation
+        self.continuation = nil
+        condition.broadcast()
+        return (continuation, value)
+    }
 }
 
 private final class AsyncPipeCapture: @unchecked Sendable {
@@ -205,9 +359,11 @@ private final class AsyncPipeCapture: @unchecked Sendable {
     private var data = Data()
     private var finished = false
     private var continuation: CheckedContinuation<Data, Never>?
+    private let onFinish: @Sendable () -> Void
 
-    init(_ handle: FileHandle) {
+    init(_ handle: FileHandle, onFinish: @escaping @Sendable () -> Void) {
         self.handle = handle
+        self.onFinish = onFinish
         handle.readabilityHandler = { [weak self] readable in
             guard let self else { return }
             let chunk = readable.availableData
@@ -241,6 +397,7 @@ private final class AsyncPipeCapture: @unchecked Sendable {
 
     private func finish() {
         handle.readabilityHandler = nil
+        handle.closeFile()
         lock.lock()
         guard !finished else {
             lock.unlock()
@@ -252,5 +409,6 @@ private final class AsyncPipeCapture: @unchecked Sendable {
         self.continuation = nil
         lock.unlock()
         continuation?.resume(returning: data)
+        onFinish()
     }
 }

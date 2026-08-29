@@ -77,6 +77,39 @@ struct TestSubprocessTests {
         }
     }
 
+    @Test("a descendant holding inherited pipes cannot outlive the bound")
+    func descendantHoldingPipesIsKilledWithGroup() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rapid-test-subprocess-descendant-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        do {
+            _ = try await TestSubprocess.run(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "sleep 30 & echo $! > \"$1\"",
+                    "rapid-test-subprocess",
+                    pidFile.path,
+                ],
+                timeout: 0.2,
+                sampleOnTimeout: false
+            )
+            Issue.record("a descendant holding the pipes should time out")
+        } catch is TestSubprocessError {
+            // Expected.
+        }
+
+        #expect(clock.now - start < .seconds(5))
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let descendantPID = try #require(pid_t(pidText))
+        #expect(Darwin.kill(descendantPID, 0) == -1)
+        #expect(errno == ESRCH)
+    }
+
     @Test("blocking Process waits stay confined to native watchdog threads")
     func noBlockingWaitsInOrdinaryTests() throws {
         let allowed = Set([
