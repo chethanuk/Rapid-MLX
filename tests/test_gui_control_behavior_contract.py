@@ -14,9 +14,9 @@ behavioural reason (#2494). Each guard below now asserts the structural
   (`pull` lifecycle, machine aliases, watchdog events);
 * the flow is gated in CI and its failures leave usable evidence (parsed
   structurally from the workflow YAML, mirroring ``test_gui_golden_ci_coverage``);
-* the only deliberately retained single-anchor source checks are the two sides
-  of a cross-language request-body contract (Swift default <-> shell request),
-  where no behavioural proxy exists — see ``test_image_generation_...``.
+* the deliberately retained source anchors cover contracts with no portable
+  behavioural proxy: the two sides of a cross-language request body and the
+  Bash 3.2 empty-array syntax that Ubuntu's newer Bash accepts either way.
 
 The guarantees here are behaviour; the anchors are precise and loud about why
 they exist when they break.
@@ -102,6 +102,16 @@ def _run_harness_helper(tmp_path: Path, helper: str, *args: str):
         text=True,
         check=False,
     )
+
+
+def test_host_precheck_uses_bash32_safe_empty_array_expansion():
+    """Ubuntu must reject syntax that would regress macOS Bash 3.2."""
+    source = HARNESS.read_text()
+    precheck_block = source.split("dogfood-host-precheck.sh", 1)[1].split("fi", 1)[0]
+    argument_lines = {line.strip() for line in precheck_block.splitlines()}
+
+    assert '${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}' in argument_lines
+    assert '"${ORIGINAL_ARGS[@]}"' not in argument_lines
 
 
 @pytest.mark.parametrize(
