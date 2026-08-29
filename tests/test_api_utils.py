@@ -1249,13 +1249,68 @@ class TestResolveServingLane:
             "local/qwen35", vision_min_memory_gb=32.0
         ) == utils_mod.ServingLaneDecision(True, "vision_hybrid_runtime_supported")
 
-    def test_explicit_vision_overrides_measured_memory_floor(self, monkeypatch):
+    def test_explicit_vision_honors_measured_memory_floor(self, monkeypatch):
         from vllm_mlx.api import utils as utils_mod
 
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
         monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 16.0)
 
         assert utils_mod.resolve_serving_lane_decision(
             "local/qwen35",
+            force_mllm=True,
+            vision_min_memory_gb=32.0,
+        ) == utils_mod.ServingLaneDecision(
+            False, "vision_memory_insufficient", auto_text_fallback=True
+        )
+
+    def test_automatic_vision_still_honors_measured_memory_floor(self, monkeypatch):
+        from vllm_mlx.api import utils as utils_mod
+
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 16.0)
+
+        auto = utils_mod.resolve_serving_lane_decision(
+            "qwen3.5-4b-4bit",
+            vision_min_memory_gb=32.0,
+        )
+
+        assert auto == utils_mod.ServingLaneDecision(
+            False, "vision_memory_insufficient", auto_text_fallback=True
+        )
+
+    @pytest.mark.parametrize(
+        ("architecture_unavailable", "cache_mode"),
+        [(True, None), (False, "other"), (False, "arrays")],
+    )
+    def test_explicit_vision_precedes_automatic_capability_fallbacks(
+        self, monkeypatch, architecture_unavailable, cache_mode
+    ):
+        from vllm_mlx.api import utils as utils_mod
+
+        monkeypatch.setattr(utils_mod, "is_mllm_model", lambda _name: True)
+        monkeypatch.setattr(
+            utils_mod,
+            "mllm_arch_unsupported_but_text_vendored",
+            lambda _name: architecture_unavailable,
+        )
+        monkeypatch.setattr(
+            utils_mod, "mllm_backbone_cache_mode", lambda _name: cache_mode
+        )
+        monkeypatch.setattr(utils_mod, "mllm_hybrid_runtime_supported", lambda: False)
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 64.0)
+
+        assert utils_mod.resolve_serving_lane_decision(
+            "local/checkpoint",
             force_mllm=True,
             vision_min_memory_gb=32.0,
         ) == utils_mod.ServingLaneDecision(True, "vision_lane_forced")
@@ -1365,11 +1420,32 @@ class TestResolveServingLane:
 
         # Explicit --mllm on a hybrid VLM keeps the MLLM lane (the engine will
         # raise its own #352 error naming --mllm — the flag the user set).
-        self._patch_probes(monkeypatch, is_mllm=True, hybrid=True)
+        self._patch_probes(
+            monkeypatch,
+            is_mllm=True,
+            hybrid=True,
+            hybrid_runtime_supported=True,
+        )
+        monkeypatch.setattr(
+            "vllm_mlx.api.utils.physical_ram_gb",
+            lambda: 64.0,
+        )
         assert resolve_serving_lane("any/qwen36-27b", force_mllm=True) == (
             True,
             False,
         )
+
+    def test_force_mllm_on_text_checkpoint_stays_text_forced(self, monkeypatch):
+        from vllm_mlx.api.utils import (
+            ServingLaneDecision,
+            resolve_serving_lane_decision,
+        )
+
+        self._patch_probes(monkeypatch, is_mllm=False, hybrid=False)
+
+        assert resolve_serving_lane_decision(
+            "local/text-model", force_mllm=True
+        ) == ServingLaneDecision(True, "vision_lane_forced")
 
 
 class TestServingLaneDecisionValidation:

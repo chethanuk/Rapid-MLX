@@ -14,16 +14,10 @@ enum BrowseTool {
     static let charBudget = 15_000
     /// Max response bytes we will download for one page.
     static let maxResponseBytes = 2 * 1024 * 1024
-    /// Hard wall-clock ceiling for a single hop's fetch (seconds). Unlike
-    /// URLSession's idle timeout — which resets on every byte and lets a server
-    /// dribble one byte per interval to hold a hop open forever — this bounds the
+    /// Hard wall-clock ceiling for a single hop's fetch (seconds). It bounds the
     /// TOTAL time one hop may take and cancels it when it expires. Applied per
     /// hop (see ``fetchFollowingRedirects``).
     static let requestTimeout: TimeInterval = 12
-    /// URLSession's own per-task resource backstop (seconds), a little above the
-    /// wall-clock ceiling so our ``withDeadline`` is the primary control and this
-    /// is defence-in-depth.
-    static let resourceTimeout: TimeInterval = 20
     /// Max redirect hops we follow (each is SSRF-validated before we connect).
     static let maxRedirects = 5
 
@@ -236,22 +230,20 @@ enum BrowseTool {
         var approvedOrigins: Set<String> = [origin(of: startURL)]
         var hop = 0
         while true {
-            // Validate (incl. DNS) BEFORE connecting to this hop's host.
-            try await BrowseSSRFGuard.validate(current)
+            // Validate (incl. DNS) BEFORE connecting to this hop's host, then
+            // pin the socket to the exact validated address.
+            let validatedAddress = try await BrowseSSRFGuard.validatedAddress(current)
+            let hopURL = current
 
-            var req = URLRequest(url: current)
-            req.timeoutInterval = requestTimeout
-            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-            req.setValue("text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.8",
-                         forHTTPHeaderField: "Accept")
-            // Bind to a `let` so the @Sendable deadline closure captures an
-            // immutable value (URLRequest is a Sendable value type).
-            let request = req
             // Hard wall-clock ceiling per hop — see ``requestTimeout``.
-            let raw = try await withDeadline(requestTimeout) { try await cappedBytes(request) }
-            guard let http = raw.response as? HTTPURLResponse else {
-                throw simpleError("no HTTP response from \(current.host ?? "host")")
+            let raw = try await withDeadline(requestTimeout) {
+                try await IPPinnedHTTPTransport.fetch(
+                    url: hopURL,
+                    address: validatedAddress,
+                    byteLimit: maxResponseBytes
+                )
             }
+            let http = raw.response
             if (300..<400).contains(http.statusCode), let loc = http.value(forHTTPHeaderField: "Location") {
                 hop += 1
                 guard hop <= maxRedirects else { throw simpleError("too many redirects (> \(maxRedirects))") }
@@ -290,8 +282,7 @@ enum BrowseTool {
     }
 
     /// Run `op` with a hard wall-clock ceiling: if it hasn't finished within
-    /// `seconds`, the timer wins, `op`'s task is cancelled, and we throw. Used to
-    /// turn URLSession's resettable idle timeout into a real per-hop deadline.
+    /// `seconds`, the timer wins, `op`'s task is cancelled, and we throw.
     static func withDeadline<T: Sendable>(
         _ seconds: TimeInterval,
         _ op: @escaping @Sendable () async throws -> T
@@ -308,46 +299,6 @@ enum BrowseTool {
             }
             return result
         }
-    }
-
-    /// Dedicated, isolated session for browsing. Ephemeral + cookies and cache
-    /// fully OFF: a public-content fetch must NOT accumulate or replay cookies
-    /// (which could send one site's session token to another, or hand
-    /// authenticated content to the model) and must not persist fetched pages to
-    /// disk. The session delegate blocks automatic redirects so ``BrowseTool``
-    /// follows them itself, SSRF-checking every hop before a socket opens.
-    static let session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieStorage = nil
-        config.httpShouldSetCookies = false
-        config.httpCookieAcceptPolicy = .never
-        config.urlCache = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = requestTimeout
-        config.timeoutIntervalForResource = resourceTimeout
-        return URLSession(configuration: config, delegate: BrowseNoRedirectDelegate.shared, delegateQueue: nil)
-    }()
-
-    /// A fetched response body + its `URLResponse`, boxed as `Sendable` so it can
-    /// cross the ``withDeadline`` task-group boundary. `URLResponse` is safe to
-    /// hand across here: it is fully materialised and we only read it.
-    struct RawResponse: @unchecked Sendable {
-        let data: Data
-        let response: URLResponse
-    }
-
-    /// Stream a request body, aborting once it crosses ``maxResponseBytes``.
-    static func cappedBytes(_ request: URLRequest) async throws -> RawResponse {
-        let (stream, response) = try await session.bytes(for: request)
-        var data = Data()
-        data.reserveCapacity(min(maxResponseBytes, 256 * 1024))
-        for try await byte in stream {
-            if data.count >= maxResponseBytes {
-                throw simpleError("page exceeded \(maxResponseBytes / (1024 * 1024)) MB cap")
-            }
-            data.append(byte)
-        }
-        return RawResponse(data: data, response: response)
     }
 
     // MARK: - Render
@@ -513,20 +464,5 @@ enum BrowseTool {
             return "{\"error\":\"failed to encode browse result\"}"
         }
         return s
-    }
-}
-
-/// Per-task delegate that refuses every automatic redirect so ``BrowseTool``
-/// can follow them by hand, SSRF-validating each target before it connects.
-final class BrowseNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    static let shared = BrowseNoRedirectDelegate()
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(nil)   // never auto-follow
     }
 }

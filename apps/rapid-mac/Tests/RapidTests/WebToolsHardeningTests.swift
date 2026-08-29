@@ -126,6 +126,15 @@ struct WebToolsHardeningTests {
         #expect(ips.allSatisfy { $0.isBlocked })
     }
 
+    @Test("validatedAddress returns an IP literal after range validation")
+    func validatedAddressReturnsPublicIPLiteral() async throws {
+        let url = try #require(URL(string: "https://93.184.216.34/page"))
+
+        let address = try await BrowseSSRFGuard.validatedAddress(url)
+
+        #expect(address == ParsedIP("93.184.216.34"))
+    }
+
     @Test("resolve yields empty for an NXDOMAIN reserved TLD")
     func resolveEmptyForInvalidTLD() async throws {
         // RFC 6761 guarantees ``.invalid`` never resolves; getaddrinfo returns

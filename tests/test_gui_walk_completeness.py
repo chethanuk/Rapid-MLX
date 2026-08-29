@@ -42,6 +42,9 @@ def test_catalog_absence_checks_require_complete_walks():
 def test_empty_persona_environment_is_safe_on_macos_bash3():
     source = (ROOT / "apps/rapid-mac/scripts/gui-golden-flows.sh").read_text()
     safe = '${PERSONA_ENV[@]+"${PERSONA_ENV[@]}"}'
+    # launch_persona_app owns the two mutually exclusive log redirections for
+    # both initial launch and relaunch. The config-persistence loop is the
+    # third safe expansion.
     assert source.count(safe) == 3
 
     program = r"""
