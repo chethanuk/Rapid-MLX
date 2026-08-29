@@ -198,3 +198,21 @@ def test_real_dogfood_entrypoints_share_the_host_guards() -> None:
     assert 'exec "$SCRIPT_DIR/dogfood-host-precheck.sh"' in ax
     assert 'exec "$ROOT/scripts/dogfood-host-precheck.sh"' in golden
     assert golden.count("DOGFOOD_WORKING_SET_GB=0.1") == 2
+
+
+def test_gui_ax_smoke_delivers_real_user_input() -> None:
+    ax = (ROOT / "apps/rapid-mac/scripts/gui-ax-smoke.sh").read_text()
+
+    assert 'pb click --coords "$coords" --global-coords' in ax
+    assert "--input-strategy synthOnly --foreground" in ax
+    assert "pb perform-action" not in ax
+    assert "pb menu click" not in ax
+    assert (
+        "--snapshot"
+        not in ax.split("press_identifier()", maxsplit=1)[1].split(
+            "command -v peekaboo", maxsplit=1
+        )[0]
+    )
+    assert ax.index('press_identifier "$OUT/main.json"') < ax.index(
+        'pb image --window-id "$MAIN_WINDOW_ID"'
+    )
