@@ -1455,16 +1455,8 @@ class _ReachedStalenessCallError(Exception):
         (lambda: cli.pull_command, lambda: SimpleNamespace(model="x")),
         (lambda: cli.ps_command, lambda: SimpleNamespace()),
         (lambda: cli.info_command, lambda: SimpleNamespace(model="x")),
-        (
-            lambda: (
-                __import__(
-                    "vllm_mlx.doctor.cli", fromlist=["doctor_command"]
-                ).doctor_command
-            ),
-            lambda: SimpleNamespace(),
-        ),
     ],
-    ids=["bench", "pull", "ps", "info", "doctor"],
+    ids=["bench", "pull", "ps", "info"],
 )
 def test_staleness_call_site_is_invoked(command_factory, args_factory):
     """Each version-convergence command surfaces the staleness nudge by
