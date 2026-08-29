@@ -86,6 +86,34 @@ def test_pull_without_runtime_assets_keeps_single_repository(monkeypatch) -> Non
     assert calls == ["mlx-community/Qwen3-0.6B-4bit"]
 
 
+def test_pull_does_not_download_primary_again_when_declared_as_runtime_asset(
+    monkeypatch,
+) -> None:
+    """Malformed future metadata cannot turn one pull into a duplicate pull."""
+    primary = "owner/model"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        registry,
+        "runtime_assets_for",
+        lambda _repo: (
+            registry.AudioRuntimeAsset(
+                repo_id=primary,
+                allow_patterns=("voices/*.safetensors",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_pull_repository",
+        lambda args, **_kwargs: calls.append(args.model),
+    )
+    monkeypatch.setattr(cli, "_emit_pull_activation", lambda: None)
+
+    cli.pull_command(argparse.Namespace(model=primary))
+
+    assert calls == [primary]
+
+
 def test_runtime_asset_failure_does_not_report_successful_pull(monkeypatch) -> None:
     activations = 0
 
