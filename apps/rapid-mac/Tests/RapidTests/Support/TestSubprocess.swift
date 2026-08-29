@@ -142,7 +142,9 @@ enum TestSubprocess {
             }
         }
 
-        let command = ([executableURL.path] + arguments).joined(separator: " ")
+        let command = ([executableURL.path] + arguments)
+            .map(\.debugDescription)
+            .joined(separator: " ")
         Thread.detachNewThread {
             guard state.beginTimeoutIfIncomplete(after: timeout) else { return }
             // Pipe ownership ends at the caller's deadline. In particular, a
@@ -153,7 +155,7 @@ enum TestSubprocess {
             if sampleOnTimeout {
                 sample(pid: spawnedPID, duration: sampleDuration, command: command)
             }
-            terminate(pid: spawnedPID)
+            terminate(pid: spawnedPID, state: state)
             state.timeoutCleanupFinished()
         }
 
@@ -161,7 +163,7 @@ enum TestSubprocess {
             await state.value()
         } onCancel: {
             Thread.detachNewThread {
-                terminate(pid: spawnedPID)
+                terminate(pid: spawnedPID, state: state)
                 stdoutCapture.cancel()
                 stderrCapture.cancel()
             }
@@ -215,7 +217,7 @@ enum TestSubprocess {
         }
     }
 
-    private static func terminate(pid: pid_t) {
+    private static func terminate(pid: pid_t, state: TestProcessCompletionState) {
         signalProcessTree(pid: pid, signal: SIGTERM)
         let deadline = Date(timeIntervalSinceNow: 2)
         while processTreeExists(pid: pid), Date() < deadline {
@@ -223,6 +225,12 @@ enum TestSubprocess {
         }
         if processTreeExists(pid: pid) {
             signalProcessTree(pid: pid, signal: SIGKILL)
+        }
+        // waitpid normally publishes immediately after TERM/KILL. Keep one
+        // final fixed grace window so the returned timeout represents a reaped
+        // child, but never let a kernel-side wait stall the caller forever.
+        if !state.waitForProcessExit(seconds: 1) {
+            state.forceProcessExitIfMissing(rawStatus: SIGKILL)
         }
     }
 
@@ -295,6 +303,7 @@ private final class TestProcessCompletionState: @unchecked Sendable {
     private var finishedPipeCount = 0
     private var timedOut = false
     private var timeoutCleanupComplete = true
+    private var valueRequested = false
     private var continuation: CheckedContinuation<Exit, Never>?
 
     func processExited(rawStatus: Int32) {
@@ -322,6 +331,8 @@ private final class TestProcessCompletionState: @unchecked Sendable {
     func value() async -> Exit {
         await withCheckedContinuation { continuation in
             condition.lock()
+            precondition(!valueRequested, "TestProcessCompletionState supports one consumer")
+            valueRequested = true
             if let exit {
                 condition.unlock()
                 continuation.resume(returning: exit)
@@ -329,6 +340,27 @@ private final class TestProcessCompletionState: @unchecked Sendable {
                 self.continuation = continuation
                 condition.unlock()
             }
+        }
+    }
+
+    func waitForProcessExit(seconds: TimeInterval) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        while rawStatus == nil && condition.wait(until: deadline) {}
+        return rawStatus != nil
+    }
+
+    func forceProcessExitIfMissing(rawStatus: Int32) {
+        condition.lock()
+        if self.rawStatus == nil {
+            self.rawStatus = rawStatus
+        }
+        condition.broadcast()
+        let completion = completeIfReadyLocked()
+        condition.unlock()
+        if let completion {
+            completion.continuation?.resume(returning: completion.value)
         }
     }
 
