@@ -138,8 +138,9 @@ can actually understand.
   [#2613](https://github.com/raullenchai/Rapid-MLX/pull/2613))
 - **Oversized vision inputs fit the request budget automatically.** Images are
   reduced against the model's patch-aware token ceiling before preprocessing,
-  with one measured retry for processor rounding and a clear error only when
-  the minimum aligned image still cannot fit.
+  with one measured retry for processor rounding. If the minimum aligned image
+  remains over budget, the server warns and leaves the existing downstream
+  prefill-cap guard as the final rejection boundary.
   ([#2694](https://github.com/raullenchai/Rapid-MLX/pull/2694))
 - **Forced assistant prefixes no longer wait for the first decoded token.** The
   prefix is emitted after scheduler admission, while empty, failed, and
