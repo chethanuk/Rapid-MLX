@@ -17,22 +17,13 @@ def _ci_linux_extra() -> list[str]:
     """Parse the canonical ``[ci-linux]`` test-dependency list from pyproject.
 
     Version-agnostic: ``tomllib`` is stdlib on 3.11+ only, and the Linux
-    test-matrix explicitly includes 3.10. On 3.10 we fall back to extracting
-    the quoted member strings of the ``ci-linux = [...]`` TOML array — every
-    entry is a plain PEP 508 specifier line, so a quote scan is exact and
-    avoids a hard 3.11 dependency in a gate that must run on 3.10-3.12.
+    test-matrix explicitly includes 3.10. The declared CI dependency set
+    installs the API-compatible ``tomli`` backport there.
     """
     try:
         import tomllib
     except ModuleNotFoundError:  # Python 3.10
-        import re
-
-        text = PYPROJECT.read_text()
-        block = re.search(r"^ci-linux\s*=\s*\[(.*?)\]\s*$", text, re.S | re.M)
-        if block is None:
-            raise AssertionError("[ci-linux] array not found in pyproject.toml")
-        deps = re.findall(r'"([^"]+)"', block.group(1))
-        return [d for d in deps if d.strip()]
+        import tomli as tomllib
     with PYPROJECT.open("rb") as fh:
         return tomllib.load(fh)["project"]["optional-dependencies"]["ci-linux"]
 
