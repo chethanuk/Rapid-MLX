@@ -4077,21 +4077,9 @@ class Scheduler:
 
             states = self._extract_cache_states(cache)
             if not states:
-                logger.debug(
-                    "[boundary_snapshot] state extraction returned no complete "
-                    "cache for uid=%s layers=%d",
-                    uid,
-                    len(cache) if isinstance(cache, list) else -1,
-                )
                 continue
             reconstructed = self._reconstruct_cache_from_states(states)
             if not reconstructed:
-                logger.debug(
-                    "[boundary_snapshot] cache reconstruction returned empty "
-                    "for uid=%s states=%d",
-                    uid,
-                    len(states),
-                )
                 continue
 
             prefix_tokens = list(request.prompt_token_ids[:prefix_boundary])
