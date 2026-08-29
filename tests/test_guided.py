@@ -490,6 +490,21 @@ class TestGuidedGenerator:
         finally:
             guided.HAS_LLGUIDANCE = original
 
+    @requires_guided
+    def test_accepts_direct_hf_fast_tokenizer_from_vendored_loader(self):
+        """Vendored loaders return the HF fast tokenizer directly.
+
+        Its ``._tokenizer`` attribute is the raw Rust tokenizer, not another
+        HF wrapper. Guided decoding must pass the outer fast tokenizer to
+        llguidance instead of unwrapping it one level too far.
+        """
+        import vllm_mlx.api.guided as guided
+
+        tokenizer = _build_byte_level_fast_tokenizer()
+        generator = guided.GuidedGenerator(object(), tokenizer)
+
+        assert generator._get_lltokenizer() is not None
+
 
 # ---------------------------------------------------------------------------
 # Real-llguidance constrained decode over a fake model
