@@ -972,12 +972,14 @@ async def stream_completion(
     _elapsed_stream = time.perf_counter() - _stream_start
     _done = getattr(_final_usage, "completion_tokens", None) or 0
     _ptok = getattr(_final_usage, "prompt_tokens", None) or 0
-    _tok_s = _done / _elapsed_stream if _elapsed_stream > 0 else 0
-    _ttft_ms = (
-        (_first_token_ts - _stream_start) * 1000.0
+    _total_tps = _done / _elapsed_stream if _elapsed_stream > 0 else 0
+    _ttft_seconds = (
+        max(0.0, _first_token_ts - _stream_start)
         if _first_token_ts is not None
-        else _elapsed_stream * 1000.0
+        else _elapsed_stream
     )
+    _decode_seconds = _elapsed_stream - _ttft_seconds
+    _decode_tps = _done / _decode_seconds if _decode_seconds > 0 else _total_tps
     from vllm_mlx.telemetry import emit as _telemetry_emit
 
     _telemetry_emit.request(
@@ -987,8 +989,8 @@ async def stream_completion(
         tool_call_used=False,
         prompt_tokens=_ptok,
         completion_tokens=_done,
-        ttft_ms=_ttft_ms,
-        tps=_tok_s,
+        ttft_ms=_ttft_seconds * 1000.0,
+        tps=_decode_tps,
         status=200,
         caller_agent=caller_agent,
     )

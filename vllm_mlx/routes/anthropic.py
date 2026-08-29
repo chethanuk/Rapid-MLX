@@ -3177,6 +3177,14 @@ async def _stream_anthropic_messages(
     # ``redact`` (never stored raw); ``ttft_ms`` is true first-token latency.
     # ``emit.request`` is sampled + ``is_enabled()``-gated + ``@_safe``, so
     # this is a cheap no-op when telemetry is off / not sampled.
+    if _first_token_ts is not None:
+        _ttft_seconds = max(0.0, _first_token_ts - start_time)
+    else:
+        _ttft_seconds = elapsed
+    _decode_seconds = elapsed - _ttft_seconds
+    _decode_tps = (
+        completion_tokens / _decode_seconds if _decode_seconds > 0 else tokens_per_sec
+    )
     from vllm_mlx.telemetry import emit as _telemetry_emit
 
     _telemetry_emit.request(
@@ -3189,10 +3197,8 @@ async def _stream_anthropic_messages(
         # TTFT == true first-token latency when a text token was produced;
         # on a stream with no text delta (tool-only / empty completion) fall
         # back to total stream time rather than reporting a false 0.0ms.
-        ttft_ms=elapsed * 1000.0
-        if _first_token_ts is None
-        else (_first_token_ts - start_time) * 1000.0,
-        tps=tokens_per_sec,
+        ttft_ms=_ttft_seconds * 1000.0,
+        tps=_decode_tps,
         status=200,
         caller_agent=caller_agent,
     )

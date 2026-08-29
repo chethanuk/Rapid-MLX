@@ -127,9 +127,11 @@ class _AnthropicEngine:
         encode=lambda *a, **k: [1, 2, 3],
     )
 
-    def __init__(self):
+    def __init__(self, *, prefill_delay=0.0, decode_delay=0.2):
         self.nonstream_calls = 0
         self.stream_calls = 0
+        self.prefill_delay = prefill_delay
+        self.decode_delay = decode_delay
 
     async def chat(self, messages, **kwargs):
         self.nonstream_calls += 1
@@ -147,11 +149,11 @@ class _AnthropicEngine:
 
     async def stream_chat(self, messages, **kwargs):
         self.stream_calls += 1
+        if self.prefill_delay:
+            await _sleep(self.prefill_delay)
         for i, text in enumerate(["Hello ", "world"], start=1):
             if i == len(["Hello ", "world"]):
-                # Post-first-token gap so total latency dwarfs true TTFT
-                # (mirrors test_telemetry_streaming_request_wiring).
-                await _sleep(0.2)
+                await _sleep(self.decode_delay)
             yield SimpleNamespace(
                 new_text=text,
                 prompt_tokens=9,
@@ -231,10 +233,9 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
     stream=True, and TTFT is TRUE first-token latency.
 
     Captures raw ``emit.request`` kwargs (before bucketing) while driving the
-    route end-to-end; the fake engine injects a real 0.2s gap after the first
-    token so total stream latency dwarfs true TTFT. Asserting ``ttft_ms`` is a
-    small fraction of total proves ``_first_token_ts`` is latched and used —
-    a regression to "total latency" would blow past ``0.5 * total``.
+    route end-to-end; the fake engine injects 0.1s of prefill before the first
+    token and a 0.2s decode gap after it. This makes both timing windows large
+    enough to prove that TTFT and TPS use their respective clocks.
     """
     pytest.importorskip("mlx")
     import time
@@ -242,7 +243,7 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
     calls: list[dict] = []
     _capture_request(monkeypatch, calls)
 
-    engine = _AnthropicEngine()
+    engine = _AnthropicEngine(prefill_delay=0.1, decode_delay=0.2)
     client = _anthropic_client(engine)
 
     t0 = time.perf_counter()
@@ -274,6 +275,11 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
     assert kw["ttft_ms"] < 0.5 * total_ms, (
         f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
         f"latency {total_ms:.1f}ms — it must reflect first-token timing, not total"
+    )
+    total_rate = kw["completion_tokens"] / (total_ms / 1000.0)
+    assert kw["tps"] > 1.25 * total_rate, (
+        f"tps={kw['tps']:.1f} must use the post-first-token decode window, "
+        f"not total request time ({total_rate:.1f} tok/s)"
     )
 
 
@@ -408,7 +414,25 @@ def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkey
     calls: list[dict] = []
     _capture_request(monkeypatch, calls)
 
-    client = _completions_client(monkeypatch)
+    async def _prefill_then_decode(*_a, **_k):
+        await _sleep(0.1)
+        yield SimpleNamespace(
+            new_text="done",
+            finished=False,
+            finish_reason=None,
+            completion_tokens=0,
+            prompt_tokens=3,
+        )
+        await _sleep(0.2)
+        yield SimpleNamespace(
+            new_text="",
+            finished=True,
+            finish_reason="stop",
+            completion_tokens=5,
+            prompt_tokens=3,
+        )
+
+    client = _completions_client(monkeypatch, stream_generate=_prefill_then_decode)
     t0 = time.perf_counter()
     resp = client.post(
         "/v1/completions",
@@ -429,6 +453,11 @@ def test_completions_stream_emits_openai_python_attribution(telemetry_on, monkey
     assert kw["ttft_ms"] < 0.5 * total_ms, (
         f"ttft_ms={kw['ttft_ms']:.1f} should be well under half of total "
         f"latency {total_ms:.1f}ms — it must reflect first-token timing, not total"
+    )
+    total_rate = kw["completion_tokens"] / (total_ms / 1000.0)
+    assert kw["tps"] > 1.25 * total_rate, (
+        f"tps={kw['tps']:.1f} must use the post-first-token decode window, "
+        f"not total request time ({total_rate:.1f} tok/s)"
     )
 
 
