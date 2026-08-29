@@ -78,7 +78,7 @@ are the argparse defaults from `vllm_mlx/cli.py`.
 | `--trusted-hosts` | Opt-in Host-header allowlist (DNS-rebinding hardening): non-matching requests get HTTP 400. Space- or comma-separated; also settable via `RAPID_MLX_TRUSTED_HOSTS`. | None (not enforced) |
 | `--rate-limit` | Requests per minute per client (0 = disabled) | 0 |
 | `--max-request-bytes` | Maximum HTTP request body size in bytes; larger requests are rejected with HTTP 413 before JSON parsing. 0 disables. Falls back to `RAPID_MLX_MAX_REQUEST_BYTES`. | 8 MiB (8388608) |
-| `--timeout` | Request timeout in seconds | 1800 |
+| `--timeout` | Default request timeout in seconds; per-request `timeout: null` or `timeout: 0` uses this value | 1800 |
 
 #### Admission and batching
 

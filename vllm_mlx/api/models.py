@@ -112,27 +112,34 @@ def _reject_nonfinite_float(v: float | None) -> float | None:
     return v
 
 
-def _validate_timeout(v: float | None) -> float | None:
-    """Reject a non-positive / non-finite request ``timeout`` at the
-    schema layer so both OpenAI surfaces share one contract.
+def _validate_timeout(v: object) -> object:
+    """Normalize a request ``timeout`` at the shared schema boundary.
 
-    ``timeout`` feeds ``asyncio.wait_for``-style guards in the routes
-    (the non-streaming path and the disconnect watcher). A value that is
-    ``<= 0`` or NaN/±inf makes those guards fire an immediate timeout →
-    a 504 the client can't diagnose. Rejecting here (4xx naming the
-    ``timeout`` field) surfaces the malformed field instead. ``None``
-    passes through so the server-default path is preserved.
+    Numeric zero is a compatibility sentinel for the server default,
+    preserving the pre-0.13.0 behavior used by clients that serialize
+    an explicit default as ``0``. Negative and non-finite values remain
+    invalid so they cannot turn into immediate or unbounded timeout
+    guards. ``None`` passes through so the server-default path is
+    preserved.
     """
+    if isinstance(v, bool):
+        raise ValueError("timeout must be a number of seconds, not a boolean")
     if v is None:
         return None
-    if not math.isfinite(v):
+    try:
+        timeout = float(v)
+    except (TypeError, ValueError):
+        return v
+    if not math.isfinite(timeout):
         raise ValueError("timeout must be a finite number of seconds (not NaN or inf)")
-    if v <= 0:
+    if timeout == 0:
+        return None
+    if timeout < 0:
         raise ValueError(
-            "timeout must be > 0 seconds when set (got "
-            f"{v}); omit the field to use the server default."
+            "timeout must be 0 or a positive number of seconds (got "
+            f"{v}); omit the field or pass 0 to use the server default."
         )
-    return v
+    return timeout
 
 
 def _normalize_stop(v) -> list[str] | None:
@@ -1915,9 +1922,9 @@ class ChatCompletionRequest(BaseModel):
     def _normalize_stop(cls, v):
         return _normalize_stop(v)
 
-    @field_validator("timeout")
+    @field_validator("timeout", mode="before")
     @classmethod
-    def _validate_timeout(cls, v: float | None) -> float | None:
+    def _validate_timeout_before(cls, v: object) -> object:
         return _validate_timeout(v)
 
     def stop_sequences(self) -> list[str] | None:
@@ -2358,9 +2365,9 @@ class CompletionRequest(BaseModel):
     def _normalize_stop(cls, v):
         return _normalize_stop(v)
 
-    @field_validator("timeout")
+    @field_validator("timeout", mode="before")
     @classmethod
-    def _validate_timeout(cls, v: float | None) -> float | None:
+    def _validate_timeout_before(cls, v: object) -> object:
         return _validate_timeout(v)
 
     def stop_sequences(self) -> list[str] | None:

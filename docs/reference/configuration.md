@@ -33,7 +33,7 @@ category. The exhaustive flag list (every flag visible in
 | `--trusted-hosts` | Opt-in Host-header allowlist; non-matching requests get HTTP 400 (also via `RAPID_MLX_TRUSTED_HOSTS`) | None (not enforced) |
 | `--rate-limit` | Requests per minute per client (0 = disabled) | `0` |
 | `--max-request-bytes` | Max HTTP request body size in bytes; oversized requests get HTTP 413 before parsing. 0 disables. (also via `RAPID_MLX_MAX_REQUEST_BYTES`) | 8 MiB (8388608) |
-| `--timeout` | Request timeout in seconds | `1800` |
+| `--timeout` | Default request timeout in seconds; per-request `timeout: null` or `timeout: 0` uses this value | `1800` |
 
 #### MLLM media input guards (environment only)
 

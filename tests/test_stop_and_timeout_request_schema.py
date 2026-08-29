@@ -3,9 +3,9 @@
 
 Covers one behaviour on both ``/v1/chat/completions`` and ``/v1/completions``:
 
-  * a non-positive / non-finite ``timeout`` is rejected with the unified
-    ``invalid_request_error`` 400 naming the field — NOT an instant 504
-    from an ``asyncio.wait_for``-style guard consuming the bad value.
+  * omitted, null, and numeric-zero ``timeout`` follow the server-default
+    path; negative, boolean, and non-finite values are rejected with the
+    unified ``invalid_request_error`` 400 naming the field.
 
 The schema-level normalization / rejection logic itself is unit-tested in
 ``tests/test_api_models.py`` (scalar-``stop`` acceptance + ``timeout``
@@ -110,11 +110,9 @@ def _completion_body(**kw) -> dict:
         ("completion_client", "/v1/completions", _completion_body),
     ],
 )
-@pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, -1.0])
-def test_nonpositive_timeout_400(request, client_name, url, body_fn, bad):
-    """A ``timeout <= 0`` must 400 with the unified envelope naming the
-    field (pre-fix it reached the route's timeout guard and fired an
-    instant 504)."""
+@pytest.mark.parametrize("bad", [-1, -0.5, -1.0, False, True])
+def test_negative_or_boolean_timeout_400(request, client_name, url, body_fn, bad):
+    """A malformed timeout must 400 with the unified envelope naming the field."""
     client = request.getfixturevalue(client_name)
     r = client.post(url, json=body_fn(timeout=bad))
     assert r.status_code == 400, (
@@ -123,6 +121,23 @@ def test_nonpositive_timeout_400(request, client_name, url, body_fn, bad):
     body = r.json()
     assert body["error"]["type"] == "invalid_request_error"
     assert "timeout" in body["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "client_name,url,body_fn",
+    [
+        ("chat_client", "/v1/chat/completions", _chat_body),
+        ("completion_client", "/v1/completions", _completion_body),
+    ],
+)
+@pytest.mark.parametrize("value", [0, 0.0])
+def test_zero_timeout_uses_server_default(request, client_name, url, body_fn, value):
+    """Zero is a compatibility sentinel, never a malformed request."""
+    client = request.getfixturevalue(client_name)
+    response = client.post(url, json=body_fn(timeout=value))
+
+    assert response.status_code != 400
+    assert "timeout" not in response.text.lower()
 
 
 @pytest.mark.parametrize(

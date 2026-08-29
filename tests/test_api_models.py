@@ -639,11 +639,16 @@ class TestTimeoutValidation:
     when it reaches the request-timeout guard in the routes."""
 
     @pytest.mark.parametrize("factory", [_chat, _completion])
-    @pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, -1.0])
+    @pytest.mark.parametrize("bad", [-1, -0.5, -1.0, False, True])
     def test_non_positive_rejected(self, factory, bad):
         with pytest.raises(ValidationError) as excinfo:
             factory(timeout=bad)
         assert "timeout" in str(excinfo.value)
+
+    @pytest.mark.parametrize("factory", [_chat, _completion])
+    @pytest.mark.parametrize("value", [0, 0.0])
+    def test_zero_normalizes_to_server_default(self, factory, value):
+        assert factory(timeout=value).timeout is None
 
     @pytest.mark.parametrize("factory", [_chat, _completion])
     @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
@@ -670,6 +675,15 @@ class TestStopAndTimeoutHelpers:
 
     def test_validate_timeout_none_passthrough(self):
         assert _validate_timeout(None) is None
+
+    def test_validate_timeout_zero_sentinel(self):
+        assert _validate_timeout(0) is None
+        assert _validate_timeout(0.0) is None
+
+    def test_validate_timeout_boolean_rejected(self):
+        for bad in (False, True):
+            with pytest.raises(ValueError, match="not a boolean"):
+                _validate_timeout(bad)
 
     def test_validate_timeout_nonfinite_rejected(self):
         for bad in (float("nan"), float("inf"), float("-inf")):

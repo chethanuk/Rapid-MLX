@@ -40,7 +40,7 @@ flag visible in `rapid-mlx serve --help`, grouped by category — lives in the
 | `--trusted-hosts` | Opt-in Host-header allowlist; non-matching requests get HTTP 400 | None (not enforced) |
 | `--rate-limit` | Requests per minute per client (0 = disabled) | 0 |
 | `--max-request-bytes` | Max HTTP request body size; oversized requests get HTTP 413 before parsing (0 disables) | 8 MiB (8388608) |
-| `--timeout` | Request timeout in seconds | 1800 |
+| `--timeout` | Default request timeout in seconds; per-request `timeout: null` or `timeout: 0` uses this value | 1800 |
 | `--max-num-seqs` | Max concurrent sequences | 256 |
 | `--max-concurrent-requests` | Admission cap on in-flight requests (queued + running); excess requests get HTTP 503 with `Retry-After` | 256 |
 | `--prefill-batch-size` | Max prompts prefilled together in one cold wave; lower for better first-token latency under concurrent cold load | 8 |
