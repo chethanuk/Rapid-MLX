@@ -505,6 +505,37 @@ class TestGuidedGenerator:
 
         assert generator._get_lltokenizer() is not None
 
+    @requires_guided
+    def test_passes_inner_hf_tokenizer_not_forwarding_wrapper(self, monkeypatch):
+        """A wrapper can proxy the fast-tokenizer attributes to its inner.
+
+        Shape detection must still pass the actual HF tokenizer to the grammar
+        adapter; selecting the proxy regresses the standard loader path.
+        """
+        import vllm_mlx.api.guided as guided
+
+        tokenizer = _build_byte_level_fast_tokenizer()
+
+        class _ForwardingWrapper:
+            def __init__(self, inner):
+                self._tokenizer = inner
+
+            def __getattr__(self, name):
+                return getattr(self._tokenizer, name)
+
+        captured = []
+        sentinel = object()
+
+        def _from_tokenizer(candidate):
+            captured.append(candidate)
+            return sentinel
+
+        monkeypatch.setattr(guided._llguidance_hf, "from_tokenizer", _from_tokenizer)
+        generator = guided.GuidedGenerator(object(), _ForwardingWrapper(tokenizer))
+
+        assert generator._get_lltokenizer() is sentinel
+        assert captured == [tokenizer]
+
 
 # ---------------------------------------------------------------------------
 # Real-llguidance constrained decode over a fake model

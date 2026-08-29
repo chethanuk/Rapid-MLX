@@ -272,7 +272,13 @@ class GuidedGenerator:
         # lower-level Rust object, which llguidance.hf intentionally rejects.
         # Normalize both supported shapes to the HF wrapper that owns
         # ``backend_tokenizer``.
-        candidates = (self._tokenizer, getattr(self._tokenizer, "_tokenizer", None))
+        # Prefer the inner object: mlx_lm's wrapper forwards unknown
+        # attributes, so probing the wrapper first can make it masquerade as
+        # the HF tokenizer even though llguidance requires the HF object
+        # itself. For a directly returned HF tokenizer the inner object is a
+        # raw Rust tokenizer and fails the shape check, so the outer object is
+        # selected next.
+        candidates = (getattr(self._tokenizer, "_tokenizer", None), self._tokenizer)
         hf_tok = next(
             (
                 candidate
