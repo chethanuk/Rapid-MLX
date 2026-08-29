@@ -22,12 +22,17 @@ On a self-hosted Mac, prepare the host once as an administrator:
 
 ```sh
 sudo DevToolsSecurity -enable
-/usr/bin/automationmodetool enable-automationmode-without-authentication
+sudo /usr/bin/automationmodetool enable-automationmode-without-authentication
 ```
 
-The second command is Apple's CI/lab mechanism for preventing an unattended
-test from waiting on the recurring UI Automation password prompt. The Actions
-runner must also execute inside a logged-in Aqua session. The test runner checks
+The second command is Apple's machine-level CI/lab mechanism for allowing
+XCTest to enable Automation Mode without an interactive administrator prompt.
+It configures authentication policy; it does not itself force Automation Mode
+on. Start one UI test from the logged-in Aqua session after provisioning, then
+run `/usr/bin/automationmodetool` and verify that it reports `ENABLED`. If the
+first test still times out and the status remains disabled, restart that GUI
+login session before registering or starting the runner. The Actions runner
+must also execute inside that logged-in Aqua session. The test runner checks
 all three conditions before compiling so host configuration failures do not
 consume the GUI lane.
 

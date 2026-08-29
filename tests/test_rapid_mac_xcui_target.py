@@ -162,8 +162,7 @@ def test_xcui_runner_launches_production_bundle_with_fake_sidecar():
     assert "DevToolsSecurity -status" in runner
     assert 'launchctl print "gui/$(id -u)"' in runner
     assert "/usr/bin/automationmodetool" in runner
-    assert "sudo automationmodetool" not in runner
-    assert "do not use sudo" in runner
+    assert "sudo /usr/bin/automationmodetool" in runner
     assert "enable-automationmode-without-authentication" in runner
     assert "exit 124" in runner
     assert "process-tree.txt" in runner
