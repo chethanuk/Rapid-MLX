@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.requires_mlx
+
 from vllm_mlx.prefix_cache import (
     CacheEntry,
     PrefixCacheManager,

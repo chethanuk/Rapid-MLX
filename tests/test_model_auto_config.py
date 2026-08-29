@@ -5,6 +5,8 @@ from unittest import mock
 
 import pytest
 
+pytestmark = pytest.mark.requires_mlx
+
 from vllm_mlx import model_auto_config as auto_config_mod
 from vllm_mlx.model_auto_config import (
     ModelConfig,

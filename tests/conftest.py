@@ -22,7 +22,7 @@ import pytest
 # documentation in pytest.ini and the auto-skip in ``pytest_collection_modifyitems``
 # below for how this flips the no-MLX leg onto the marker mechanism.
 try:
-    import mlx  # noqa: F401  (probe only)
+    import mlx.core as _mlx_core  # noqa: F401  (probe only)
 
     HAS_MLX = True
 except Exception:  # noqa: BLE001 - mlx is optional; absent/failing == unavailable

@@ -1,34 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Contract: the no-MLX CI leg never collects a test module that crashes on
-an unguarded top-level ``import mlx``.
+"""Contracts for automatic no-MLX Linux test discovery.
 
-The Linux test-matrix step ("Run unit tests (no MLX required)") runs a roster
-of tests on a host where mlx (the Apple-Silicon runtime) is NOT installed. Its
-comment demands every collected module be no-MLX-safe. Over time that roster is
-hand-edited, and a file dropped into it that does an unguarded top-level
-``import mlx`` (directly, or via ``mlx_lm`` / ``mlx_core`` / ``mlx_vlm``) makes
-the whole leg fail at collection. This test is the machine-readable tripwire
-for that exact failure mode.
+The Linux matrix intentionally installs Rapid-MLX without its Apple-only MLX
+dependencies, then discovers the unit suite by directory. A module that needs
+MLX owns that fact next to the test: it carries ``requires_mlx`` and guards
+collection with ``pytest.importorskip("mlx")`` before importing MLX-bound code.
+This keeps new cross-platform tests enrolled automatically without maintaining
+a second list in the workflow.
 
-It is deliberately an AST scan rather than an import check: importing every
-roster file in-process to see whether it pulls mlx would itself require mlx on
-the Apple side and would run arbitrary test-module code during collection of
-THIS suite. An AST pass is pure-stdlib, runs on the no-MLX leg, and inspects
-only module-scope imports — the ones that crash collection. Imports nested
-inside function bodies cannot crash the leg at collection (they only run when
-their test runs, and such tests guard themselves), so they are intentionally
-not flagged: that keeps the contract free of false positives.
-
-The marker mechanism interacts with this as the companion piece:
-``tests/conftest.py`` auto-skips any test marked ``requires_mlx`` when mlx is
-absent. A module that imports mlx LAZILY (inside functions) and is marked
-``requires_mlx`` therefore drops out cleanly on the no-MLX leg. But a module
-with an UNGUARDED top-level ``import mlx`` fails collection *before* the
-conftest skip can run, so such a module must instead protect itself with a
-top-level ``pytest.importorskip("mlx")`` (which short-circuits collection) or
-simply not be collected on the no-MLX leg. This test enforces those rules.
-
-Pure-pytest, Linux-friendly, no MLX import (stdlib ``ast`` only).
+The AST pass is deliberately limited to module-scope MLX imports. It does not
+execute test modules and therefore remains safe in the no-MLX lane. The live
+``pytest --collect-only``/unit run remains the authoritative check for
+transitive imports through Rapid-MLX modules.
 """
 
 from __future__ import annotations
@@ -36,129 +19,141 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from scripts.train_gates_parser import parse_linux_pytest_args
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-# Any top-level import whose base module is (or begins with) one of these is a
-# no-MLX-leg import hazard. ``mlx_*`` and ``mlx_lm`` cover the MLX family; a
-# bare ``mlx`` import is the canonical case. Everything else (`transformers`,
-# `numpy`, `vllm_mlx` itself) does not require mlx at import time.
 _MLX_MODULE_PREFIXES = ("mlx", "mlx.", "mlx_lm", "mlx_core", "mlx_vlm")
+_NON_UNIT_ROOTS = {
+    REPO_ROOT / "tests" / "integrations",
+    REPO_ROOT / "tests" / "headless_mlx",
+}
 
 
-def _module_scope_mlx_imports(tree: ast.AST) -> list[str]:
-    """Return the mlx-bound names imported at MODULE scope (top level)."""
+def _module_scope_mlx_imports(tree: ast.Module) -> list[str]:
+    """Return MLX-family names imported at module scope."""
     imports: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.startswith(_MLX_MODULE_PREFIXES):
-                    imports.append(alias.name)
+            imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name.startswith(_MLX_MODULE_PREFIXES)
+            )
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             if node.module.startswith(_MLX_MODULE_PREFIXES):
                 imports.append(node.module)
     return imports
 
 
-def _has_module_scope_guard(tree: ast.AST) -> bool:
-    """True if the module self-guards at top level with importorskip('mlx').
-
-    ``pytest.importorskip("mlx")`` at module scope aborts collection cleanly
-    when mlx is absent, so a module that calls it (before any unguarded mlx
-    import) is no-MLX-leg-safe even though it references mlx. We match the
-    exact idiomatic form ``pytest.importorskip("mlx")`` at top level.
-    """
+def _has_module_scope_guard(tree: ast.Module) -> bool:
+    """Return whether ``importorskip`` precedes every top-level MLX import."""
+    mlx_import_lines = [
+        node.lineno
+        for node in tree.body
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name.startswith(_MLX_MODULE_PREFIXES) for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith(_MLX_MODULE_PREFIXES)
+        )
+    ]
+    if not mlx_import_lines:
+        return False
+    first_mlx_import = min(mlx_import_lines)
     for node in tree.body:
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            call = node.value
-            if (
-                isinstance(call.func, ast.Attribute)
-                and call.func.attr == "importorskip"
-                and call.args
-                and isinstance(call.args[0], ast.Constant)
-                and call.args[0].value in ("mlx", "mlx.core")
-            ):
-                return True
+        value = node.value if isinstance(node, (ast.Expr, ast.Assign)) else None
+        if not isinstance(value, ast.Call):
+            continue
+        call = value
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "importorskip"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+            and call.args[0].value.startswith(("mlx", "mlx_lm", "mlx_vlm"))
+            and node.lineno < first_mlx_import
+        ):
+            return True
     return False
 
 
-def _has_module_scope_requires_mlx_marker(tree: ast.AST) -> bool:
-    """True if the module carries ``pytestmark = pytest.mark.requires_mlx``.
+def _is_requires_mlx_marker(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "requires_mlx"
 
-    A module that marks itself ``requires_mlx`` but still does an unguarded
-    top-level ``import mlx`` will still fail COLLECTION on the no-MLX leg (the
-    conftest skip runs after collection), so this exemption is only meaningful
-    when combined with a lazy import or a self-guard. We still treat it as an
-    explicit author signal and exempt it — mirroring the "must be marked
-    requires_mlx" escape hatch the design documents — but the stronger,
-    actually-correct protection for a top-level importer is ``importorskip``.
+
+def _has_module_scope_requires_mlx_marker(tree: ast.Module) -> bool:
+    """Return whether the effective module-level marker includes MLX.
+
+    Python assignment semantics matter: a later ``pytestmark = ...`` replaces
+    an earlier one. Inspect only the final assignment so a duplicate cannot
+    silently erase ``requires_mlx`` and put the module back into Linux CI.
     """
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            value = node.value
-            if not (isinstance(target, ast.Name) and target.id == "pytestmark"):
-                continue
-            # ``pytestmark = pytest.mark.requires_mlx``
-            if isinstance(value, ast.Attribute) and value.attr == "requires_mlx":
-                return True
-            # ``pytestmark = [pytest.mark.requires_mlx]`` (a marker list)
-            if (
-                isinstance(value, ast.List)
-                and value.elts
-                and all(
-                    isinstance(e, ast.Attribute) and e.attr == "requires_mlx"
-                    for e in value.elts
-                )
-            ):
-                return True
+    assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "pytestmark"
+    ]
+    if not assignments:
+        return False
+    value = assignments[-1].value
+    if _is_requires_mlx_marker(value):
+        return True
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return any(_is_requires_mlx_marker(item) for item in value.elts)
     return False
 
 
-def _no_mlx_leg_test_files() -> list[Path]:
-    """The concrete test paths the no-MLX CI leg actually collects.
-
-    Sourced from ci.yml via the shared parser rather than hardcoded here, so a
-    change to the roster (adding/removing a file, or collapsing a block) is
-    automatically picked up — the same single source of truth the local
-    ``train_gates.sh`` Gate 1 uses. Keeping this contract on the LEG's actual
-    surface (not the whole tests/ tree) is what makes it free of false
-    positives: the thousands of mlx-bound tests that never run on the no-MLX
-    leg are intentionally out of scope here.
-    """
+def _ordinary_test_files() -> list[Path]:
+    """Return every test module owned by the automatic Linux unit surface."""
     files: list[Path] = []
-    for invocation in parse_linux_pytest_args():
-        for token in invocation["paths"]:
-            # Strip any ``::Class::test`` selector down to the file path.
-            file_part = token.split("::", 1)[0]
-            files.append(REPO_ROOT / file_part)
+    for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
+        if any(root in path.parents for root in _NON_UNIT_ROOTS):
+            continue
+        files.append(path)
     return files
 
 
 def _lint_one(path: Path) -> list[str]:
     tree = ast.parse(path.read_text())
+    imports = _module_scope_mlx_imports(tree)
+    if not imports:
+        return []
+
     problems: list[str] = []
-    mlx_imports = _module_scope_mlx_imports(tree)
-    if not mlx_imports:
-        return problems
-    guarded = _has_module_scope_guard(tree)
-    marked = _has_module_scope_requires_mlx_marker(tree)
-    if not (guarded or marked):
+    if not _has_module_scope_guard(tree):
         problems.append(
-            f"{path.name}: unguarded top-level mlx import(s) {mlx_imports}; "
-            "this crashes collection on the no-MLX Linux leg. Guard with a "
-            'top-level ``pytest.importorskip("mlx")`` before the import, or '
-            "mark the module ``pytestmark = pytest.mark.requires_mlx`` "
-            "(lazy imports + marker), or take it off the no-MLX roster."
+            f"{path.relative_to(REPO_ROOT)}: top-level MLX import(s) {imports} "
+            "must be preceded by pytest.importorskip('mlx') so collection "
+            "succeeds when MLX is unavailable"
+        )
+    if not _has_module_scope_requires_mlx_marker(tree):
+        problems.append(
+            f"{path.relative_to(REPO_ROOT)}: MLX-bound module must declare "
+            "pytest.mark.requires_mlx"
         )
     return problems
 
 
+def _linux_run_text() -> str:
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["test-matrix"]["steps"]
+    return next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Run unit tests (no MLX required)"
+    )
+
+
 def test_contract_rules_are_loaded() -> None:
-    # Guard the marker + conftest mechanism exists; if the marker were renamed
-    # or the conftest auto-skip removed, this contract still names the escape
-    # hatches consistently and should fail loudly rather than silently rot.
     ini = (REPO_ROOT / "pytest.ini").read_text()
     assert "requires_mlx" in ini
     conftest = (REPO_ROOT / "tests" / "conftest.py").read_text()
@@ -167,44 +162,70 @@ def test_contract_rules_are_loaded() -> None:
     assert "pytest_collection_modifyitems" in conftest
 
 
-def test_no_mlx_leg_contract() -> None:
-    # Every file the no-MLX leg collects must be no-MLX-safe at module scope:
-    # either it imports nothing mlx-bound at top level, or it self-guards via
-    # importorskip / declares requires_mlx. A violation is a latent no-MLX-leg
-    # collection crash — this test turns it into a hard PR-time failure.
-    files = _no_mlx_leg_test_files()
-    assert files, "no-MLX leg surfaced no test files; ci.yml layout drifted"
+def test_every_direct_mlx_import_is_guarded_and_marked() -> None:
+    files = _ordinary_test_files()
+    assert len(files) > 500, "automatic test discovery unexpectedly collapsed"
+    problems = [problem for path in files for problem in _lint_one(path)]
+    assert not problems, "no-MLX collection contract violations:\n" + "\n".join(
+        problems
+    )
+
+
+def test_module_level_pytestmark_is_never_reassigned() -> None:
     problems: list[str] = []
-    for path in files:
-        assert path.is_file(), f"no-MLX leg references missing file: {path}"
-        try:
-            problems.extend(_lint_one(path))
-        except SyntaxError as exc:  # pragma: no cover - defensive
-            problems.append(f"{path}: could not parse ({exc})")
-    assert not problems, "no-MLX leg contract violations:\n" + "\n".join(problems)
+    for path in _ordinary_test_files():
+        tree = ast.parse(path.read_text())
+        assignments = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in node.targets
+            )
+        ]
+        if len(assignments) > 1:
+            problems.append(
+                f"{path.relative_to(REPO_ROOT)}: duplicate pytestmark "
+                "assignments overwrite earlier markers"
+            )
+    assert not problems, "pytest marker override hazards:\n" + "\n".join(problems)
 
 
-def test_contract_handles_marked_and_guarded_patterns() -> None:
-    # Meta-test: exercise the two exemption paths on tiny synthetic snippets so
-    # the AST logic is pinned (a regression in the scanner itself cannot be
-    # masked by an empty real-world roster).
-    guarded = "import pytest\npytest.importorskip('mlx')\nimport numpy as np\n"
-    tree = ast.parse(guarded)
-    assert _module_scope_mlx_imports(tree) == []
-    # Clearing: importorskip itself is not an import node; a bare mlx import
-    # after a guard is what the guard protects.
-    mixed = "import pytest\npytest.importorskip('mlx')\nimport mlx.core as mc\n"
-    tree = ast.parse(mixed)
+def test_linux_workflow_uses_directories_not_a_file_roster() -> None:
+    run = _linux_run_text()
+    assert "pytest \\\n  tests \\" in run
+    assert "--ignore=tests/integrations" in run
+    assert "--ignore=tests/headless_mlx" in run
+    assert "pytest \\\n  tests/headless_mlx \\" in run
+    assert "tests/test_" not in run
+    assert (
+        '-m "not requires_mlx and not slow and not integration and not needle"' in run
+    )
+
+
+def test_contract_recognizes_guard_and_composed_marker() -> None:
+    tree = ast.parse(
+        "import pytest\n"
+        "pytest.importorskip('mlx')\n"
+        "pytestmark = [pytest.mark.property, pytest.mark.requires_mlx]\n"
+        "import mlx.core as mx\n"
+    )
     assert _module_scope_mlx_imports(tree) == ["mlx.core"]
-    assert _has_module_scope_guard(tree) is True
-    assert _has_module_scope_requires_mlx_marker(tree) is False
+    assert _has_module_scope_guard(tree)
+    assert _has_module_scope_requires_mlx_marker(tree)
 
-    marked = "import pytest\npytestmark = pytest.mark.requires_mlx\n"
-    tree = ast.parse(marked)
-    assert _has_module_scope_requires_mlx_marker(tree) is True
+    overridden = ast.parse(
+        "import pytest\n"
+        "pytestmark = pytest.mark.requires_mlx\n"
+        "pytestmark = pytest.mark.slow\n"
+    )
+    assert not _has_module_scope_requires_mlx_marker(overridden)
 
-    plain = "import os\n"
-    tree = ast.parse(plain)
-    assert _module_scope_mlx_imports(tree) == []
-    assert _has_module_scope_guard(tree) is False
-    assert _has_module_scope_requires_mlx_marker(tree) is False
+    late_guard = ast.parse(
+        "import pytest\n"
+        "import mlx.core as mx\n"
+        "pytest.importorskip('mlx')\n"
+        "pytestmark = pytest.mark.requires_mlx\n"
+    )
+    assert not _has_module_scope_guard(late_guard)

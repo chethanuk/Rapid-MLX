@@ -22,6 +22,8 @@ from unittest import mock
 
 import pytest
 
+pytestmark = pytest.mark.requires_mlx
+
 import vllm_mlx.cli as cli
 
 # Bind the real engine_core on MLX hosts before any test patches scheduler

@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.requires_mlx
+
 from vllm_mlx import cli
 
 # ---------------------------------------------------------------------------

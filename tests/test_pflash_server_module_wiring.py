@@ -33,6 +33,8 @@ from unittest import mock
 
 import pytest
 
+pytestmark = pytest.mark.requires_mlx
+
 
 class _StopError(Exception):
     """Short-circuit ``server.main()`` right after the PFlash step."""

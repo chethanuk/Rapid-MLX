@@ -76,9 +76,7 @@ def test_changed_lines_gate_unions_linux_and_apple_coverage() -> None:
     assert early_exit < union_check
 
 
-def test_linux_coverage_lane_declares_ci_linux_and_keeps_reasoning_template_tests_un_deselected() -> (
-    None
-):
+def test_linux_coverage_lane_declares_complete_ci_linux_discovery_surface() -> None:
     """#2445 / #2446 root cause was the undeclared ``jinja2`` dep on the Linux
     lane: ``_should_start_in_thinking`` renders chat templates via
     ``transformers.utils.chat_template_utils._compile_jinja_template``, which
@@ -86,8 +84,8 @@ def test_linux_coverage_lane_declares_ci_linux_and_keeps_reasoning_template_test
     line pulled it transitively. With jinja2 now declared in the ``[ci-linux]``
     extra, both formerly --deselect-ed tests run un-deselected.
 
-    The lane must stay no-MLX (Apple-Silicon-only; the roster NOTE "tests in
-    this list MUST not import mlx"), so the install is ``-e . --no-deps`` (the
+    The lane must stay no-MLX (Apple-Silicon-only), so the install is
+    ``-e . --no-deps`` (the
     base package's deps include mlx) + the extra's test deps from
     ``config/requirements-ci-linux.txt`` — never ``-e ".[ci-linux]"``, which
     would pull mlx onto Linux.
@@ -129,12 +127,14 @@ def test_linux_coverage_lane_declares_ci_linux_and_keeps_reasoning_template_test
     assert "ci-linux" in pyproject
     assert "jinja2" in pyproject
 
-    # The two reasoning-template tests run un-deselected (fixed by #2489).
+    # The two reasoning-template tests run through directory discovery; no
+    # hand-maintained per-file roster or deselection can silently drop them.
     assert "--deselect=" not in run
-    # Their files remain in the lane's roster so the coverage union runs them.
-    roster = [line.strip().rstrip(" \\") for line in run.splitlines() if line.strip()]
-    assert "tests/test_cohere_command_reasoning_parser.py" in roster
-    assert "tests/test_postprocessor.py" in roster
+    assert "tests/test_" not in run
+    assert "pytest \\\n  tests \\" in run
+    assert (
+        '-m "not requires_mlx and not slow and not integration and not needle"' in run
+    )
 
 
 def test_apple_coverage_roster_contains_only_tracked_tests() -> None:
