@@ -42,6 +42,46 @@
         }
       }
     },
+    "speculative_status.pending" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 正在启动"
+          }
+        }
+      }
+    },
+    "speculative_status.pending.help" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已配置。Rapid-MLX 将在生成开始时确认运行状态。"
+          }
+        }
+      }
+    },
+    "speculative_status.unavailable" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 不可用"
+          }
+        }
+      }
+    },
+    "speculative_status.unavailable.help" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已被请求，但无法安装其运行时挂钩。此模型正使用普通解码。"
+          }
+        }
+      }
+    },
     "Send a message…" : {
       "localizations" : {
         "zh-Hans" : {

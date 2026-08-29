@@ -42,7 +42,11 @@ def test_other_speculative_methods_do_not_inherit_mtp_tool_policy():
 def test_model_profile_reads_policy_from_matching_live_scheduler(monkeypatch):
     from vllm_mlx.routes import models as models_route
 
-    scheduler = SimpleNamespace(spec_decode_runtime_method="mtp")
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(spec_decode="mtp"),
+        spec_decode_runtime_method="mtp",
+        spec_decode_runtime_attempted=True,
+    )
     engine = object()
     monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: engine)
     monkeypatch.setattr(models_route, "_scheduler_of", lambda candidate: scheduler)
@@ -52,15 +56,17 @@ def test_model_profile_reads_policy_from_matching_live_scheduler(monkeypatch):
     assert info is not None
     assert info.configured is True
     assert info.method == "mtp"
+    assert info.runtime_state == "active"
     assert info.request_fallback_features == ["tools"]
     assert info.model_dump() == {
         "configured": True,
         "method": "mtp",
+        "runtime_state": "active",
         "request_fallback_features": ["tools"],
     }
 
 
-def test_model_profile_does_not_advertise_requested_but_uninstalled_method(
+def test_model_profile_reports_pending_before_lazy_runtime_install(
     monkeypatch,
 ):
     from vllm_mlx.routes import models as models_route
@@ -68,12 +74,36 @@ def test_model_profile_does_not_advertise_requested_but_uninstalled_method(
     scheduler = SimpleNamespace(
         config=SimpleNamespace(spec_decode="mtp"),
         spec_decode_runtime_method=None,
+        spec_decode_runtime_attempted=False,
     )
     engine = object()
     monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: engine)
     monkeypatch.setattr(models_route, "_scheduler_of", lambda candidate: scheduler)
 
-    assert models_route._resolve_speculative_decoding("served-model") is None
+    info = models_route._resolve_speculative_decoding("served-model")
+
+    assert info is not None
+    assert info.runtime_state == "pending"
+
+
+def test_model_profile_reports_unavailable_after_runtime_install_gate_miss(
+    monkeypatch,
+):
+    from vllm_mlx.routes import models as models_route
+
+    scheduler = SimpleNamespace(
+        config=SimpleNamespace(spec_decode="mtp"),
+        spec_decode_runtime_method=None,
+        spec_decode_runtime_attempted=True,
+    )
+    engine = object()
+    monkeypatch.setattr(models_route, "_engine_for", lambda _model_id: engine)
+    monkeypatch.setattr(models_route, "_scheduler_of", lambda candidate: scheduler)
+
+    info = models_route._resolve_speculative_decoding("served-model")
+
+    assert info is not None
+    assert info.runtime_state == "unavailable"
 
 
 @pytest.mark.parametrize(
@@ -120,6 +150,7 @@ def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
     scheduler.uid_to_request_id = {}
     scheduler.uid_to_request_processors = {}
     scheduler.spec_decode_runtime_method = "stale"
+    scheduler.spec_decode_runtime_attempted = True
     scheduler._get_stop_tokens = lambda: set()
     scheduler.config = SimpleNamespace(
         prefill_batch_size=1,
@@ -140,6 +171,7 @@ def test_scheduler_publishes_only_a_successfully_installed_mtp_runtime(
 
     assert created is batch_generator
     assert scheduler.spec_decode_runtime_method == expected_method
+    assert scheduler.spec_decode_runtime_attempted is True
 
 
 def test_closing_batch_generator_retires_published_speculative_runtime():
@@ -149,12 +181,14 @@ def test_closing_batch_generator_retires_published_speculative_runtime():
     scheduler = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
     scheduler.batch_generator = SimpleNamespace(close=lambda: closed.append(True))
     scheduler.spec_decode_runtime_method = "mtp"
+    scheduler.spec_decode_runtime_attempted = True
 
     scheduler._close_batch_generator()
 
     assert closed == [True]
     assert scheduler.batch_generator is None
     assert scheduler.spec_decode_runtime_method is None
+    assert scheduler.spec_decode_runtime_attempted is False
 
 
 def test_model_card_carries_live_speculative_policy(monkeypatch):
@@ -164,6 +198,7 @@ def test_model_card_carries_live_speculative_policy(monkeypatch):
     expected = SpeculativeDecodingInfo(
         configured=True,
         method="mtp",
+        runtime_state="active",
         request_fallback_features=["tools"],
     )
     monkeypatch.setattr(

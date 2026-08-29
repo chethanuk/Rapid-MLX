@@ -128,13 +128,14 @@ def _resolve_max_model_len(model_id: str, native_context: int | None) -> int | N
 def _resolve_speculative_decoding(
     model_id: str,
 ) -> SpeculativeDecodingInfo | None:
-    """Return live speculative configuration and request fallback features.
+    """Return configured speculative policy and its live runtime state.
 
-    The matching scheduler config is the source of truth. Discovery-only
-    aliases and engines whose scheduler is not yet attached return ``None``;
-    clients must never mistake a saved launch preference for live capability.
-    Any malformed or future runtime value degrades to ``None`` rather than
-    making model discovery fail.
+    The matching scheduler is the source of truth. Its configured method says
+    what the operator requested; the runtime method is published only after
+    the current BatchGenerator's installer succeeds. Discovery-only aliases
+    and engines whose scheduler is not yet attached return ``None``. Any
+    malformed or future value degrades to ``None`` rather than making model
+    discovery fail.
     """
 
     engine = _engine_for(model_id)
@@ -148,9 +149,13 @@ def _resolve_speculative_decoding(
             resolve_speculative_request_policy,
         )
 
-        policy = resolve_speculative_request_policy(
-            getattr(scheduler, "spec_decode_runtime_method", None)
-        )
+        config = getattr(scheduler, "config", None)
+        configured_method = getattr(config, "spec_decode", None)
+        if configured_method in (None, "none") and getattr(
+            config, "enable_suffix_decoding", False
+        ):
+            configured_method = "suffix"
+        policy = resolve_speculative_request_policy(configured_method)
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "speculative request policy probe failed for %s: %s",
@@ -161,9 +166,18 @@ def _resolve_speculative_decoding(
         return None
     if policy is None:
         return None
+    runtime_method = getattr(scheduler, "spec_decode_runtime_method", None)
+    attempted = getattr(scheduler, "spec_decode_runtime_attempted", False)
+    if runtime_method == policy.method:
+        runtime_state = "active"
+    elif attempted:
+        runtime_state = "unavailable"
+    else:
+        runtime_state = "pending"
     return SpeculativeDecodingInfo(
         configured=True,
         method=policy.method,
+        runtime_state=runtime_state,
         request_fallback_features=list(policy.request_fallback_features),
     )
 

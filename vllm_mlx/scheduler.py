@@ -3206,6 +3206,10 @@ class Scheduler:
         # read this live value so they never advertise an acceleration path that
         # silently fell back to ordinary decoding.
         self.spec_decode_runtime_method: str | None = None
+        # False until the current BatchGenerator has run the configured
+        # install gate. This distinguishes a lazy generator that has not been
+        # created yet from a definitive gate miss on an incompatible runtime.
+        self.spec_decode_runtime_attempted = False
 
         # Sampler cache: interns ``make_sampler`` results keyed on
         # ``(temp, top_p, min_p, top_k)``. Homogeneous concurrent
@@ -3762,6 +3766,7 @@ class Scheduler:
         # Publish nothing until one installer below has successfully attached
         # its runtime hooks to this exact generator.
         self.spec_decode_runtime_method = None
+        self.spec_decode_runtime_attempted = False
         sampler = make_sampler(
             temp=sampling_params.temperature,
             top_p=sampling_params.top_p,
@@ -3891,6 +3896,7 @@ class Scheduler:
                 )
                 if mtp_installed:
                     self.spec_decode_runtime_method = "mtp"
+            self.spec_decode_runtime_attempted = True
 
         if getattr(self.config, "spec_decode", "none") == "dspark":
             if _install_dspark(
@@ -3901,6 +3907,7 @@ class Scheduler:
                 max_draft=getattr(self.config, "dspark_num_speculative_tokens", 5),
             ):
                 self.spec_decode_runtime_method = "dspark"
+            self.spec_decode_runtime_attempted = True
 
         # Install SuffixDecoding (drafter-free spec-decode).
         if self.config.enable_suffix_decoding:
@@ -3916,6 +3923,7 @@ class Scheduler:
                 uid_to_request_id=self.uid_to_request_id,
             ):
                 self.spec_decode_runtime_method = "suffix"
+            self.spec_decode_runtime_attempted = True
 
         # Install batched-sampler fast path. Must run AFTER MTP /
         # SuffixDecoding since they may replace _step on the
@@ -4212,6 +4220,7 @@ class Scheduler:
         # state even when close() raised; a replacement will republish only
         # after its own installer succeeds.
         self.spec_decode_runtime_method = None
+        self.spec_decode_runtime_attempted = False
 
     def _ensure_batch_generator(self, sampling_params: SamplingParams) -> bool:
         """Ensure BatchGenerator exists with compatible stop token configuration.

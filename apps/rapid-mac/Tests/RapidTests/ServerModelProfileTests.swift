@@ -50,6 +50,7 @@ final class ServerModelProfileTests {
           "speculative_decoding": {
             "configured": true,
             "method": "mtp",
+            "runtime_state": "active",
             "request_fallback_features": ["tools"]
           },
           "modality": "text"
@@ -73,8 +74,10 @@ final class ServerModelProfileTests {
         #expect(profile.speculativeDecoding == ServerSpeculativeDecoding(
             configured: true,
             method: "mtp",
+            runtimeState: .active,
             requestFallbackFeatures: ["tools"]
         ))
+        #expect(!profile.needsLiveProfileRefresh)
         #expect(profile.modality == "text")
     }
 
@@ -113,6 +116,7 @@ final class ServerModelProfileTests {
                 speculativeDecoding: ServerSpeculativeDecoding(
                     configured: true,
                     method: "mtp",
+                    runtimeState: .active,
                     requestFallbackFeatures: ["tools"]
                 )
             ),
@@ -131,6 +135,7 @@ final class ServerModelProfileTests {
                 speculativeDecoding: ServerSpeculativeDecoding(
                     configured: true,
                     method: "mtp",
+                    runtimeState: .active,
                     requestFallbackFeatures: ["tools"]
                 )
             ),
@@ -148,6 +153,7 @@ final class ServerModelProfileTests {
                 speculativeDecoding: ServerSpeculativeDecoding(
                     configured: true,
                     method: "future",
+                    runtimeState: .active,
                     requestFallbackFeatures: []
                 )
             ),
@@ -168,11 +174,67 @@ final class ServerModelProfileTests {
                 speculativeDecoding: ServerSpeculativeDecoding(
                     configured: false,
                     method: "mtp",
+                    runtimeState: .active,
                     requestFallbackFeatures: ["tools"]
                 )
             ),
             sendsTools: true
         ) == nil)
+    }
+
+    @Test("A lazy plain runtime is pending without claiming acceleration")
+    func speculativeStatusPendingBeforeInstall() {
+        let profile = ServerModelProfile(
+            id: "model",
+            speculativeDecoding: ServerSpeculativeDecoding(
+                configured: true,
+                method: "mtp",
+                runtimeState: .pending,
+                requestFallbackFeatures: ["tools"]
+            )
+        )
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: profile,
+            sendsTools: false
+        )
+        #expect(availability?.state == .pending)
+        #expect(profile.needsLiveProfileRefresh)
+    }
+
+    @Test("A failed runtime install says unavailable, not ready")
+    func speculativeStatusUnavailableAfterInstallMiss() {
+        let profile = ServerModelProfile(
+            id: "model",
+            speculativeDecoding: ServerSpeculativeDecoding(
+                configured: true,
+                method: "mtp",
+                runtimeState: .unavailable,
+                requestFallbackFeatures: ["tools"]
+            )
+        )
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: profile,
+            sendsTools: false
+        )
+        #expect(availability?.state == .unavailable)
+        #expect(!profile.needsLiveProfileRefresh)
+    }
+
+    @Test("Tools announce ordinary decode even before lazy MTP install")
+    func speculativeStatusPendingToolsArePaused() {
+        let availability = SpeculativeDecodingAvailability.resolve(
+            profile: ServerModelProfile(
+                id: "model",
+                speculativeDecoding: ServerSpeculativeDecoding(
+                    configured: true,
+                    method: "mtp",
+                    runtimeState: .pending,
+                    requestFallbackFeatures: ["tools"]
+                )
+            ),
+            sendsTools: true
+        )
+        #expect(availability?.state == .pausedByTools)
     }
 
     @Test("Live text lane overrides a vision-capable catalog and explains why")
@@ -383,6 +445,13 @@ final class ServerModelProfileTests {
                 range: residencyRefresh.lowerBound..<source.endIndex
             )
         )
+        let pendingRuntimeRetry = try #require(
+            source.range(
+                of: "profile?.needsLiveProfileRefresh == true",
+                range: residencyRefresh.lowerBound..<retry.lowerBound
+            )
+        )
+        #expect(pendingRuntimeRetry.lowerBound > residencyRefresh.lowerBound)
         #expect(retry.lowerBound > residencyRefresh.lowerBound)
     }
 

@@ -2468,7 +2468,9 @@ class CompletionResponse(BaseModel):
 class SpeculativeDecodingInfo(BaseModel):
     """Live speculative-decoding state for one served model.
 
-    ``configured`` describes the engine session. Request features in
+    ``configured`` describes the engine session. ``runtime_state`` separates
+    a lazy generator that has not run its install gate from a successfully
+    attached hook and a definitive gate miss. Request features in
     ``request_fallback_features`` remain fully supported, but use ordinary
     decoding because their stateful generation constraints cannot yet cross
     speculative verification safely.
@@ -2476,6 +2478,7 @@ class SpeculativeDecodingInfo(BaseModel):
 
     configured: bool
     method: str | None = None
+    runtime_state: Literal["pending", "active", "unavailable"]
     request_fallback_features: list[Literal["tools"]] = Field(default_factory=list)
 
 
