@@ -5434,7 +5434,7 @@ flow_dictation() {
     done
     [[ "$listening_after_relaunch" == 1 ]] \
         || die "Dictation did not finish restoring after relaunch"
-    local crash_pid crash_command starts_before_foreground
+    local crash_pid crash_command audio_starts_before_foreground
     crash_pid="$(jq -rs 'map(select(.event == "server_started" and .alias == "fake-alias"))
                          | last | .pid // empty' "$OUT/fake-events.jsonl")"
     [[ "$crash_pid" =~ ^[0-9]+$ ]] || die "Dictation crash fixture has no owned sidecar pid"
@@ -5442,7 +5442,8 @@ flow_dictation() {
     [[ "$crash_command" == *"serve fake-alias"* ]] \
         || die "Dictation crash fixture refused to signal an unowned process"
     local paused_seen=0
-    starts_before_foreground="$(jq -rs 'map(select(.event == "server_started")) | length' \
+    audio_starts_before_foreground="$(jq -rs \
+        'map(select(.event == "server_started" and .alias == "fake-whisper-small")) | length' \
         "$OUT/fake-events.jsonl")"
     osascript - "$APP_PID" > "$OUT/dictation-background.json" <<'APPLESCRIPT'
 on run argv
@@ -5462,9 +5463,6 @@ on run argv
     return "{\"success\":true,\"method\":\"frontmost-after-crash\"}"
 end run
 APPLESCRIPT
-    [[ "$(jq -rs 'map(select(.event == "server_started")) | length' \
-            "$OUT/fake-events.jsonl")" == "$starts_before_foreground" ]] \
-        || die "Foreground activation silently restarted a Dictation sidecar"
     for ((i=0; i<10; i++)); do
         see_main "$OUT/dictation-after-foreground.json"
         if jq -e '.data.ui_elements[]?
@@ -5478,6 +5476,17 @@ APPLESCRIPT
     done
     [[ "$paused_seen" == 1 ]] \
         || die "Foreground activation hid the explicit Dictation reconnect action"
+    # Observe beyond the activation itself instead of taking one instant
+    # sample. The expected chat auto-respawn may start fake-alias during this
+    # window; only a transcription-owned process proves the foreground path
+    # restarted Dictation behind the user's back.
+    for ((i=0; i<60; i++)); do
+        [[ "$(jq -rs \
+                'map(select(.event == "server_started" and .alias == "fake-whisper-small")) | length' \
+                "$OUT/fake-events.jsonl")" == "$audio_starts_before_foreground" ]] \
+            || die "Foreground activation silently restarted a Dictation sidecar"
+        sleep 0.05
+    done
 
     log "  setup controls, privacy toggle, vocabulary, co-loaded warmup, relaunch, preserved chat, and foreground-after-crash produced effects"
     log "  dictation OK"

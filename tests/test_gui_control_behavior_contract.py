@@ -302,9 +302,10 @@ def test_dictation_journey_proves_loading_before_ready():
     assert '.event == "audio_transcription"' in flow
     # The status filter used to read readiness text off a control description.
     assert '(.description // .value // .label // "")' in flow
-    # The two required observed states feed the executable failure helper;
-    # later lifecycle checks are allowed to observe additional states.
-    assert flow.count('select(.identifier == "Dictation.Status"') >= 2
+    # Pin the two required predicates themselves. A later lifecycle assertion
+    # cannot keep this contract green if either loading or ready disappears.
+    assert 'contains("Loading fake-whisper-small into memory")' in flow
+    assert 'startswith("Listening — press")' in flow
     assert 'require_observed_phase "$loading_seen" loading' in flow
     assert 'require_observed_phase "$ready_seen" listening' in flow
 
