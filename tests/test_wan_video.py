@@ -95,6 +95,7 @@ def test_wan_wraps_non_utf8_config(monkeypatch, tmp_path) -> None:
 
 def test_wan_runtime_guard_checks_wan_module(monkeypatch, capsys) -> None:
     checked = []
+    monkeypatch.setattr(sys, "version_info", (3, 11))
 
     def fake_find_spec(module):
         checked.append(module)
@@ -109,6 +110,8 @@ def test_wan_runtime_guard_checks_wan_module(monkeypatch, capsys) -> None:
 
 
 def test_wan_runtime_guard_handles_missing_parent_package(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "version_info", (3, 11))
+
     def fake_find_spec(module):
         if module == "mlx_video":
             return None

@@ -55,6 +55,7 @@ def test_ltx23_model_discovery_is_video_shaped() -> None:
 def test_video_runtime_preflight_fails_before_download(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(video_lane.sys, "version_info", (3, 11))
     monkeypatch.setattr("importlib.util.find_spec", lambda _: None)
     monkeypatch.setattr("shutil.which", lambda _: None)
     monkeypatch.setattr(video_lane, "_FFMPEG_FALLBACK_PATHS", ())
