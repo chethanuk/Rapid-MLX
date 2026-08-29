@@ -4609,6 +4609,12 @@ final class ProcessGroupChild: @unchecked Sendable {
         exitSource = source
         lock.unlock()
         source.activate()
+
+        // Process sources are armed asynchronously. A very short-lived child
+        // can exit before the source begins observing it, so close that race
+        // with the same non-blocking reap used by the liveness probe. If the
+        // source won the race, `reapLock` makes this an exactly-once no-op.
+        _ = reapExitedProcess(waitOptions: WNOHANG)
     }
 
     /// Reap only after the process-exit source fires, so `waitpid` is no

@@ -68,7 +68,10 @@ struct ServerManagerStateTests {
         let stderr = Pipe()
         let child = try ProcessGroupChild.spawn(
             executableURL: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "exit 31"],
+            // Keep the child alive long enough for startMonitor's immediate
+            // WNOHANG race check to return without reaping. The callback must
+            // therefore arrive through the process exit source.
+            arguments: ["-c", "sleep 0.2; exit 31"],
             standardInput: .nullDevice,
             standardOutput: stdout,
             standardError: stderr
@@ -92,6 +95,43 @@ struct ServerManagerStateTests {
         #expect(child.terminationStatus == 31)
         // The transition is published exactly once by a single reaper.
         #expect(observations.snapshot == [31])
+        #expect(!child.isProcessGroupAlive)
+    }
+
+    @Test("Starting a monitor after a short-lived child exits still publishes termination")
+    func processExitBeforeSourceActivationIsReaped() async throws {
+        let observations = ExitObservationBox()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        let child = try ProcessGroupChild.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "exit 29"],
+            standardInput: .nullDevice,
+            standardOutput: stdout,
+            standardError: stderr,
+            startMonitorImmediately: false
+        ) { child in
+            observations.record(child.terminationStatus)
+        }
+        defer {
+            if child.isProcessGroupAlive {
+                child.signalProcessGroup(SIGKILL)
+            }
+        }
+
+        // Deliberately let the process exit before constructing its event
+        // source. Dispatch documents this creation race; startMonitor's
+        // post-activation WNOHANG reap must close it without a liveness poll.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        child.startMonitor()
+
+        let exited = await waitUntil(deadline: Date().addingTimeInterval(3)) {
+            !observations.snapshot.isEmpty
+        }
+        #expect(exited)
+        #expect(!child.isRunning)
+        #expect(child.terminationStatus == 29)
+        #expect(observations.snapshot == [29])
         #expect(!child.isProcessGroupAlive)
     }
 
