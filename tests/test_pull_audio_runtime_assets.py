@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -157,7 +158,7 @@ def test_runtime_asset_failure_does_not_report_successful_pull(monkeypatch) -> N
 
 
 def test_runtime_requirement_failure_does_not_report_successful_pull(
-    monkeypatch,
+    monkeypatch, capsys
 ) -> None:
     activations = 0
 
@@ -166,7 +167,9 @@ def test_runtime_requirement_failure_does_not_report_successful_pull(
         runtime_requirements,
         "prepare_runtime_requirement",
         lambda requirement: (_ for _ in ()).throw(
-            RuntimeError("requirement preparation failed")
+            runtime_requirements.AudioRuntimePreparationError(
+                "required pipeline is unavailable"
+            )
         ),
     )
 
@@ -176,10 +179,50 @@ def test_runtime_requirement_failure_does_not_report_successful_pull(
 
     monkeypatch.setattr(cli, "_emit_pull_activation", fake_activation)
 
-    with pytest.raises(RuntimeError, match="requirement preparation failed"):
+    with pytest.raises(SystemExit) as excinfo:
         cli.pull_command(argparse.Namespace(model="mlx-community/Kokoro-82M-bf16"))
 
+    assert excinfo.value.code == 1
     assert activations == 0
+    output = capsys.readouterr().out
+    assert "Could not prepare audio runtime" in output
+    assert "rapid-mlx[audio]" in output
+    assert "rapid-mlx pull mlx-community/Kokoro-82M-bf16" in output
+
+
+def test_main_pull_requirement_failure_is_actionable_without_traceback(
+    monkeypatch, capsys
+) -> None:
+    requirement = registry.AudioRuntimeRequirement(
+        kind="spacy_pipeline", name="en_core_web_sm"
+    )
+    monkeypatch.setenv("RAPID_MLX_TELEMETRY", "0")
+    monkeypatch.setenv("RAPID_MLX_AUTO_PULL", "1")
+    monkeypatch.setattr(sys, "argv", ["rapid-mlx", "--no-telemetry", "pull", "kokoro"])
+    monkeypatch.setattr(cli, "_pull_repository", lambda *args, **kwargs: None)
+    monkeypatch.setattr(registry, "runtime_assets_for", lambda _name: ())
+    monkeypatch.setattr(
+        registry, "runtime_requirements_for", lambda _name: (requirement,)
+    )
+    monkeypatch.setattr(
+        runtime_requirements,
+        "prepare_runtime_requirement",
+        lambda _requirement: (_ for _ in ()).throw(
+            runtime_requirements.AudioRuntimePreparationError(
+                "Could not prepare required spaCy pipeline 'en_core_web_sm'"
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr().out
+    assert "Could not prepare audio runtime for 'kokoro'" in output
+    assert "rapid-mlx pull kokoro" in output
+    assert "rapid-mlx[audio]" in output
+    assert "Traceback" not in output
 
 
 def test_runtime_asset_uses_normal_filtered_download_pipeline(
