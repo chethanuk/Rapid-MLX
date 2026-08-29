@@ -145,27 +145,25 @@ enum TestSubprocess {
         let command = ([executableURL.path] + arguments).joined(separator: " ")
         Thread.detachNewThread {
             guard state.beginTimeoutIfIncomplete(after: timeout) else { return }
+            // Pipe ownership ends at the caller's deadline. In particular, a
+            // setsid() descendant cannot extend capture lifetime while process
+            // diagnostics and termination continue on this native thread.
+            stdoutCapture.cancel()
+            stderrCapture.cancel()
             if sampleOnTimeout {
                 sample(pid: spawnedPID, duration: sampleDuration, command: command)
             }
-            terminate(
-                pid: spawnedPID,
-                state: state,
-                stdoutCapture: stdoutCapture,
-                stderrCapture: stderrCapture
-            )
+            terminate(pid: spawnedPID)
+            state.timeoutCleanupFinished()
         }
 
         let exit = await withTaskCancellationHandler {
             await state.value()
         } onCancel: {
             Thread.detachNewThread {
-                terminate(
-                    pid: spawnedPID,
-                    state: state,
-                    stdoutCapture: stdoutCapture,
-                    stderrCapture: stderrCapture
-                )
+                terminate(pid: spawnedPID)
+                stdoutCapture.cancel()
+                stderrCapture.cancel()
             }
         }
         async let standardOutput = stdoutCapture.value()
@@ -217,23 +215,15 @@ enum TestSubprocess {
         }
     }
 
-    private static func terminate(
-        pid: pid_t,
-        state: TestProcessCompletionState,
-        stdoutCapture: AsyncPipeCapture,
-        stderrCapture: AsyncPipeCapture
-    ) {
+    private static func terminate(pid: pid_t) {
         signalProcessTree(pid: pid, signal: SIGTERM)
-        guard !state.waitForCompletion(seconds: 2) else { return }
-
-        signalProcessTree(pid: pid, signal: SIGKILL)
-
-        // A descendant can deliberately leave the process group (setsid) yet
-        // retain inherited stdout/stderr descriptors after the direct child
-        // is reaped. Closing our read ends makes timeout completion independent
-        // of that descendant and preserves the helper's hard upper bound.
-        stdoutCapture.cancel()
-        stderrCapture.cancel()
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while processTreeExists(pid: pid), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if processTreeExists(pid: pid) {
+            signalProcessTree(pid: pid, signal: SIGKILL)
+        }
     }
 
     private static func signalProcessTree(pid: pid_t, signal: Int32) {
@@ -242,6 +232,10 @@ enum TestSubprocess {
         // the waitpid thread a deterministic path to reap it.
         _ = Darwin.kill(-pid, signal)
         _ = Darwin.kill(pid, signal)
+    }
+
+    private static func processTreeExists(pid: pid_t) -> Bool {
+        Darwin.kill(-pid, 0) == 0 || Darwin.kill(pid, 0) == 0
     }
 
     private static func terminationStatus(from rawStatus: Int32) -> Int32 {
@@ -300,6 +294,7 @@ private final class TestProcessCompletionState: @unchecked Sendable {
     private var rawStatus: Int32?
     private var finishedPipeCount = 0
     private var timedOut = false
+    private var timeoutCleanupComplete = true
     private var continuation: CheckedContinuation<Exit, Never>?
 
     func processExited(rawStatus: Int32) {
@@ -342,22 +337,29 @@ private final class TestProcessCompletionState: @unchecked Sendable {
         while exit == nil && condition.wait(until: deadline) {}
         guard exit == nil else { return false }
         timedOut = true
+        timeoutCleanupComplete = false
         return true
     }
 
-    func waitForCompletion(seconds: TimeInterval) -> Bool {
+    func timeoutCleanupFinished() {
         condition.lock()
-        defer { condition.unlock() }
-        let deadline = Date(timeIntervalSinceNow: seconds)
-        while exit == nil && condition.wait(until: deadline) {}
-        return exit != nil
+        timeoutCleanupComplete = true
+        let completion = completeIfReadyLocked()
+        condition.unlock()
+        if let completion {
+            completion.continuation?.resume(returning: completion.value)
+        }
     }
 
     private func completeIfReadyLocked() -> (
         continuation: CheckedContinuation<Exit, Never>?,
         value: Exit
     )? {
-        guard exit == nil, let rawStatus, finishedPipeCount == 2 else { return nil }
+        guard exit == nil,
+              let rawStatus,
+              finishedPipeCount == 2,
+              timeoutCleanupComplete
+        else { return nil }
         let value = Exit(rawStatus: rawStatus, timedOut: timedOut)
         exit = value
         let continuation = continuation
@@ -372,6 +374,7 @@ private final class AsyncPipeCapture: @unchecked Sendable {
     private let handle: FileHandle
     private var data = Data()
     private var finished = false
+    private var valueRequested = false
     private var continuation: CheckedContinuation<Data, Never>?
     private let onFinish: @Sendable () -> Void
 
@@ -394,6 +397,8 @@ private final class AsyncPipeCapture: @unchecked Sendable {
     func value() async -> Data {
         await withCheckedContinuation { continuation in
             lock.lock()
+            precondition(!valueRequested, "AsyncPipeCapture supports one consumer")
+            valueRequested = true
             if finished {
                 let data = data
                 lock.unlock()
