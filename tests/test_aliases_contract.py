@@ -149,6 +149,17 @@ def test_native_mtp_alias_metadata_is_strict_and_unambiguous() -> None:
             "native-mtp-without-depth",
             {"hf_path": "publisher/model", "supports_native_mtp": True},
         )
+    with pytest.raises(ValueError, match="native MTP is AR-only"):
+        _coerce(
+            "image-native-mtp",
+            {
+                "hf_path": "publisher/model",
+                "modality": "image-gen",
+                "supports_spec_decode": False,
+                "supports_native_mtp": True,
+                "mtp_speculative_tokens": 1,
+            },
+        )
     with pytest.raises(ValueError, match="mutually exclusive"):
         _coerce(
             "ambiguous-mtp-source",
@@ -158,6 +169,17 @@ def test_native_mtp_alias_metadata_is_strict_and_unambiguous() -> None:
                 "mtp_draft_model": "publisher/drafter",
             },
         )
+
+
+def test_flash_next_native_mtp_capability_label_is_opt_in() -> None:
+    from vllm_mlx.model_auto_config import _mtp_path_label
+
+    profile = list_profiles()["qwen3.8-flash-next-4bit"]
+
+    assert (
+        _mtp_path_label("qwen3.8-flash-next-4bit", profile)
+        == "native (opt-in: --speculative-config)"
+    )
 
 
 @pytest.mark.parametrize("bad_value", [0, 1, "true", None])
