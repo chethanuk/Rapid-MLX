@@ -8,12 +8,11 @@ if [[ "${CI:-}" == "true" && "${RAPID_HOST_SAFETY_TESTING:-0}" != "1" ]]; then
     [[ "${1:-}" == "--" ]] && shift && exec "$@"
     exit 0
 fi
-[[ "$(uname -s)" == "Darwin" ]] || die "macOS is required"
-
 if [[ "${RAPID_HOST_SAFETY_TESTING:-0}" == "1" ]]; then
     locked="${RAPID_HOST_TEST_LOCKED:-false}"
     idle="${RAPID_HOST_TEST_IDLE_TIME:-0}"
 else
+    [[ "$(uname -s)" == "Darwin" ]] || die "macOS is required"
     locked="$(/usr/sbin/ioreg -n Root -d1 -a | /usr/bin/plutil -extract IOConsoleLocked raw - 2>/dev/null || printf true)"
     idle="$(/usr/bin/defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || printf missing)"
 fi
