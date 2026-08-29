@@ -1249,7 +1249,7 @@ class TestResolveServingLane:
             "local/qwen35", vision_min_memory_gb=32.0
         ) == utils_mod.ServingLaneDecision(True, "vision_hybrid_runtime_supported")
 
-    def test_explicit_vision_precedes_automatic_memory_fallback(self, monkeypatch):
+    def test_explicit_vision_honors_measured_memory_floor(self, monkeypatch):
         from vllm_mlx.api import utils as utils_mod
 
         self._patch_probes(
@@ -1264,7 +1264,9 @@ class TestResolveServingLane:
             "local/qwen35",
             force_mllm=True,
             vision_min_memory_gb=32.0,
-        ) == utils_mod.ServingLaneDecision(True, "vision_lane_forced")
+        ) == utils_mod.ServingLaneDecision(
+            False, "vision_memory_insufficient", auto_text_fallback=True
+        )
 
     def test_automatic_vision_still_honors_measured_memory_floor(self, monkeypatch):
         from vllm_mlx.api import utils as utils_mod
@@ -1305,7 +1307,7 @@ class TestResolveServingLane:
             utils_mod, "mllm_backbone_cache_mode", lambda _name: cache_mode
         )
         monkeypatch.setattr(utils_mod, "mllm_hybrid_runtime_supported", lambda: False)
-        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 16.0)
+        monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 64.0)
 
         assert utils_mod.resolve_serving_lane_decision(
             "local/checkpoint",

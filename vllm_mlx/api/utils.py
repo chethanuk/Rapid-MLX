@@ -1487,8 +1487,10 @@ def resolve_serving_lane_decision(
     requested decoder is honoured) with reason ``text_lane_speculative_decode``.
 
     Precedence is explicit text, incompatible requested speculative decoding,
-    explicit MLLM, then automatic checkpoint/capability selection. Automatic
-    fallbacks must never silently override an operator-selected MLLM lane.
+    hard resource admission, explicit MLLM, then automatic capability
+    selection. Automatic capability fallbacks must never silently override an
+    operator-selected MLLM lane, while an explicit flag cannot bypass the
+    measured physical-memory floor.
     """
     if force_text:
         return ServingLaneDecision(False, "text_lane_forced")
@@ -1509,24 +1511,13 @@ def resolve_serving_lane_decision(
         return ServingLaneDecision(
             False, "text_lane_speculative_decode", auto_text_fallback=True
         )
-    # Explicit operator selection precedes every automatic capability fallback.
-    # The selected MLLM loader remains responsible for rejecting an unsupported
-    # checkpoint or an unsafe allocation loudly; silently switching lanes would
-    # violate the requested serving contract and hide the actionable failure.
-    if force_mllm:
-        return ServingLaneDecision(True, "vision_lane_forced")
-    if not is_mllm_model(model_name):
+    is_mllm_checkpoint = is_mllm_model(model_name)
+    if not is_mllm_checkpoint:
+        if force_mllm:
+            return ServingLaneDecision(True, "vision_lane_forced")
         return ServingLaneDecision(False, "text_checkpoint")
-    if mllm_arch_unsupported_but_text_vendored(model_name):
-        return ServingLaneDecision(
-            False, "vision_architecture_unavailable", auto_text_fallback=True
-        )
 
     cache_mode = mllm_backbone_cache_mode(model_name)
-    if cache_mode == "other":
-        return ServingLaneDecision(
-            False, "vision_hybrid_cache_unsupported", auto_text_fallback=True
-        )
     if cache_mode == "arrays":
         if vision_min_memory_gb is None:
             profile = resolve_profile(model_name)
@@ -1542,6 +1533,22 @@ def resolve_serving_lane_decision(
             return ServingLaneDecision(
                 False, "vision_memory_insufficient", auto_text_fallback=True
             )
+
+    # Explicit operator selection precedes automatic capability fallbacks. The
+    # selected MLLM loader rejects unsupported checkpoints loudly; silently
+    # switching lanes would violate the requested serving contract.
+    if force_mllm:
+        return ServingLaneDecision(True, "vision_lane_forced")
+    if mllm_arch_unsupported_but_text_vendored(model_name):
+        return ServingLaneDecision(
+            False, "vision_architecture_unavailable", auto_text_fallback=True
+        )
+
+    if cache_mode == "other":
+        return ServingLaneDecision(
+            False, "vision_hybrid_cache_unsupported", auto_text_fallback=True
+        )
+    if cache_mode == "arrays":
         if mllm_hybrid_runtime_supported():
             return ServingLaneDecision(True, "vision_hybrid_runtime_supported")
         return ServingLaneDecision(
