@@ -2491,6 +2491,75 @@ def test_generator_sampled_verify_accepts_matching_draft():
     assert counter.snapshot().accepts == 1
 
 
+def test_generator_accepted_draft_reports_target_logprobs(monkeypatch):
+    """An accepted proposal exposes p_target, never the drafter's q row."""
+    import mlx_lm.sample_utils as sample_utils
+
+    import vllm_mlx.spec_decode.mtp.generator as generator_mod
+    from vllm_mlx.spec_decode.mtp.accept_counter import MTPAcceptCounter
+    from vllm_mlx.spec_decode.mtp.generator import mtp_generate_step
+
+    class _DistinctDistributionsModel(_MockedQwen35Model):
+        def _rows(self, target_ids, batch, boost):
+            rows = []
+            for token_id in target_ids:
+                row = mx.zeros((batch, self.vocab))
+                row = row + mx.where(
+                    mx.arange(self.vocab)[None, :] == token_id,
+                    mx.array(boost),
+                    mx.array(0.0),
+                )
+                rows.append(row)
+            return mx.stack(rows, axis=1)
+
+        def _logits_for_positions(self, target_ids, batch):
+            # Target p: deliberately soft so it differs materially from q.
+            return self._rows(target_ids, batch, 1.0)
+
+        def mtp_forward(self, hidden, next_token_ids, mtp_cache):
+            batch, positions = next_token_ids.shape
+            targets = []
+            for _ in range(positions):
+                if self._mtp_cursor < len(self._mtp):
+                    targets.append(self._mtp[self._mtp_cursor])
+                    self._mtp_cursor += 1
+                else:
+                    targets.append(0)
+            # Drafter q: a much sharper distribution around the same proposal.
+            return self._rows(targets, batch, 8.0)
+
+    monkeypatch.setattr(
+        sample_utils,
+        "categorical_sampling",
+        lambda logits, temp: mx.argmax(logits, axis=-1),
+    )
+    monkeypatch.setattr(
+        generator_mod.mx.random,
+        "uniform",
+        lambda *args, **kwargs: mx.zeros(kwargs.get("shape", ())),
+    )
+
+    emitted = list(
+        mtp_generate_step(
+            mx.array([1], dtype=mx.uint32),
+            _DistinctDistributionsModel([7, 11, 13], [11]),
+            max_tokens=3,
+            temp=0.7,
+            disable_auto_k=True,
+            accept_counter=MTPAcceptCounter(),
+        )
+    )
+
+    accepted_id, served_logprobs, from_draft = emitted[1]
+    assert (accepted_id, from_draft) == (11, True)
+    target_logits = mx.where(mx.arange(32) == 11, mx.array(1.0), mx.array(0.0))
+    target_logprobs = target_logits - mx.logsumexp(target_logits)
+    draft_logits = mx.where(mx.arange(32) == 11, mx.array(8.0), mx.array(0.0))
+    draft_logprobs = draft_logits - mx.logsumexp(draft_logits)
+    assert mx.allclose(served_logprobs, target_logprobs)
+    assert not mx.allclose(served_logprobs, draft_logprobs)
+
+
 def test_generator_sampled_k3_draws_acceptance_independently_per_position(
     monkeypatch,
 ):

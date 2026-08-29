@@ -940,7 +940,6 @@ def mtp_generate_step(
             # -------------------------------------------------------
             k_len = len(pending_drafts)
             draft_toks_arr = [rec[0] for rec in pending_drafts]
-            draft_lps_arr = [rec[1] for rec in pending_drafts]
             draft_alps_arr = [rec[2] for rec in pending_drafts]
             first_xtc_draw = pending_drafts[0][3]
 
@@ -1101,14 +1100,14 @@ def mtp_generate_step(
             for i in range(accepted_count):
                 accept_counter.record_accept(tokens_saved=1)
                 ntoks += 1
-                draft_lp = draft_lps_arr[i]
-                # The fused greedy drafter intentionally never builds a
-                # full-vocabulary draft logprob row.  The accepted token is
-                # also the target argmax, so its target row is the correct
-                # serving logprob surface and is already available here.
                 draft_id = int(draft_ids[i])
                 _remember_generated(draft_id)
-                yield draft_id, lps[i] if draft_lp is None else draft_lp, True
+                # Serving logprobs always describe the target model, even when
+                # the emitted token originated as a draft.  Returning the
+                # drafter row here leaks q(token) to API clients instead of the
+                # verified target p(token); the distributions legitimately
+                # differ on a probabilistically accepted proposal.
+                yield draft_id, lps[i], True
                 if ntoks >= max_tokens:
                     return
 
@@ -1159,6 +1158,11 @@ def mtp_generate_step(
 
                 ntoks += 1
                 _remember_generated(verify_tok_id)
+                # ``lps[position]`` is the full target-model logprob row, not
+                # a scalar attached to the independently pre-sampled
+                # ``toks[position]``.  Indexing this row later with the emitted
+                # residual token therefore reports its target probability,
+                # while rejection sampling preserves the target marginal.
                 yield verify_tok_id, lps[accepted_count], False
                 if ntoks >= max_tokens:
                     return
