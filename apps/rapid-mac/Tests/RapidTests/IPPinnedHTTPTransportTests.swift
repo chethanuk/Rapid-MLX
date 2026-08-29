@@ -99,6 +99,40 @@ struct IPPinnedHTTPTransportTests {
 
         #expect(hostHeader == "[2001:db8::1]")
     }
+
+    @Test("A chunk size larger than the remaining body fails closed")
+    func oversizedChunkFailsClosed() throws {
+        let url = try #require(URL(string: "http://pinned-name.test/page"))
+        let raw = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n100\r\nabc".utf8)
+
+        #expect(throws: Error.self) {
+            _ = try IPHTTPResponseParser.parse(data: raw, url: url)
+        }
+    }
+
+    @Test("A chunk missing terminator bytes fails closed")
+    func missingChunkTerminatorFailsClosed() throws {
+        let url = try #require(URL(string: "http://pinned-name.test/page"))
+        let missingBoth = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc".utf8)
+        let missingOne = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r".utf8)
+
+        #expect(throws: Error.self) {
+            _ = try IPHTTPResponseParser.parse(data: missingBoth, url: url)
+        }
+        #expect(throws: Error.self) {
+            _ = try IPHTTPResponseParser.parse(data: missingOne, url: url)
+        }
+    }
+
+    @Test("A parseable Int-sized chunk with no body fails closed")
+    func maxIntChunkFailsClosed() throws {
+        let url = try #require(URL(string: "http://pinned-name.test/page"))
+        let raw = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFFFFFFFFFF\r\n".utf8)
+
+        #expect(throws: Error.self) {
+            _ = try IPHTTPResponseParser.parse(data: raw, url: url)
+        }
+    }
 }
 
 private struct TestWatchdogDeadline: Error {}

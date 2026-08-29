@@ -202,17 +202,15 @@ enum IPHTTPResponseParser {
             if size == 0 {
                 return output
             }
-            let chunkEnd = input.index(offset, offsetBy: size)
-            guard chunkEnd <= input.endIndex else {
+            guard
+                let chunkEnd = input.index(offset, offsetBy: size, limitedBy: input.endIndex),
+                let terminator = input.index(chunkEnd, offsetBy: 2, limitedBy: input.endIndex),
+                input[chunkEnd] == 0x0D,
+                input[input.index(after: chunkEnd)] == 0x0A
+            else {
                 throw IPPinnedHTTPTransport.transportError("truncated HTTP chunked response")
             }
             output.append(contentsOf: input[offset..<chunkEnd])
-            let terminator = input.index(chunkEnd, offsetBy: 2)
-            guard terminator <= input.endIndex,
-                  input[chunkEnd] == 0x0D,
-                  input[input.index(after: chunkEnd)] == 0x0A else {
-                throw IPPinnedHTTPTransport.transportError("invalid HTTP chunk terminator")
-            }
             offset = terminator
         }
     }
