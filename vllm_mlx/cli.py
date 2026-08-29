@@ -7092,11 +7092,12 @@ def _pull_repository(args, *, allow_patterns_override: list[str] | None = None):
 
 
 def pull_command(args):
-    """Download a model and every catalog-declared runtime repository."""
+    """Download a model and prepare every catalog-declared requirement."""
 
     import copy
 
-    from vllm_mlx.audio.registry import runtime_assets_for
+    from vllm_mlx.audio.registry import runtime_assets_for, runtime_requirements_for
+    from vllm_mlx.audio.runtime_requirements import prepare_runtime_requirement
 
     primary_repo = args.model
     _pull_repository(args)
@@ -7113,6 +7114,9 @@ def pull_command(args):
             dependency_args,
             allow_patterns_override=list(asset.allow_patterns),
         )
+    for requirement in runtime_requirements_for(primary_repo):
+        print(f"\n  Runtime requirement: {requirement.kind} {requirement.name}")
+        prepare_runtime_requirement(requirement)
     _emit_pull_activation()
 
 

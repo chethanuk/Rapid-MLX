@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from vllm_mlx import cli
-from vllm_mlx.audio import registry
+from vllm_mlx.audio import registry, runtime_requirements
 
 
 def test_kokoro_alias_and_hf_id_declare_voice_assets() -> None:
@@ -29,9 +29,23 @@ def test_kokoro_alias_and_hf_id_declare_voice_assets() -> None:
     assert registry.runtime_assets_for("not-an-audio-model") == ()
 
 
+def test_kokoro_alias_and_hf_id_declare_g2p_requirement() -> None:
+    expected = (
+        registry.AudioRuntimeRequirement(kind="spacy_pipeline", name="en_core_web_sm"),
+    )
+
+    assert registry.runtime_requirements_for("kokoro") == expected
+    assert (
+        registry.runtime_requirements_for("mlx-community/Kokoro-82M-bf16") == expected
+    )
+    assert registry.runtime_requirements_for("whisper-small") == ()
+    assert registry.runtime_requirements_for("not-an-audio-model") == ()
+
+
 def test_pull_downloads_primary_then_declared_runtime_assets(monkeypatch) -> None:
     calls: list[tuple[str, list[str] | None, str | None, str | None]] = []
     activations = 0
+    preparations = []
 
     def fake_pull_repository(args, *, allow_patterns_override=None):
         calls.append(
@@ -49,6 +63,11 @@ def test_pull_downloads_primary_then_declared_runtime_assets(monkeypatch) -> Non
 
     monkeypatch.setattr(cli, "_pull_repository", fake_pull_repository)
     monkeypatch.setattr(cli, "_emit_pull_activation", fake_activation)
+    monkeypatch.setattr(
+        runtime_requirements,
+        "prepare_runtime_requirement",
+        lambda requirement: preparations.append(requirement),
+    )
     args = argparse.Namespace(
         model="mlx-community/Kokoro-82M-bf16",
         _original_alias="kokoro",
@@ -68,6 +87,9 @@ def test_pull_downloads_primary_then_declared_runtime_assets(monkeypatch) -> Non
         ),
     ]
     assert activations == 1
+    assert preparations == [
+        registry.AudioRuntimeRequirement(kind="spacy_pipeline", name="en_core_web_sm")
+    ]
     assert args.model == "mlx-community/Kokoro-82M-bf16"
     assert args._original_alias == "kokoro"
 
@@ -129,6 +151,32 @@ def test_runtime_asset_failure_does_not_report_successful_pull(monkeypatch) -> N
     monkeypatch.setattr(cli, "_emit_pull_activation", fake_activation)
 
     with pytest.raises(RuntimeError, match="asset download failed"):
+        cli.pull_command(argparse.Namespace(model="mlx-community/Kokoro-82M-bf16"))
+
+    assert activations == 0
+
+
+def test_runtime_requirement_failure_does_not_report_successful_pull(
+    monkeypatch,
+) -> None:
+    activations = 0
+
+    monkeypatch.setattr(cli, "_pull_repository", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runtime_requirements,
+        "prepare_runtime_requirement",
+        lambda requirement: (_ for _ in ()).throw(
+            RuntimeError("requirement preparation failed")
+        ),
+    )
+
+    def fake_activation() -> None:
+        nonlocal activations
+        activations += 1
+
+    monkeypatch.setattr(cli, "_emit_pull_activation", fake_activation)
+
+    with pytest.raises(RuntimeError, match="requirement preparation failed"):
         cli.pull_command(argparse.Namespace(model="mlx-community/Kokoro-82M-bf16"))
 
     assert activations == 0
@@ -217,6 +265,62 @@ def test_runtime_asset_registry_rejects_malformed_metadata(
     monkeypatch.setattr(registry, "_REGISTRY", None)
     monkeypatch.setattr(registry, "_HF_ID_INDEX", {})
     monkeypatch.setattr(registry, "_RUNTIME_ASSETS", {})
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        registry._load_registry()
+
+
+@pytest.mark.parametrize(
+    "runtime_requirements_metadata,error",
+    [
+        ([], "_runtime_requirements must be an object"),
+        ({"": []}, "family keys must be non-empty strings"),
+        ({"kokoro": {}}, "_runtime_requirements.kokoro must be an array"),
+        ({"kokoro": ["bad"]}, "_runtime_requirements.kokoro[0] must be an object"),
+        (
+            {"kokoro": [{"kind": "shell", "name": "anything"}]},
+            "kind must be 'spacy_pipeline'",
+        ),
+        (
+            {"kokoro": [{"kind": "spacy_pipeline", "name": "bad-name"}]},
+            "name must be a Python package identifier",
+        ),
+        (
+            {
+                "kokoro": [
+                    {"kind": "spacy_pipeline", "name": "en_core_web_sm"},
+                    {"kind": "spacy_pipeline", "name": "en_core_web_sm"},
+                ]
+            },
+            "duplicate runtime requirement",
+        ),
+        (
+            {"unknown": [{"kind": "spacy_pipeline", "name": "en_core_web_sm"}]},
+            "runtime requirements declared for unknown family",
+        ),
+    ],
+)
+def test_runtime_requirement_registry_rejects_malformed_metadata(
+    monkeypatch, tmp_path, runtime_requirements_metadata, error
+) -> None:
+    registry_file = tmp_path / "aliases.json"
+    registry_file.write_text(
+        json.dumps(
+            {
+                "_runtime_requirements": runtime_requirements_metadata,
+                "kokoro": {
+                    "type": "tts",
+                    "hf_id": "owner/kokoro",
+                    "family": "kokoro",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(registry, "_registry_path", lambda: str(registry_file))
+    monkeypatch.setattr(registry, "_REGISTRY", None)
+    monkeypatch.setattr(registry, "_HF_ID_INDEX", {})
+    monkeypatch.setattr(registry, "_RUNTIME_ASSETS", {})
+    monkeypatch.setattr(registry, "_RUNTIME_REQUIREMENTS", {})
 
     with pytest.raises(ValueError, match=re.escape(error)):
         registry._load_registry()
