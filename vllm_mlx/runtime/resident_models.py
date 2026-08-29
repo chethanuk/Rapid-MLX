@@ -710,6 +710,9 @@ class ResidentModelManager:
                         )
                         destructive_replacement = True
                         paused_engines = []
+                    elif paused_engines:
+                        await self._resume_engines(paused_engines)
+                        paused_engines = []
                 await self._evict_for_locked(
                     estimate,
                     exclude={model_name, *(item.model_id for item in candidates)},
@@ -739,14 +742,20 @@ class ResidentModelManager:
                     record.primary = destructive_primary
                     if destructive_primary:
                         record.pinned = True
-                elif replace_group is not None and replace_mode != "reject":
-                    (
-                        candidates,
-                        paused_engines,
-                    ) = await self._quiesce_replacement_group_locked(
-                        replace_group,
-                        replace_mode,
-                    )
+                elif replace_group is not None:
+                    if replace_mode != "reject":
+                        (
+                            candidates,
+                            paused_engines,
+                        ) = await self._quiesce_replacement_group_locked(
+                            replace_group,
+                            replace_mode,
+                        )
+                    else:
+                        paused_engines = await self._quiesce_records_locked(
+                            candidates,
+                            replace_mode,
+                        )
                 elif group is not None and replace_group is None:
                     candidates, paused_engines = await self._quiesce_group_locked(
                         record, group, replace_mode

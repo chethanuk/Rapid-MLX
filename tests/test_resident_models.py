@@ -1933,6 +1933,48 @@ async def test_rejected_busy_replacement_reopens_engine_admission():
     assert registry.default_name == "chat-old"
 
 
+@pytest.mark.asyncio
+async def test_reject_replacement_keeps_old_engine_open_during_slow_load():
+    """The healthy assistant serves while a reject-mode replacement loads."""
+    registry = ModelRegistry()
+    old_engine = FakeLifecycleEngine()
+    primary = entry("chat-old", old_engine)
+    registry.add(primary, is_default=True)
+    request_started = asyncio.Event()
+    release_loader = asyncio.Event()
+
+    async def loader(name: str, path: str | None, performance=None):
+        old_engine.running = 1
+        request_started.set()
+        await asyncio.sleep(0)
+        await release_loader.wait()
+        return entry(name)
+
+    manager = ResidentModelManager(registry, loader, memory_reader=lambda: 0)
+    manager.register_primary(primary, estimated_bytes=4 * GIB)
+
+    replacement = asyncio.create_task(
+        manager.load("chat-new", replace_group="assistant")
+    )
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+
+    assert old_engine.paused is False
+    assert old_engine.pauses == [("wait", 0)]
+    assert old_engine.running == 1
+    assert registry.default_name == "chat-old"
+
+    release_loader.set()
+    with pytest.raises(ResidentModelBusyError, match="active request"):
+        await asyncio.wait_for(replacement, timeout=1)
+
+    assert old_engine.pauses == [("wait", 0), ("wait", 0)]
+    assert old_engine.paused is False
+    assert old_engine.running == 1
+    assert old_engine.stopped is False
+    assert registry.default_name == "chat-old"
+    assert [item.model_name for item in registry.list_entries()] == ["chat-old"]
+
+
 def test_residency_status_uses_engine_owned_request_counts():
     registry = ModelRegistry()
     engine = FakeLifecycleEngine()
