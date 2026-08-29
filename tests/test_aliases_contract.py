@@ -144,6 +144,11 @@ def test_native_mtp_alias_metadata_is_strict_and_unambiguous() -> None:
             "bad-native-mtp-bool",
             {"hf_path": "publisher/model", "supports_native_mtp": "true"},
         )
+    with pytest.raises(ValueError, match="requires explicit mtp_speculative_tokens"):
+        _coerce(
+            "native-mtp-without-depth",
+            {"hf_path": "publisher/model", "supports_native_mtp": True},
+        )
     with pytest.raises(ValueError, match="mutually exclusive"):
         _coerce(
             "ambiguous-mtp-source",

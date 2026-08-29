@@ -544,6 +544,11 @@ def _coerce(alias: str, value: object) -> AliasProfile:
             f"alias {alias!r}: mtp_speculative_tokens requires "
             "supports_native_mtp=true or mtp_draft_model"
         )
+    if supports_native_mtp and "mtp_speculative_tokens" not in value:
+        raise ValueError(
+            f"alias {alias!r}: supports_native_mtp=true requires explicit "
+            "mtp_speculative_tokens"
+        )
     mtp_speculative_tokens = value.get("mtp_speculative_tokens", 3)
     if (
         isinstance(mtp_speculative_tokens, bool)
