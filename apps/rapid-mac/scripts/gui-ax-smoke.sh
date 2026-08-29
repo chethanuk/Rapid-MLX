@@ -2,9 +2,9 @@
 # AX-first Rapid-Mac GUI smoke using Peekaboo.
 #
 # This deliberately avoids model startup and mutable controls. It validates
-# that the running app exposes stable semantic selectors, opens Settings via
-# the application menu, navigates with AXPress, and records structured trees
-# plus screenshots for diagnosis.
+# that the running app exposes stable semantic selectors, opens Settings with
+# synthesized user clicks, and records structured trees plus screenshots for
+# diagnosis.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,7 +45,8 @@ observe_app() {
 
 press_identifier() {
     local tree="$1" identifier="$2" output="$3"
-    local coords
+    local coords click_help
+    local -a click_args
     coords="$(jq -r --arg id "$identifier" \
         '.data.ui_elements[] | select(.identifier == $id) | .bounds |
          "\((.x + (.width / 2)) | floor),\((.y + (.height / 2)) | floor)"' \
@@ -57,16 +58,21 @@ press_identifier() {
     # path as a user's click while retaining semantic identifier lookup.  A
     # coordinate also avoids passing a daemon-owned snapshot to the local input
     # host, where it cannot be resolved.
-    if peekaboo click --help 2>&1 | grep -q -- --global-coords; then
-        pb click --coords "$coords" --global-coords \
-            --input-strategy synthOnly --foreground --json > "$output"
-    else
-        # Peekaboo 3.0 interprets coordinates globally by default and predates
-        # the flags that make the newer input path explicit.
-        pb click --coords "$coords" --json > "$output"
+    click_help="$(peekaboo click --help 2>&1)"
+    click_args=(click --coords "$coords")
+    if grep -q -- --global-coords <<< "$click_help"; then
+        click_args+=(--global-coords)
     fi
+    if grep -q -- --input-strategy <<< "$click_help"; then
+        click_args+=(--input-strategy synthOnly)
+    fi
+    if grep -q -- --foreground <<< "$click_help"; then
+        click_args+=(--foreground)
+    fi
+    pb "${click_args[@]}" --json > "$output"
 }
 
+main() {
 command -v peekaboo >/dev/null || die "peekaboo is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
@@ -160,3 +166,8 @@ pb image --window-id "$SETTINGS_WINDOW_ID" --path "$OUT/appearance.png" --json \
 
 log "PASS — semantic GUI smoke complete"
 log "artifacts: $OUT"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
