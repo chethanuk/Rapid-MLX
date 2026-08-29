@@ -67,6 +67,11 @@ can actually understand.
   105,881,983 bytes (43.53% smaller); the measured Finder copy became slower,
   from 5.94 seconds to 17.80 seconds.
   ([#2668](https://github.com/raullenchai/Rapid-MLX/pull/2668))
+- **A GitHub invitation waits for demonstrated value.** After 35 successful
+  chats, dictations, or generated images, established Desktop users may see a
+  quiet, nonmodal project invitation. Dismissal starts a three-day cooldown and
+  a progressively larger local workload threshold; no account or star-status
+  lookup is performed. ([#2675](https://github.com/raullenchai/Rapid-MLX/pull/2675))
 
 ### Fixed
 
@@ -131,6 +136,19 @@ can actually understand.
   listing, pull admission, or chat model switching.
   ([#2610](https://github.com/raullenchai/Rapid-MLX/pull/2610),
   [#2613](https://github.com/raullenchai/Rapid-MLX/pull/2613))
+- **Oversized vision inputs fit the request budget automatically.** Images are
+  reduced against the model's patch-aware token ceiling before preprocessing,
+  with one measured retry for processor rounding and a clear error only when
+  the minimum aligned image still cannot fit.
+  ([#2694](https://github.com/raullenchai/Rapid-MLX/pull/2694))
+- **Forced assistant prefixes no longer wait for the first decoded token.** The
+  prefix is emitted after scheduler admission, while empty, failed, and
+  cancelled streams clean up their pending admission work.
+  ([#2674](https://github.com/raullenchai/Rapid-MLX/pull/2674))
+- **Suffix decoding respects sliding-window rollback boundaries.** The engine
+  preflights the full verify-forward cache growth and falls back to ordinary
+  decoding when advancing would make rollback unsafe, rather than aborting the
+  request. ([#2682](https://github.com/raullenchai/Rapid-MLX/pull/2682))
 
 ### Security
 
@@ -153,13 +171,6 @@ can actually understand.
   release notes instead of rebuilding different bytes after the tag.
   ([#2450](https://github.com/raullenchai/Rapid-MLX/pull/2450),
   [#2530](https://github.com/raullenchai/Rapid-MLX/pull/2530))
-
-### Known issues
-
-- Suffix decoding with sliding-window models such as Gemma 4 and GPT-OSS can
-  abort a request at a window boundary. Remove `--suffix-decoding`, or start
-  the server with `--no-spec-decode`, for these models as a workaround.
-  ([#2463](https://github.com/raullenchai/Rapid-MLX/issues/2463))
 
 ## [0.13.1] — 2026-08-26
 
