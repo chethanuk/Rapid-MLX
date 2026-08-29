@@ -177,6 +177,26 @@ struct IPPinnedHTTPTransportTests {
             _ = try IPHTTPResponseParser.parse(data: raw, url: url)
         }
     }
+
+    @Test("Percent-encoded path and query remain encoded in request-target")
+    func percentEncodedRequestTargetRemainsEncoded() throws {
+        let url = try #require(URL(string: "http://approved.example/a%20b?q=a%20b"))
+
+        let target = try IPPinnedHTTPTransport.requestTarget(for: url)
+
+        #expect(target == "/a%20b?q=a%20b")
+    }
+
+    @Test("Encoded control characters stay encoded in request-target")
+    func encodedControlCharactersRemainEncodedInRequestTarget() throws {
+        let url = try #require(URL(string: "http://approved.example/%0D%0AHost:%20other.internal"))
+
+        let target = try IPPinnedHTTPTransport.requestTarget(for: url)
+
+        #expect(target == "/%0D%0AHost:%20other.internal")
+        #expect(!target.contains("\r"))
+        #expect(!target.contains("\n"))
+    }
 }
 
 private struct TestWatchdogDeadline: Error {}

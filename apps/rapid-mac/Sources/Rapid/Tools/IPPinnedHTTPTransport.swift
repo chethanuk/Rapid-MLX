@@ -28,7 +28,7 @@ enum IPPinnedHTTPTransport {
         )
         let reader = ResponseReader(
             connection: connection,
-            request: request(for: url, address: address, host: host, port: port),
+            request: try request(for: url, address: address, host: host, port: port),
             url: url,
             byteLimit: byteLimit
         )
@@ -101,9 +101,9 @@ enum IPPinnedHTTPTransport {
         address: ParsedIP,
         host: String,
         port: UInt16
-    ) -> Data {
-        let path = url.path.isEmpty ? "/" : url.path
-        let target = url.query.map { "\(path)?\($0)" } ?? path
+    ) throws -> Data {
+        let target = try requestTarget(for: url)
+        try validateNoControlCharacters(host)
         let headers = [
             "GET \(target) HTTP/1.1",
             "Host: \(hostHeader(host: host, address: address, scheme: url.scheme?.lowercased() ?? "", port: port))",
@@ -113,6 +113,27 @@ enum IPPinnedHTTPTransport {
             "Connection: close",
         ].joined(separator: "\r\n") + "\r\n\r\n"
         return Data(headers.utf8)
+    }
+
+    static func requestTarget(for url: URL) throws -> String {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw transportError("invalid request URL")
+        }
+        let path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        let query = components.percentEncodedQuery
+        let target = query.map { "\(path)?\($0)" } ?? path
+        try validateNoControlCharacters(target)
+        return target
+    }
+
+    private static func validateNoControlCharacters(_ value: String) throws {
+        guard value.allSatisfy({ character in
+            character.unicodeScalars.allSatisfy { scalar in
+                scalar.value >= 0x20 && scalar.value != 0x7F
+            }
+        }) else {
+            throw transportError("request contains forbidden control characters")
+        }
     }
 
     static func hostHeader(
