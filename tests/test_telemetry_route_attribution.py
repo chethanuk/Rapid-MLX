@@ -161,7 +161,9 @@ class _AnthropicEngine:
             )
 
 
-def _anthropic_client(engine: _AnthropicEngine) -> TestClient:
+def _anthropic_client(
+    engine: _AnthropicEngine, *, reasoning_parser_name: str | None = None
+) -> TestClient:
     from vllm_mlx.config import reset_config
     from vllm_mlx.routes.anthropic import router
 
@@ -169,6 +171,7 @@ def _anthropic_client(engine: _AnthropicEngine) -> TestClient:
     cfg.engine = engine
     cfg.model_name = "test-model"
     cfg.model_registry = None
+    cfg.reasoning_parser_name = reasoning_parser_name
 
     app = FastAPI()
     app.include_router(router)
@@ -281,6 +284,73 @@ def test_anthropic_messages_stream_emits_claude_code_attribution(
         f"tps={kw['tps']:.1f} must use the post-first-token decode window, "
         f"not total request time ({total_rate:.1f} tok/s)"
     )
+
+
+def test_anthropic_stream_ttft_ignores_parser_suppressed_reasoning(
+    telemetry_on, monkeypatch
+):
+    """Raw reasoning held by a parser is not visible client output.
+
+    The first engine delta is deliberately suppressed, followed by a 0.2s
+    delay and a visible text delta. TTFT must include that delay; latching on
+    the raw engine delta would report near-zero latency instead.
+    """
+    pytest.importorskip("mlx")
+
+    class _HeldPrefixEngine(_AnthropicEngine):
+        async def stream_chat(self, messages, **kwargs):
+            self.stream_calls += 1
+            yield SimpleNamespace(
+                new_text="hidden reasoning",
+                prompt_tokens=9,
+                completion_tokens=1,
+            )
+            await _sleep(0.2)
+            yield SimpleNamespace(
+                new_text="visible answer",
+                prompt_tokens=9,
+                completion_tokens=2,
+            )
+
+    class _HeldPrefixParser:
+        implicit_reasoning_until_close = False
+        sanitize_when_thinking_disabled = True
+
+        def configure_request(self, **kwargs):
+            return None
+
+        def extract_reasoning_streaming(self, previous, current, delta):
+            if delta == "hidden reasoning":
+                return None
+            return SimpleNamespace(reasoning=None, content=delta)
+
+        def finalize_streaming(self, *args, **kwargs):
+            return None
+
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+    monkeypatch.setattr(
+        "vllm_mlx.reasoning.get_parser", lambda _name: _HeldPrefixParser
+    )
+
+    engine = _HeldPrefixEngine()
+    client = _anthropic_client(engine, reasoning_parser_name="held-prefix")
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "test-model",
+            "max_tokens": 2048,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "visible answer" in resp.text
+    assert "hidden reasoning" not in resp.text
+    assert engine.stream_calls == 1
+    assert len(calls) == 1
+    assert calls[0]["ttft_ms"] >= 150.0, calls[0]
 
 
 # ---------------------------------------------------------------- completions
