@@ -13,21 +13,17 @@ import Foundation
 ///
 /// Scope of the guarantee. This layer resolves the host and rejects the request
 /// before it runs if ANY resolved address is private — for the initial URL and
-/// for every redirect hop. That confines the *hostnames the model can name* to
-/// ones whose DNS currently points at public space. It is deliberately NOT a
-/// closed IP-confinement proof, because these residuals cannot be closed at
+/// for every redirect hop. ``IPPinnedHTTPTransport`` then opens the socket to
+/// the validated address, preserving the original hostname for HTTP ``Host``
+/// and TLS name/certificate validation. Together they close the DNS-rebind
+/// time-of-check/time-of-use gap. The remaining residuals cannot be closed at
 /// this layer:
 ///
-///  1. DNS-rebind TOCTOU. We resolve and validate, then `URLSession` re-resolves
-///     when it connects; a hostile resolver can hand us a public address and the
-///     socket a private one. `URLSession` exposes no hook to pin the validated
-///     address while preserving TLS SNI / certificate validation, so the pinned
-///     connection can't be expressed here.
-///  2. System / PAC HTTP proxies. If the OS is configured with a proxy, the
+///  1. System / PAC HTTP proxies. If the OS is configured with a proxy, the
 ///     proxy resolves and connects on its own, on a path our local resolution
 ///     never sees — so a locally-public result does not prove the proxy's
 ///     connection is public.
-///  3. Network-specific NAT64 prefixes. We unwrap the well-known (`64:ff9b::/96`)
+///  2. Network-specific NAT64 prefixes. We unwrap the well-known (`64:ff9b::/96`)
 ///     and RFC 8215 local-use (`64:ff9b:1::/48`) prefixes to range-check the
 ///     embedded IPv4, but a site can deploy NAT64 under any prefix we can't know
 ///     without that network's config, so a private IPv4 tunnelled through a
@@ -38,10 +34,7 @@ import Foundation
 /// approve the exact host before the first request (and again on any
 /// cross-origin redirect), so exploitation requires the user to approve browsing
 /// an attacker-controlled domain; and the action is only a read-only GET whose
-/// body returns to the model — no code executes, no request body is sent. A
-/// fully IP-confined fetch would need a custom transport that connects to the
-/// validated address while setting TLS SNI/Host to the original hostname; that
-/// is out of scope for this tool and tracked as future hardening.
+/// body returns to the model — no code executes, no request body is sent.
 enum BrowseSSRFGuard {
     enum Rejection: Error, Equatable {
         case badURL
@@ -72,6 +65,13 @@ enum BrowseSSRFGuard {
     /// concrete addresses (or parsed directly if it is an IP literal) and every
     /// address is range-checked. Throws ``Rejection`` on the first problem.
     static func validate(_ url: URL) async throws {
+        _ = try await validatedAddress(url)
+    }
+
+    /// Validate a URL and return the concrete address used for the pinned
+    /// transport. For DNS names, the first resolver answer is selected only
+    /// after every answer has passed the same public-address checks.
+    static func validatedAddress(_ url: URL) async throws -> ParsedIP {
         guard let scheme = url.scheme?.lowercased() else { throw Rejection.badURL }
         guard allowedSchemes.contains(scheme) else { throw Rejection.blockedScheme(scheme) }
         guard let host = url.host, !host.isEmpty else { throw Rejection.noHost }
@@ -88,7 +88,7 @@ enum BrowseSSRFGuard {
             if literal.isBlocked {
                 throw Rejection.blockedAddress(host: host, address: literal.canonical)
             }
-            return
+            return literal
         }
 
         let addresses = try await resolve(bareHost)
@@ -96,6 +96,7 @@ enum BrowseSSRFGuard {
         for ip in addresses where ip.isBlocked {
             throw Rejection.blockedAddress(host: host, address: ip.canonical)
         }
+        return addresses[0]
     }
 
     /// Resolve a hostname to every A / AAAA address. Runs `getaddrinfo` off the
