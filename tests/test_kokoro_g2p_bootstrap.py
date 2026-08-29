@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import types
+from typing import cast
 
 import pytest
 
@@ -21,7 +22,10 @@ from vllm_mlx.audio.probe import (
     _reset_g2p_model_state,
     require_kokoro_runtime,
 )
-from vllm_mlx.audio.registry import AudioRuntimeRequirement
+from vllm_mlx.audio.registry import (
+    AudioRuntimeRequirement,
+    AudioRuntimeRequirementKind,
+)
 from vllm_mlx.audio.runtime_requirements import (
     AudioRuntimePreparationError,
     _installer_env,
@@ -165,6 +169,33 @@ def test_pull_preparer_sanitizes_post_install_import_failure(monkeypatch):
         prepare_runtime_requirement(_requirement())
 
     assert "/private/secret/path" not in str(excinfo.value)
+
+
+def test_pull_preparer_fails_closed_when_spacy_runtime_is_broken(monkeypatch):
+    def broken(_package):
+        raise ImportError("/private/secret/path/broken.dylib")
+
+    monkeypatch.setattr(runtime_requirements, "spacy_pipeline_available", broken)
+    monkeypatch.setattr(
+        runtime_requirements,
+        "_run_installer",
+        lambda *args, **kwargs: pytest.fail("broken spaCy must not run installer"),
+    )
+
+    with pytest.raises(AudioRuntimePreparationError) as excinfo:
+        prepare_runtime_requirement(_requirement())
+
+    assert "spaCy runtime is not importable" in str(excinfo.value)
+    assert "/private/secret/path" not in str(excinfo.value)
+
+
+def test_preparer_rejects_unvalidated_requirement_kind():
+    requirement = AudioRuntimeRequirement(
+        kind=cast(AudioRuntimeRequirementKind, "shell"), name="payload"
+    )
+
+    with pytest.raises(AudioRuntimePreparationError, match="Unsupported"):
+        prepare_runtime_requirement(requirement)
 
 
 def test_inference_probe_is_check_only_when_pipeline_missing(monkeypatch):
@@ -349,6 +380,55 @@ def test_installer_kills_process_group_on_timeout(monkeypatch):
     assert popen_kwargs["start_new_session"] is True
     assert killed["pgid"] == (4321, signal.SIGKILL)
     assert "direct" not in killed
+
+
+def test_installer_timeout_falls_back_and_closes_every_pipe(monkeypatch):
+    killed = {}
+
+    class _Pipe:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+            if self.fail:
+                raise OSError("already closed")
+
+    class _FakeProc:
+        pid = 4321
+        returncode = None
+        stdout = _Pipe()
+        stderr = _Pipe(fail=True)
+        stdin = _Pipe()
+
+        def __init__(self):
+            self.communications = 0
+
+        def communicate(self, timeout=None):
+            self.communications += 1
+            if self.communications == 1:
+                raise subprocess.TimeoutExpired(cmd="spacy", timeout=timeout)
+            return "", ""
+
+        def kill(self):
+            killed["direct"] = True
+
+    proc = _FakeProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError())
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        runtime_requirements._run_installer(["x"], {}, timeout=1)
+
+    assert killed == {"direct": True}
+    assert proc.communications == 2
+    assert proc.stdout.closed == 1
+    assert proc.stderr.closed == 1
+    assert proc.stdin.closed == 1
 
 
 def test_installer_raises_on_nonzero_exit(monkeypatch):
