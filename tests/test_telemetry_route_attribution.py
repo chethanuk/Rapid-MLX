@@ -353,6 +353,119 @@ def test_anthropic_stream_ttft_ignores_parser_suppressed_reasoning(
     assert calls[0]["ttft_ms"] >= 150.0, calls[0]
 
 
+def test_anthropic_stream_ttft_latches_when_pinned_tool_buffer_replays(
+    telemetry_on, monkeypatch
+):
+    """A valid named-tool stream delays TTFT until buffered output is replayed.
+
+    The engine emits adjacent text and the pinned structured tool call in
+    consecutive chunks. The route must first buffer the text while it validates
+    the forced tool contract, then replay it before the tool block. Both are
+    visible output, and telemetry must latch exactly once on that replay.
+    """
+    pytest.importorskip("mlx")
+
+    class _PinnedToolEngine(_AnthropicEngine):
+        async def stream_chat(self, messages, **kwargs):
+            self.stream_calls += 1
+            # Text and structured calls are separate engine chunks: the route
+            # deliberately short-circuits a chunk carrying ``tool_calls``.
+            yield SimpleNamespace(
+                new_text="Checking weather. ",
+                prompt_tokens=9,
+                completion_tokens=1,
+                finish_reason=None,
+                tool_calls=None,
+            )
+            yield SimpleNamespace(
+                new_text="",
+                prompt_tokens=9,
+                completion_tokens=3,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    {
+                        "name": "get_weather",
+                        "arguments": '{"location":"SF"}',
+                    }
+                ],
+                channel=None,
+            )
+
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+    engine = _PinnedToolEngine()
+    client = _anthropic_client(engine)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "test-model",
+            "max_tokens": 64,
+            "stream": True,
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+            "messages": [{"role": "user", "content": "weather in SF"}],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "Checking weather." in resp.text
+    assert '"type": "tool_use"' in resp.text
+    assert resp.text.index("Checking weather.") < resp.text.index('"type": "tool_use"')
+    assert engine.stream_calls == 1
+    assert len(calls) == 1
+    assert calls[0]["tool_call_used"] is True
+    assert calls[0]["ttft_ms"] > 0.0
+
+
+def test_anthropic_empty_stream_uses_total_latency_as_ttft(telemetry_on, monkeypatch):
+    """A successful stream with no visible output reports total time as TTFT."""
+    pytest.importorskip("mlx")
+
+    class _EmptyEngine(_AnthropicEngine):
+        async def stream_chat(self, messages, **kwargs):
+            self.stream_calls += 1
+            await _sleep(0.05)
+            yield SimpleNamespace(
+                new_text="",
+                prompt_tokens=9,
+                completion_tokens=0,
+                finish_reason="stop",
+                finished=True,
+                tool_calls=None,
+            )
+
+    calls: list[dict] = []
+    _capture_request(monkeypatch, calls)
+    engine = _EmptyEngine()
+    client = _anthropic_client(engine)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "test-model",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "say nothing"}],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert engine.stream_calls == 1
+    assert len(calls) == 1
+    assert calls[0]["completion_tokens"] == 0
+    assert calls[0]["ttft_ms"] >= 40.0, calls[0]
+    assert calls[0]["tps"] == 0.0
+
+
 # ---------------------------------------------------------------- completions
 
 

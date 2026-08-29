@@ -1928,14 +1928,14 @@ async def _stream_anthropic_messages(
         _is_required_tool_choice(getattr(openai_request, "tool_choice", None))
         and bool(openai_request.tools)
     )
-    pre_filter_buffer: list[tuple[str, bool]] = []
+    pre_filter_buffer: list[str] = []
 
     def _latch_first_visible_output() -> None:
         nonlocal _first_token_ts
         if _first_token_ts is None:
             _first_token_ts = time.perf_counter()
 
-    def _capture(event: str, *, marks_output: bool = False) -> str | None:
+    def _capture(event: str) -> str | None:
         """Either buffer ``event`` and return ``None``, or return
         ``event`` unchanged.
 
@@ -1949,15 +1949,19 @@ async def _stream_anthropic_messages(
         don't allow ``yield from`` against a sync generator helper,
         so this returns a scalar rather than an iterator.
 
-        ``marks_output`` identifies a real text/thinking/tool event. Its TTFT
-        timestamp is taken only when that event actually reaches the wire;
+        Content-block start/delta events are client-visible output. Their TTFT
+        timestamp is taken only when the event actually reaches the wire;
         buffered forced-tool events therefore latch during replay, not while
-        the model is still being validated.
+        the model is still being validated. Keeping this classification here
+        prevents individual yield sites from accidentally forgetting the
+        telemetry latch when a new streaming branch is added.
         """
         if _buffer_for_pinned_tool:
-            pre_filter_buffer.append((event, marks_output))
+            pre_filter_buffer.append(event)
             return None
-        if marks_output:
+        if event.startswith(
+            ("event: content_block_start", "event: content_block_delta")
+        ):
             _latch_first_visible_output()
         return event
 
@@ -2328,7 +2332,7 @@ async def _stream_anthropic_messages(
                         block_index,
                     )
                     for event in events:
-                        ev = _capture(event, marks_output=True)
+                        ev = _capture(event)
                         if ev is not None:
                             yield ev
                 continue
@@ -2494,7 +2498,7 @@ async def _stream_anthropic_messages(
                         block_index,
                     )
                     for event in events:
-                        ev = _capture(event, marks_output=True)
+                        ev = _capture(event)
                         if ev is not None:
                             yield ev
                 continue
@@ -2516,7 +2520,7 @@ async def _stream_anthropic_messages(
                     block_index,
                 )
                 for event in events:
-                    ev = _capture(event, marks_output=True)
+                    ev = _capture(event)
                     if ev is not None:
                         yield ev
 
@@ -2536,7 +2540,7 @@ async def _stream_anthropic_messages(
             block_index,
         )
         for event in events:
-            ev = _capture(event, marks_output=True)
+            ev = _capture(event)
             if ev is not None:
                 yield ev
 
@@ -2549,7 +2553,7 @@ async def _stream_anthropic_messages(
                 block_index,
             )
             for event in events:
-                ev = _capture(event, marks_output=True)
+                ev = _capture(event)
                 if ev is not None:
                     yield ev
 
@@ -2629,7 +2633,7 @@ async def _stream_anthropic_messages(
                         [("text", filtered)], current_block_type, block_index
                     )
                     for event in events:
-                        ev = _capture(event, marks_output=True)
+                        ev = _capture(event)
                         if ev is not None:
                             yield ev
         # Close any block we opened above before falling through to the
@@ -2811,7 +2815,7 @@ async def _stream_anthropic_messages(
                     f"event: content_block_stop\ndata: "
                     f"{json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n",
                 ):
-                    ev = _capture(raw_event, marks_output=True)
+                    ev = _capture(raw_event)
                     if ev is not None:
                         yield ev
                 # Re-tracking: this is a manually-yielded
@@ -2939,8 +2943,10 @@ async def _stream_anthropic_messages(
     if _buffer_for_pinned_tool and not (
         tool_choice_error or tool_validation_error or synthesized_pinned_call
     ):
-        for buffered_event, marks_output in pre_filter_buffer:
-            if marks_output:
+        for buffered_event in pre_filter_buffer:
+            if buffered_event.startswith(
+                ("event: content_block_start", "event: content_block_delta")
+            ):
                 _latch_first_visible_output()
             yield buffered_event
         pre_filter_buffer.clear()
