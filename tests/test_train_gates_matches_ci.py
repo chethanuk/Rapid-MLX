@@ -124,7 +124,8 @@ def test_linux_parser_captures_discovery_boundaries_and_filters() -> None:
     assert first["paths"] == ["tests"]
     assert first["ignore"] == ["tests/integrations", "tests/headless_mlx"]
     assert first["m"] == (
-        "not requires_mlx and not slow and not integration and not needle"
+        "not requires_mlx and not real_hf_cache and not requires_network "
+        "and not slow and not integration and not needle"
     )
     assert first["marker"] is None
     assert first["deselect"] == []

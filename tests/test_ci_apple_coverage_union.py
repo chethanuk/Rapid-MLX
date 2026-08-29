@@ -124,7 +124,8 @@ def test_linux_coverage_lane_declares_complete_ci_linux_discovery_surface() -> N
     assert "tests/test_" not in run
     assert "pytest \\\n  tests \\" in run
     assert (
-        '-m "not requires_mlx and not slow and not integration and not needle"' in run
+        '-m "not requires_mlx and not real_hf_cache and not requires_network '
+        'and not slow and not integration and not needle"' in run
     )
 
 

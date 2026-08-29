@@ -200,7 +200,8 @@ def test_linux_workflow_uses_directories_not_a_file_roster() -> None:
     assert "pytest \\\n  tests/headless_mlx \\" in run
     assert "tests/test_" not in run
     assert (
-        '-m "not requires_mlx and not slow and not integration and not needle"' in run
+        '-m "not requires_mlx and not real_hf_cache and not requires_network '
+        'and not slow and not integration and not needle"' in run
     )
 
 

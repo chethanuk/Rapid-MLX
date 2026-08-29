@@ -306,14 +306,16 @@ jobs:
         env:
           COVERAGE_FILE: coverage-linux-${{ matrix.python-version }}.data
         # Ordinary unit tests are discovered by directory. MLX-bound modules
-        # own a requires_mlx marker + collection guard; live/integration tests
-        # and the isolated fake-MLX process have stable directory boundaries.
+        # own a requires_mlx marker + collection guard. Tests that deliberately
+        # consume a real HF cache or network are non-hermetic and stay outside
+        # this hosted lane; live/integration tests and the isolated fake-MLX
+        # process have stable directory boundaries.
         run: |
           pytest \
             tests \
             --ignore=tests/integrations \
             --ignore=tests/headless_mlx \
-            -m "not requires_mlx and not slow and not integration and not needle" \
+            -m "not requires_mlx and not real_hf_cache and not requires_network and not slow and not integration and not needle" \
             -v --tb=short \
             --cov=vllm_mlx \
             --cov-report=term-missing \

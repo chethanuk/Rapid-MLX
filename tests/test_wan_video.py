@@ -167,6 +167,9 @@ def test_wan_lane_crops_aligned_generation_to_requested_size(
         captured["command"] = command
         Path(command[-1]).write_bytes(b"cropped")
 
+    monkeypatch.setattr(
+        "vllm_mlx.runtime.video_lane._resolve_ffmpeg", lambda: "/usr/bin/ffmpeg"
+    )
     monkeypatch.setattr(subprocess, "run", fake_run)
     lane.generate(
         prompt="test",

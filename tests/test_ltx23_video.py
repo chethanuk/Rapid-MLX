@@ -477,6 +477,7 @@ def test_video_only_remux_failure_is_actionable(
     def fail(*args, **kwargs):
         raise subprocess.CalledProcessError(1, "ffmpeg")
 
+    monkeypatch.setattr(video_lane, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr("subprocess.run", fail)
 
     with pytest.raises(VideoRuntimeError, match="silent audio track"):
@@ -502,6 +503,7 @@ def test_video_only_cleanup_failure_does_not_mask_remux_error(
         temporary_paths.append(path)
         raise PermissionError("cleanup denied")
 
+    monkeypatch.setattr(video_lane, "_resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr("subprocess.run", fail_remux)
     monkeypatch.setattr(Path, "unlink", fail_cleanup)
 
