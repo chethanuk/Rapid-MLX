@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 BlastRadius = Literal["low", "medium", "high"]
 
+_MERGIFY_APP_LOGINS = frozenset({"app/mergify", "mergify[bot]"})
+
 
 # Files / directories that affect every request → any change requires
 # the heavy gate (full unit + stress + e2e + bench). Order doesn't
@@ -165,7 +167,7 @@ class Context:
         reserved queue-branch prefix so neither a similarly named branch nor
         an unrelated bot bypasses human-PR metadata gates.
         """
-        return self.pr_author == "app/mergify" and self.head_branch.startswith(
+        return self.pr_author in _MERGIFY_APP_LOGINS and self.head_branch.startswith(
             "mergify/merge-queue/"
         )
 
