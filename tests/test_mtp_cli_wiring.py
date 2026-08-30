@@ -1740,18 +1740,79 @@ def test_install_mtp_vendored_fails_closed_on_batch_size_growth(monkeypatch):
 
 
 def test_mtp_running_limit_serializes_requests_without_changing_queue_capacity():
-    from vllm_mlx.scheduler import SchedulerConfig, _max_running_sequences
+    from types import SimpleNamespace
 
-    mtp = SchedulerConfig(
-        spec_decode="mtp",
-        max_num_seqs=256,
-        max_concurrent_requests=256,
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.config = SchedulerConfig(
+        spec_decode="mtp", max_num_seqs=256, max_concurrent_requests=256
     )
-    assert _max_running_sequences(mtp) == 1
-    assert mtp.max_concurrent_requests == 256
+    scheduler.spec_decode_runtime_attempted = False
+    scheduler.spec_decode_runtime_method = None
+    assert scheduler._max_running_sequences() == 1
+    assert scheduler.config.max_concurrent_requests == 256
 
-    plain = SchedulerConfig(spec_decode="none", max_num_seqs=17)
-    assert _max_running_sequences(plain) == 17
+    scheduler.spec_decode_runtime_attempted = True
+    scheduler.spec_decode_runtime_method = "mtp"
+    assert scheduler._max_running_sequences() == 1
+
+    # A definitive MTP gate miss means this generator is ordinary decode;
+    # restore the configured batch width instead of serializing forever.
+    scheduler.spec_decode_runtime_method = None
+    assert scheduler._max_running_sequences() == 256
+
+    scheduler.config = SimpleNamespace(spec_decode="none", max_num_seqs=17)
+    assert scheduler._max_running_sequences() == 17
+
+
+def test_mtp_install_gate_miss_restores_plain_batch_width_in_same_schedule_tick():
+    """An unsupported MTP runtime must not serialize ordinary decoding."""
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.request import Request, SamplingParams
+    from vllm_mlx.scheduler import Scheduler, SchedulerConfig
+
+    tokenizer = MagicMock()
+    tokenizer.encode = lambda _text: [1]
+    scheduler = Scheduler(
+        MagicMock(),
+        tokenizer,
+        SchedulerConfig(spec_decode="mtp", max_num_seqs=4),
+    )
+    for index in range(2):
+        scheduler.waiting.append(
+            Request(
+                f"req-{index}",
+                "prompt",
+                SamplingParams(max_tokens=4),
+                prompt_token_ids=[1, 2],
+            )
+        )
+
+    batch_generator = MagicMock()
+    batch_generator.insert.side_effect = [[7], [8]]
+    scheduler.batch_generator = batch_generator
+    scheduler._get_request_sampler = MagicMock(return_value=MagicMock())
+    scheduler._register_uid_processors = MagicMock()
+
+    install_checks = 0
+
+    def ensure_after_failed_install(_sampling_params):
+        nonlocal install_checks
+        install_checks += 1
+        if install_checks == 1:
+            scheduler.spec_decode_runtime_attempted = True
+            scheduler.spec_decode_runtime_method = None
+        return True
+
+    scheduler._ensure_batch_generator = ensure_after_failed_install
+
+    scheduled = scheduler._schedule_waiting()
+
+    assert [request.request_id for request in scheduled] == ["req-0", "req-1"]
+    assert list(scheduler.running) == ["req-0", "req-1"]
+    assert batch_generator.insert.call_count == 2
 
 
 def test_install_mtp_vendored_b_gt_1_soft_fallthrough_when_no_state():
@@ -1849,6 +1910,130 @@ def test_install_mtp_vendored_reaps_request_state_on_departure(
     assert closed == [7]
     assert gb._mtp_vendored_state == {}
     assert gb._mtp_vendored_disabled_uids == {}
+
+
+def test_scheduler_text_stop_retires_mtp_state_before_next_request(monkeypatch):
+    """A scheduler-side text stop must free the B=1 MTP slot immediately.
+
+    mlx-lm cannot see user-supplied text stop strings, so its response has no
+    finish reason and its GenerationBatch row remains live.  The scheduler
+    must remove that row through the same lifecycle hook as cancellation
+    before admitting the next queued request; otherwise the next request makes
+    the vendored verifier observe B=2 with stale request-local state.
+    """
+    from unittest.mock import MagicMock
+
+    import mlx.core as mx
+
+    from vllm_mlx.request import Request, RequestStatus, SamplingParams
+    from vllm_mlx.scheduler import (
+        Scheduler,
+        SchedulerConfig,
+        _install_mtp_vendored,
+    )
+    from vllm_mlx.spec_decode.mtp import generator as _gen_mod
+
+    class _FakeGen:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return (1001, mx.array([0.0]), False)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_gen_mod, "mtp_generate_step", lambda *a, **kw: _FakeGen())
+
+    tokenizer = MagicMock()
+    tokenizer.encode = lambda _text: [1]
+    scheduler = Scheduler(
+        MagicMock(),
+        tokenizer,
+        SchedulerConfig(spec_decode="mtp", max_num_seqs=4),
+    )
+
+    batch_gen, gb = _make_batch_gen_with_gb()
+    present = {7}
+
+    def find_uids(uids):
+        return {
+            uid: (2, index)
+            for index, uid in enumerate(sorted(present))
+            if uid in set(uids)
+        }
+
+    def remove(uids, return_prompt_caches=False):
+        removed = [uid for uid in uids if uid in present]
+        present.difference_update(removed)
+        gb.uids = [uid for uid in gb.uids if uid in present]
+        if return_prompt_caches:
+            return {uid: (None, []) for uid in removed}
+        return None
+
+    batch_gen._find_uids = find_uids
+    batch_gen.remove = remove
+    scheduler.batch_generator = batch_gen
+
+    first = Request(
+        "req-7",
+        "prompt",
+        SamplingParams(max_tokens=100, temperature=0.0, stop=["STOP"]),
+    )
+    first.status = RequestStatus.RUNNING
+    first.num_prompt_tokens = 1
+    first.batch_uid = 7
+    first._decoder = MagicMock()
+    first._decoder.add_token.return_value = " STOP"
+    first._decoder.get_full_text.return_value = "prefix STOP"
+    first._decoder.prev_text = "prefix "
+    scheduler.running[first.request_id] = first
+    scheduler.uid_to_request_id[7] = first.request_id
+    scheduler.request_id_to_uid[first.request_id] = 7
+
+    gb.uids = [7]
+    gb._next_tokens = mx.array([500], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+    assert _install_mtp_vendored(
+        batch_gen,
+        model=_StubModel(),
+        requests=scheduler.running,
+        uid_to_request_id=scheduler.uid_to_request_id,
+    )
+    gb._step()
+    assert set(gb._mtp_vendored_state) == {7}
+
+    response = SimpleNamespace(
+        uid=7,
+        token=501,
+        finish_reason=None,
+        logprobs=None,
+    )
+    outputs, finished = scheduler._process_batch_responses([response])
+    assert outputs[0].finish_reason == "stop"
+    assert finished == {first.request_id}
+    assert present == set()
+    assert gb._mtp_vendored_state == {}
+
+    scheduler._cleanup_finished(finished)
+    second = Request(
+        "req-8",
+        "next",
+        SamplingParams(max_tokens=100, temperature=0.0),
+    )
+    second.status = RequestStatus.RUNNING
+    second.batch_uid = 8
+    scheduler.running[second.request_id] = second
+    scheduler.uid_to_request_id[8] = second.request_id
+    scheduler.request_id_to_uid[second.request_id] = 8
+    present.add(8)
+    gb.uids = [8]
+    gb.tokens = [[]]
+    gb._next_tokens = mx.array([600], dtype=mx.uint32)
+    gb._next_logprobs = [mx.array([0.0])]
+
+    gb._step()
+    assert set(gb._mtp_vendored_state) == {8}
 
 
 def test_install_mtp_vendored_partial_remove_reaps_only_departed_uid():

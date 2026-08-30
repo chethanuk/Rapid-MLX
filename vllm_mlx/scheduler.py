@@ -624,20 +624,6 @@ class SchedulerConfig:
         self.pflash_config = self.pflash_config.validate()
 
 
-def _max_running_sequences(config: SchedulerConfig) -> int:
-    """Return the live decode width supported by the selected runtime.
-
-    The vendored MTP path has a request-local verifier/cache transaction and
-    currently supports one sequence. Admission therefore serializes running
-    MTP requests while leaving ``max_concurrent_requests`` as the independent
-    queue/backpressure capacity. Other runtimes retain the operator's batch
-    width unchanged.
-    """
-    if config.spec_decode == "mtp":
-        return 1
-    return config.max_num_seqs
-
-
 @dataclass
 class SchedulerOutput:
     """
@@ -6861,6 +6847,21 @@ class Scheduler:
             )
         return snapshot_boundary
 
+    def _max_running_sequences(self) -> int:
+        """Return the batch width supported by the live speculative runtime.
+
+        Before the lazy MTP install gate runs, admit one request so an
+        unsupported batch cannot form. A successful install keeps B=1; a
+        definitive gate miss restores the operator's ordinary-decode width.
+        """
+        if getattr(self.config, "spec_decode", "none") != "mtp":
+            return self.config.max_num_seqs
+        if not getattr(self, "spec_decode_runtime_attempted", False):
+            return 1
+        if getattr(self, "spec_decode_runtime_method", None) == "mtp":
+            return 1
+        return self.config.max_num_seqs
+
     def _schedule_waiting(self) -> list[Request]:
         """
         Move requests from waiting queue to running.
@@ -6874,8 +6875,7 @@ class Scheduler:
         # and explicitly supports B=1. Keep later requests in the ordinary
         # scheduler queue until that request departs; this preserves liveness
         # without ever attempting a lossy MTP-to-plain handoff mid-stream.
-        running_limit = _max_running_sequences(self.config)
-        while self.waiting and len(self.running) < running_limit:
+        while self.waiting and len(self.running) < self._max_running_sequences():
             request = self.waiting.popleft()
 
             # Ensure we have a batch generator. The False return means
@@ -7184,6 +7184,29 @@ class Scheduler:
 
         return scheduled
 
+    def _retire_scheduler_finished_uid(self, response: Any) -> None:
+        """Remove a uid finished by scheduler-side stop policy.
+
+        mlx-lm removes rows when its own EOS/token limit sets ``finish_reason``.
+        Text stop sequences and repetition-loop aborts are detected later by
+        Rapid-MLX, after ``GenerationBatch.next()`` returned, so that row is
+        still live. Remove it through the BatchGenerator lifecycle seam and
+        copy any returned cache onto the response before normal cache storage.
+        """
+        batch_generator = self.batch_generator
+        if batch_generator is None:
+            raise RuntimeError(
+                "scheduler generated a terminal response without a BatchGenerator"
+            )
+        caches = batch_generator.remove(
+            [response.uid],
+            return_prompt_caches=True,
+        )
+        cached = caches.get(response.uid) if isinstance(caches, dict) else None
+        if cached is None:
+            return
+        response.prompt_cache, response.all_tokens = cached
+
     def _process_batch_responses(
         self, responses: list[Any]
     ) -> tuple[list[RequestOutput], set[str]]:
@@ -7417,6 +7440,9 @@ class Scheduler:
 
             # Check if finished
             if finish_reason is not None:
+                scheduler_generated_finish = response.finish_reason is None
+                if scheduler_generated_finish:
+                    self._retire_scheduler_finished_uid(response)
                 response.finish_reason = finish_reason
                 if response.finish_reason == "stop":
                     request.set_finished(RequestStatus.FINISHED_STOPPED)
