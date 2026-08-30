@@ -207,6 +207,33 @@ struct WebToolsHardeningTests {
         #expect(started.duration(to: .now) < .seconds(1))
     }
 
+    @Test("Fast failures advance immediately instead of waiting for each stagger")
+    func fastFailuresAdvanceImmediately() async throws {
+        let addresses = [
+            try #require(ParsedIP("2001:db8::1")),
+            try #require(ParsedIP("192.0.2.1")),
+            try #require(ParsedIP("2001:db8::2")),
+            try #require(ParsedIP("192.0.2.2")),
+        ]
+        let recorder = AddressAttemptRecorder()
+
+        let result = try await BrowseTool.withDeadline(1) {
+            try await BrowseTool.firstSuccessful(
+                addresses: addresses,
+                attemptDelayNanoseconds: 5_000_000_000
+            ) { address in
+                await recorder.record(address)
+                if address != addresses.last {
+                    throw TestNetworkFailure()
+                }
+                return address.canonical
+            }
+        }
+
+        #expect(result == addresses.last?.canonical)
+        #expect(await recorder.addresses == addresses)
+    }
+
     @Test("Address fallback reports failure after every candidate fails")
     func addressFallbackReportsFailureAfterEveryCandidateFails() async throws {
         let addresses = [

@@ -306,6 +306,7 @@ enum BrowseTool {
     private enum AddressAttemptOutcome<Value: Sendable>: Sendable {
         case success(Value)
         case failure(any Error)
+        case staggerElapsed(Int)
     }
 
     /// Preserve resolver order within each family while alternating families
@@ -349,27 +350,30 @@ enum BrowseTool {
             throw simpleError("no validated addresses")
         }
 
+        let orderedAddresses = interleavedAddressFamilies(addresses)
         return try await withThrowingTaskGroup(of: AddressAttemptOutcome<T>.self) { group in
-            for (index, address) in interleavedAddressFamilies(addresses).enumerated() {
+            var nextAddressIndex = 1
+            var activeAttempts = 1
+            var staggerGeneration = 0
+            var lastError: (any Error)?
+
+            group.addTask {
+                do {
+                    try Task.checkCancellation()
+                    return .success(try await attempt(orderedAddresses[0]))
+                } catch {
+                    return .failure(error)
+                }
+            }
+            if nextAddressIndex < orderedAddresses.count {
+                staggerGeneration += 1
+                let generation = staggerGeneration
                 group.addTask {
-                    do {
-                        if index > 0 {
-                            let (delay, overflow) = attemptDelayNanoseconds
-                                .multipliedReportingOverflow(by: UInt64(index))
-                            guard !overflow else {
-                                throw simpleError("address fallback delay overflow")
-                            }
-                            try await Task.sleep(nanoseconds: delay)
-                        }
-                        try Task.checkCancellation()
-                        return .success(try await attempt(address))
-                    } catch {
-                        return .failure(error)
-                    }
+                    try await Task.sleep(nanoseconds: attemptDelayNanoseconds)
+                    return .staggerElapsed(generation)
                 }
             }
 
-            var lastError: (any Error)?
             while let outcome = try await group.next() {
                 switch outcome {
                 case .success(let value):
@@ -382,6 +386,53 @@ enum BrowseTool {
                         throw error
                     }
                     lastError = error
+                    activeAttempts -= 1
+                    if nextAddressIndex < orderedAddresses.count {
+                        let address = orderedAddresses[nextAddressIndex]
+                        nextAddressIndex += 1
+                        activeAttempts += 1
+                        group.addTask {
+                            do {
+                                try Task.checkCancellation()
+                                return .success(try await attempt(address))
+                            } catch {
+                                return .failure(error)
+                            }
+                        }
+                        staggerGeneration += 1
+                        if nextAddressIndex < orderedAddresses.count {
+                            let generation = staggerGeneration
+                            group.addTask {
+                                try await Task.sleep(nanoseconds: attemptDelayNanoseconds)
+                                return .staggerElapsed(generation)
+                            }
+                        }
+                    } else if activeAttempts == 0 {
+                        group.cancelAll()
+                        throw lastError ?? simpleError("no validated addresses")
+                    }
+                case .staggerElapsed(let generation):
+                    guard generation == staggerGeneration,
+                          nextAddressIndex < orderedAddresses.count else { continue }
+                    let address = orderedAddresses[nextAddressIndex]
+                    nextAddressIndex += 1
+                    activeAttempts += 1
+                    group.addTask {
+                        do {
+                            try Task.checkCancellation()
+                            return .success(try await attempt(address))
+                        } catch {
+                            return .failure(error)
+                        }
+                    }
+                    staggerGeneration += 1
+                    if nextAddressIndex < orderedAddresses.count {
+                        let nextGeneration = staggerGeneration
+                        group.addTask {
+                            try await Task.sleep(nanoseconds: attemptDelayNanoseconds)
+                            return .staggerElapsed(nextGeneration)
+                        }
+                    }
                 }
             }
             throw lastError ?? simpleError("no validated addresses")

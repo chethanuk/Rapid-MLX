@@ -34,7 +34,7 @@ struct IPPinnedHTTPTransportTests {
         let url = try #require(URL(string: "http://pinned-cancel.test:\(port)/request"))
         let address = try #require(ParsedIP("127.0.0.1"))
 
-        try await raceTransportAgainstWatchdog {
+        try await raceTransportAgainstWatchdog(expected: .cancellation) {
             try await IPPinnedHTTPTransport.fetch(
                 url: url,
                 address: address,
@@ -57,7 +57,7 @@ struct IPPinnedHTTPTransportTests {
         let url = try #require(URL(string: "http://pinned-deadline.test:\(port)/request"))
         let address = try #require(ParsedIP("127.0.0.1"))
 
-        try await raceTransportAgainstWatchdog {
+        try await raceTransportAgainstWatchdog(expected: .deadline) {
             try await BrowseTool.withDeadline(0.2) {
                 try await IPPinnedHTTPTransport.fetch(
                     url: url,
@@ -201,6 +201,11 @@ struct IPPinnedHTTPTransportTests {
 
 private struct TestWatchdogDeadline: Error {}
 
+private enum FetchRaceExpectation {
+    case cancellation
+    case deadline
+}
+
 private enum FetchRaceOutcome: @unchecked Sendable {
     case fetch(Error)
     case watchdog(Error)
@@ -322,6 +327,7 @@ private final class RequestSignal: @unchecked Sendable {
 }
 
 private func raceTransportAgainstWatchdog(
+    expected: FetchRaceExpectation,
     fetchBody: @escaping @Sendable () async throws -> (Data, HTTPURLResponse),
     watchdogBody: @escaping @Sendable () async throws -> Void,
     settle: @escaping @Sendable () async -> Bool
@@ -357,11 +363,13 @@ private func raceTransportAgainstWatchdog(
     guard case .fetch(let error) = first else {
         throw TestWatchdogDeadline()
     }
-    if error is CancellationError {
-        return
+    switch expected {
+    case .cancellation:
+        #expect(error is CancellationError, "transport should surface cancellation")
+    case .deadline:
+        #expect(
+            !(error is CancellationError) && String(describing: error).contains("deadline"),
+            "deadline should be the first observed failure"
+        )
     }
-    #expect(
-        String(describing: error).contains("deadline"),
-        "deadline should be the first observed failure"
-    )
 }
