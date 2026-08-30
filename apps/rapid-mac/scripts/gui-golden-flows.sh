@@ -2054,10 +2054,10 @@ flow_cached_curated_tradeup() {
         if [[ "$memory_confirmed" == 0 ]]; then
             see_main "$OUT/starter-after-start.json"
             if jq -e '.data.ui_elements[]?
-                      | select(.identifier == "MemoryWarning.Confirm"
+                      | select(.identifier == "Quickstart.Memory.LoadAnyway"
                                and .enabled == true)' \
                 "$OUT/starter-after-start.json" >/dev/null; then
-                "$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm \
+                "$AX_DRIVER" click-center "$APP_PID" Quickstart.Memory.LoadAnyway \
                     > "$OUT/starter-memory-confirm.json"
                 memory_confirmed=1
                 log "  confirmed hosted-runner memory warning for cached starter"
