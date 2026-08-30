@@ -106,7 +106,7 @@ enum IPPinnedHTTPTransport {
         let target = url.query.map { "\(path)?\($0)" } ?? path
         let headers = [
             "GET \(target) HTTP/1.1",
-            "Host: \(hostHeader(host: host, address: address, port: port))",
+            "Host: \(hostHeader(host: host, address: address, scheme: url.scheme?.lowercased() ?? "", port: port))",
             "User-Agent: \(BrowseTool.userAgent)",
             "Accept: text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.8",
             "Accept-Encoding: identity",
@@ -118,6 +118,7 @@ enum IPPinnedHTTPTransport {
     static func hostHeader(
         host: String,
         address: ParsedIP,
+        scheme: String,
         port: UInt16
     ) -> String {
         let bareHost = host.hasPrefix("[") && host.hasSuffix("]")
@@ -125,7 +126,9 @@ enum IPPinnedHTTPTransport {
             : host
         let isIPv6Literal = address.family == .v6 && bareHost.contains(":")
         let hostText = isIPv6Literal ? "[\(bareHost)]" : bareHost
-        return (port == 80 || port == 443) ? hostText : "\(hostText):\(port)"
+        let isDefaultPort = (scheme == "http" && port == 80)
+            || (scheme == "https" && port == 443)
+        return isDefaultPort ? hostText : "\(hostText):\(port)"
     }
 
     fileprivate static func transportError(_ message: String) -> NSError {

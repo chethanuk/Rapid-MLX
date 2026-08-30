@@ -81,6 +81,7 @@ struct IPPinnedHTTPTransportTests {
         let hostHeader = IPPinnedHTTPTransport.hostHeader(
             host: "example.com",
             address: address,
+            scheme: "https",
             port: 443
         )
 
@@ -94,6 +95,7 @@ struct IPPinnedHTTPTransportTests {
         let hostHeader = IPPinnedHTTPTransport.hostHeader(
             host: "[2001:db8::1]",
             address: address,
+            scheme: "https",
             port: 443
         )
 
@@ -108,6 +110,48 @@ struct IPPinnedHTTPTransportTests {
         #expect(throws: Error.self) {
             _ = try IPHTTPResponseParser.parse(data: raw, url: url)
         }
+    }
+
+    @Test("Explicit non-default ports remain in the Host authority")
+    func explicitNonDefaultPortsRemainInHostAuthority() throws {
+        let address = try #require(ParsedIP("2001:db8::1"))
+
+        let httpOn443 = IPPinnedHTTPTransport.hostHeader(
+            host: "example.com",
+            address: address,
+            scheme: "http",
+            port: 443
+        )
+        let httpsOn80 = IPPinnedHTTPTransport.hostHeader(
+            host: "example.com",
+            address: address,
+            scheme: "https",
+            port: 80
+        )
+
+        #expect(httpOn443 == "example.com:443")
+        #expect(httpsOn80 == "example.com:80")
+    }
+
+    @Test("Default ports are omitted from the Host authority")
+    func defaultPortsAreOmittedFromHostAuthority() throws {
+        let address = try #require(ParsedIP("2001:db8::1"))
+
+        let httpOn80 = IPPinnedHTTPTransport.hostHeader(
+            host: "example.com",
+            address: address,
+            scheme: "http",
+            port: 80
+        )
+        let httpsOn443 = IPPinnedHTTPTransport.hostHeader(
+            host: "example.com",
+            address: address,
+            scheme: "https",
+            port: 443
+        )
+
+        #expect(httpOn80 == "example.com")
+        #expect(httpsOn443 == "example.com")
     }
 
     @Test("A chunk missing terminator bytes fails closed")
