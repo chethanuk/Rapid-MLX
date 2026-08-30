@@ -7,11 +7,13 @@ from scripts.check_release_notes import check_release_notes, main
 
 
 def _inputs(tmp_path: Path, version: str = "0.13.2") -> tuple[Path, Path]:
+    previous_version = "0.0.0"
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(
         f"# Changelog\n\n## [{version}] — 2026-08-27\n\nDesktop changes.\n\n"
-        f"[Unreleased]: https://example.test/compare/rapid-mac-v{version}...HEAD\n"
-        f"[{version}]: https://example.test/compare/rapid-mac-v0.0.0...rapid-mac-v{version}\n",
+        f"## [{previous_version}] — 2026-08-26\n\nPrevious release.\n\n"
+        f"[Unreleased]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v{version}...HEAD\n"
+        f"[{version}]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v{previous_version}...rapid-mac-v{version}\n",
         encoding="utf-8",
     )
     notes_dir = tmp_path / "release-notes"
@@ -67,7 +69,7 @@ def test_missing_version_comparison_is_rejected(tmp_path: Path) -> None:
         changelog.read_text(encoding="utf-8").replace("[0.13.2]:", "[0.13.1]:"),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="comparison ending at rapid-mac-v0.13.2"):
+    with pytest.raises(ValueError, match=r"exactly one '\[0.13.2\]' comparison"):
         check_release_notes("0.13.2", changelog, notes_dir)
 
 
@@ -79,8 +81,46 @@ def test_unreleased_comparison_must_start_at_current_tag(tmp_path: Path) -> None
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="does not compare rapid-mac-v0.14.0-rc1"):
+    with pytest.raises(ValueError, match=r"'\[Unreleased\]' must be exactly"):
         check_release_notes("0.14.0-rc1", changelog, notes_dir)
+
+
+@pytest.mark.parametrize("label", ["Unreleased", "0.13.2"])
+def test_duplicate_comparison_definition_is_rejected(
+    tmp_path: Path, label: str
+) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    changelog.write_text(
+        changelog.read_text(encoding="utf-8")
+        + f"[{label}]: https://github.com/raullenchai/Rapid-MLX/compare/duplicate\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must define exactly one"):
+        check_release_notes("0.13.2", changelog, notes_dir)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "https://example.invalid/compare/rapid-mac-v0.0.0...rapid-mac-v0.13.2",
+        "https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.0.1...rapid-mac-v0.13.2",
+        "https://github.com/raullenchai/Rapid-MLX/releases/rapid-mac-v0.13.2",
+    ],
+)
+def test_version_comparison_requires_exact_repository_and_previous_tag(
+    tmp_path: Path, replacement: str
+) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    expected = (
+        "https://github.com/raullenchai/Rapid-MLX/compare/"
+        "rapid-mac-v0.0.0...rapid-mac-v0.13.2"
+    )
+    changelog.write_text(
+        changelog.read_text(encoding="utf-8").replace(expected, replacement),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"'\[0.13.2\]' must be exactly"):
+        check_release_notes("0.13.2", changelog, notes_dir)
 
 
 @pytest.mark.parametrize("version", ["0.13", "0.13.2-rc0", "../0.13.2"])

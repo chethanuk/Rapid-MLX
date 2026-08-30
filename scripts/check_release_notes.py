@@ -53,23 +53,44 @@ def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
             f"{changelog} has an empty '## [{version}]' section; add the Desktop release notes"
         )
 
-    references = {
-        match.group(1): match.group(2)
-        for line in changelog_lines
-        if (match := CHANGELOG_REFERENCE_RE.match(line))
-    }
-    desktop_tag = f"rapid-mac-v{version}"
-    version_reference = references.get(version, "")
-    if not version_reference.endswith(f"...{desktop_tag}"):
+    if section_end == len(changelog_lines) or not (
+        previous_match := CHANGELOG_HEADING_RE.match(changelog_lines[section_end])
+    ):
         raise ValueError(
-            f"{changelog} has no exact '[{version}]' comparison ending at "
-            f"{desktop_tag}; update the changelog reference links"
+            f"{changelog} has no release section after '## [{version}]'; "
+            "the comparison base cannot be derived"
         )
-    unreleased_reference = references.get("Unreleased", "")
-    if not unreleased_reference.endswith(f"/compare/{desktop_tag}...HEAD"):
+    previous_version = previous_match.group(1)
+
+    references: dict[str, list[str]] = {}
+    for line in changelog_lines:
+        if match := CHANGELOG_REFERENCE_RE.match(line):
+            references.setdefault(match.group(1), []).append(match.group(2))
+
+    for label in ("Unreleased", version):
+        count = len(references.get(label, []))
+        if count != 1:
+            raise ValueError(
+                f"{changelog} must define exactly one '[{label}]' comparison; "
+                f"found {count}"
+            )
+
+    compare_root = "https://github.com/raullenchai/Rapid-MLX/compare/"
+    desktop_tag = f"rapid-mac-v{version}"
+    previous_tag = f"rapid-mac-v{previous_version}"
+    version_reference = references[version][0]
+    expected_version_reference = f"{compare_root}{previous_tag}...{desktop_tag}"
+    if version_reference != expected_version_reference:
         raise ValueError(
-            f"{changelog} '[Unreleased]' does not compare {desktop_tag} to HEAD; "
-            "update the changelog reference links"
+            f"{changelog} '[{version}]' must be exactly "
+            f"{expected_version_reference}; update the changelog reference links"
+        )
+    unreleased_reference = references["Unreleased"][0]
+    expected_unreleased_reference = f"{compare_root}{desktop_tag}...HEAD"
+    if unreleased_reference != expected_unreleased_reference:
+        raise ValueError(
+            f"{changelog} '[Unreleased]' must be exactly "
+            f"{expected_unreleased_reference}; update the changelog reference links"
         )
 
     notes = notes_dir / f"v{version}.md"
