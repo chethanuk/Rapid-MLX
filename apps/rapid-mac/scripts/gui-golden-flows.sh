@@ -2035,9 +2035,37 @@ flow_cached_curated_tradeup() {
     # welcome is shown only after the model is ready, so it must describe that
     # achieved state instead of promising a network-dependent duration.
     press "$OUT/chooser.json" Quickstart.Footer.Primary "$OUT/start-existing.json"
-    wait_fake_event \
-        '.event == "server_started" and .alias == "qwen3.5-4b-4bit"' \
-        "cached 16 GB starter did not start"
+    # The 16 GB fixture owns recommendation policy, not the host's live
+    # pressure. A busy hosted runner can therefore (correctly) ask for the
+    # existing explicit memory confirmation before it starts this zero-weight
+    # fake. Handle that real branch exactly as start_model does: confirm only
+    # when the enabled warning is present, then still require the independent
+    # sidecar event. Without this, ambient runner pressure made the flow wait
+    # for a start the app was intentionally holding for user consent.
+    local memory_confirmed=0 starter_started=0
+    for _ in {1..240}; do
+        if [[ -s "$OUT/fake-events.jsonl" ]] \
+           && jq -e -s 'any(.[]; .event == "server_started"
+                                   and .alias == "qwen3.5-4b-4bit")' \
+                "$OUT/fake-events.jsonl" >/dev/null 2>&1; then
+            starter_started=1
+            break
+        fi
+        if [[ "$memory_confirmed" == 0 ]]; then
+            see_main "$OUT/starter-after-start.json"
+            if jq -e '.data.ui_elements[]?
+                      | select(.identifier == "MemoryWarning.Confirm"
+                               and .enabled == true)' \
+                "$OUT/starter-after-start.json" >/dev/null; then
+                "$AX_DRIVER" click-center "$APP_PID" MemoryWarning.Confirm \
+                    > "$OUT/starter-memory-confirm.json"
+                memory_confirmed=1
+                log "  confirmed hosted-runner memory warning for cached starter"
+            fi
+        fi
+        sleep 0.25
+    done
+    [[ "$starter_started" == 1 ]] || die "cached 16 GB starter did not start"
     wait_identifier Quickstart.Ready.StartChatting "$OUT/ready-confirmation.json"
     press "$OUT/ready-confirmation.json" Quickstart.Ready.StartChatting \
         "$OUT/start-chatting.json"
