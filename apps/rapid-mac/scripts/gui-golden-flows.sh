@@ -154,20 +154,26 @@ assert_fake_server_starts() {
 # wire-side boundary explicit so a GUI assertion can distinguish a sidecar
 # that never became reachable from a slower app state transition.
 wait_fake_sidecar_health() {
-    local expected_alias="$1" what="$2" attempts="${3:-40}" sidecar_port i
-    sidecar_port="$(jq -rs --arg alias "$expected_alias" \
+    local expected_alias="$1" what="$2" attempts="${3:-40}"
+    local sidecar_record sidecar_pid sidecar_port health_payload i
+    sidecar_record="$(jq -rs --arg alias "$expected_alias" \
         'map(select(.event == "server_started" and .alias == $alias))
-         | last | .port // empty' "$OUT/fake-events.jsonl")"
-    [[ "$sidecar_port" =~ ^[0-9]+$ ]] \
-        || die "$what did not record a valid sidecar port"
+         | last | [(.pid // ""), (.port // "")] | @tsv' \
+        "$OUT/fake-events.jsonl")"
+    IFS=$'\t' read -r sidecar_pid sidecar_port <<< "$sidecar_record"
+    [[ "$sidecar_pid" =~ ^[0-9]+$ && "$sidecar_port" =~ ^[0-9]+$ ]] \
+        || die "$what did not record a valid sidecar pid and port"
     for ((i=0; i<attempts; i++)); do
-        if curl -fsS --connect-timeout 1 --max-time 1 \
-            "http://127.0.0.1:$sidecar_port/healthz" >/dev/null 2>&1; then
+        health_payload="$(curl -fsS --connect-timeout 1 --max-time 1 \
+            "http://127.0.0.1:$sidecar_port/healthz" 2>/dev/null || true)"
+        if jq -e --argjson pid "$sidecar_pid" --arg alias "$expected_alias" \
+            '.ok == true and .pid == $pid and .alias == $alias' \
+            <<< "$health_payload" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
     done
-    die "$what started but never served health on :$sidecar_port"
+    die "$what pid=$sidecar_pid started but never served its own health on :$sidecar_port"
 }
 
 require_observed_phase() {

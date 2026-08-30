@@ -24,6 +24,7 @@ they exist when they break.
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import socket
@@ -348,7 +349,14 @@ def test_sidecar_health_guard_bounds_a_connected_nonresponsive_peer(tmp_path: Pa
     events_dir = tmp_path / "evidence"
     events_dir.mkdir()
     (events_dir / "fake-events.jsonl").write_text(
-        json.dumps({"event": "server_started", "alias": "fake-alias", "port": port})
+        json.dumps(
+            {
+                "event": "server_started",
+                "alias": "fake-alias",
+                "pid": os.getpid(),
+                "port": port,
+            }
+        )
         + "\n"
     )
     try:
@@ -376,7 +384,68 @@ def test_sidecar_health_guard_bounds_a_connected_nonresponsive_peer(tmp_path: Pa
         thread.join(timeout=1)
 
     assert result.returncode == 1
-    assert "started but never served health" in result.stderr
+    assert "started but never served its own health" in result.stderr
+
+
+def test_sidecar_health_guard_rejects_a_competing_listener(tmp_path: Path):
+    """A 200 from a process other than the recorded fake is not readiness."""
+
+    class CompetingHealthHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler API
+            payload = json.dumps(
+                {"ok": True, "pid": os.getpid() + 1, "alias": "fake-alias"}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CompetingHealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    events_dir = tmp_path / "evidence"
+    events_dir.mkdir()
+    (events_dir / "fake-events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "server_started",
+                "alias": "fake-alias",
+                "pid": os.getpid(),
+                "port": server.server_port,
+            }
+        )
+        + "\n"
+    )
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'harness="$1"; evidence="$2"; set --; source "$harness"; '
+                'OUT="$evidence"; wait_fake_sidecar_health '
+                '"fake-alias" "test sidecar" 1',
+                "gui-contract-test",
+                str(HARNESS),
+                str(events_dir),
+            ],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result.returncode == 1
+    assert "started but never served its own health" in result.stderr
 
 
 def test_audio_control_journey_is_blocking_gui_ci_and_has_failure_evidence():
