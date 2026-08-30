@@ -370,6 +370,11 @@ jobs:
             --emit-constraints > "$CONSTRAINTS"
 
           "$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"
+          # Validate the ordinary dependency graph before adding the deliberate
+          # reduced-runtime exception below. A second generic `pip check` would
+          # reject mlx-vlm's intentionally omitted torch/cv2 extras; the
+          # release-specific checker after that install validates the exact
+          # supported exception, and the live Gemma roster proves it works.
           "$V/bin/pip" check
 
           # The top-10 residency roster below includes Gemma 4. Give this

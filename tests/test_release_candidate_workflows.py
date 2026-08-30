@@ -57,12 +57,17 @@ def test_tier1_candidate_installs_reduced_vision_runtime_for_multimodal_roster()
 
     assert "gemma-4-26b-4bit" in roster["top_10_aliases"]
     assert (
-        '"$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"'
-        in gate
+        '"$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"' in gate
     )
-    assert '"$V/bin/pip" install -q --no-deps --constraint "$CONSTRAINTS"' in gate
+    reduced_install = gate.index(
+        '"$V/bin/pip" install -q --no-deps --constraint "$CONSTRAINTS"'
+    )
+    distribution_check = gate.index("check-sidecar-distributions.py", reduced_install)
+    roster_run = gate.index(
+        'RAPID_MLX_VENV="$V" bash tests/integrations/agent_smoke.sh'
+    )
+    assert reduced_install < distribution_check < roster_run
     assert "'mlx-vlm' 'Pillow>=10.0'" in gate
-    assert "check-sidecar-distributions.py" in gate
 
 
 def test_tagged_promotion_and_standalone_build_are_mutually_exclusive():
