@@ -2084,6 +2084,78 @@ def test_install_mtp_vendored_partial_remove_reaps_only_departed_uid():
     assert gb._mtp_vendored_disabled_uids == {8: "req-8"}
 
 
+@pytest.mark.parametrize("finder_shape", ["missing", "raises"])
+def test_install_mtp_vendored_partial_remove_keeps_state_when_departure_unknown(
+    finder_shape,
+):
+    """An unobservable partial removal cannot justify reaping live state."""
+    from vllm_mlx.scheduler import _install_mtp_vendored
+
+    batch_gen, gb = _make_batch_gen_with_gb()
+
+    def partial_remove(_uids, return_prompt_caches=False):
+        raise RuntimeError("simulated partial remove")
+
+    batch_gen.remove = partial_remove
+    if finder_shape == "raises":
+
+        def broken_finder(_uids):
+            raise RuntimeError("finder unavailable")
+
+        batch_gen._find_uids = broken_finder
+
+    assert _install_mtp_vendored(batch_gen, model=_StubModel()) is True
+    gb._mtp_vendored_state[7] = {"gen": None, "queue": []}
+
+    with pytest.raises(RuntimeError, match="partial remove"):
+        batch_gen.remove([7])
+
+    assert set(gb._mtp_vendored_state) == {7}
+
+
+@pytest.mark.parametrize(
+    ("returned_caches", "expected_cache"),
+    [
+        ({}, None),
+        ({7: (["cache"], [1, 2])}, (["cache"], [1, 2])),
+    ],
+)
+def test_scheduler_stop_retirement_preserves_only_committed_plain_cache(
+    returned_caches,
+    expected_cache,
+):
+    """Plain decode keeps committed cache; a missing cache stays absent."""
+    from unittest.mock import MagicMock
+
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.spec_decode_runtime_method = None
+    scheduler.batch_generator = MagicMock()
+    scheduler.batch_generator.remove.return_value = returned_caches
+    response = SimpleNamespace(uid=7)
+
+    scheduler._retire_scheduler_finished_uid(response)
+
+    scheduler.batch_generator.remove.assert_called_once_with(
+        [7], return_prompt_caches=True
+    )
+    if expected_cache is None:
+        assert not hasattr(response, "prompt_cache")
+    else:
+        assert (response.prompt_cache, response.all_tokens) == expected_cache
+
+
+def test_scheduler_stop_retirement_requires_live_batch_generator():
+    from vllm_mlx.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.batch_generator = None
+
+    with pytest.raises(RuntimeError, match="without a BatchGenerator"):
+        scheduler._retire_scheduler_finished_uid(SimpleNamespace(uid=7))
+
+
 def test_install_mtp_vendored_first_call_construction_failure_does_not_double_book(
     monkeypatch,
 ):
@@ -2463,11 +2535,13 @@ def test_install_mtp_vendored_stop_iteration_latches_terminal_uid(monkeypatch):
     batch_gen, gb = _make_batch_gen_with_gb()
     gb.uids = [88]
     request_stub = SimpleNamespace(sampling_params=SimpleNamespace(temperature=0.0))
+    requests = {"req-88": request_stub}
+    uid_to_request_id = {88: "req-88"}
     ok = _install_mtp_vendored(
         batch_gen,
         model=_StubModel(),
-        requests={"req-88": request_stub},
-        uid_to_request_id={88: "req-88"},
+        requests=requests,
+        uid_to_request_id=uid_to_request_id,
     )
     assert ok is True
 
@@ -2498,6 +2572,16 @@ def test_install_mtp_vendored_stop_iteration_latches_terminal_uid(monkeypatch):
             gb._step()
         assert gb.orig_step_calls == pre_retry_orig_step_calls
         assert gb._mtp_vendored_terminal_uids == {88: "req-88"}
+
+        # mlx-lm may reuse the integer uid after the failed request is removed.
+        # A different authoritative request id proves this is a new owner and
+        # clears the terminal latch before constructing its fresh generator.
+        uid_to_request_id[88] = "req-89"
+        requests["req-89"] = request_stub
+        gb._next_tokens = mx.array([600], dtype=mx.uint32)
+        gb._next_logprobs = [mx.array([0.0])]
+        gb._step()
+        assert gb._mtp_vendored_terminal_uids == {}
         return
     raise AssertionError(
         "codex round-G BLOCKING #2 regression: wrapper did NOT raise "
