@@ -48,6 +48,23 @@ def test_auto_release_stages_one_sha_labelled_complete_desktop_bundle():
     assert "rapid-mlx-desktop-pre-tag-candidate-${{ github.sha }}" in upload
 
 
+def test_tier1_candidate_installs_reduced_vision_runtime_for_multimodal_roster():
+    workflow = AUTO_RELEASE.read_text(encoding="utf-8")
+    gate = _step(workflow, "Re-verify Tier-1 agents against the release source")
+    roster = yaml.safe_load(
+        (ROOT / "tests/integrations/top10_sequences.yaml").read_text(encoding="utf-8")
+    )
+
+    assert "gemma-4-26b-4bit" in roster["top_10_aliases"]
+    assert (
+        '"$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"'
+        in gate
+    )
+    assert '"$V/bin/pip" install -q --no-deps --constraint "$CONSTRAINTS"' in gate
+    assert "'mlx-vlm' 'Pillow>=10.0'" in gate
+    assert "check-sidecar-distributions.py" in gate
+
+
 def test_tagged_promotion_and_standalone_build_are_mutually_exclusive():
     workflow = yaml.load(DESKTOP_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     inputs = workflow["on"]["workflow_dispatch"]["inputs"]

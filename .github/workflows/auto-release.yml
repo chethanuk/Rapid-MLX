@@ -371,6 +371,15 @@ jobs:
 
           "$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"
           "$V/bin/pip" check
+
+          # The top-10 residency roster below includes Gemma 4. Give this
+          # fresh candidate venv the same release-tested reduced vision
+          # runtime as the Desktop sidecar: mlx-vlm's model classes + Pillow,
+          # without its unused torch/cv2 dependency cascade. The canonical
+          # constraints and metadata checker below pin and validate the one
+          # intentional Transformers compatibility exception.
+          "$V/bin/pip" install -q --no-deps --constraint "$CONSTRAINTS" \
+            'mlx-vlm' 'Pillow>=10.0'
           SITE_PACKAGES=$("$V/bin/python3.12" -c \
             'import sysconfig; print(sysconfig.get_paths()["purelib"])')
           "$V/bin/python3.12" \
