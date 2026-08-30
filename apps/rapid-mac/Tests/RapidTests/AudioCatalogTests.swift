@@ -61,10 +61,10 @@ struct AudioCatalogTests {
             family: "parakeet"
         )
         #expect(parakeet.displayName == "Parakeet TDT v3")
-        #expect(parakeet.badge == "English")
-        #expect(parakeet.summary.contains("English"))
-        #expect(!parakeet.summary.contains("25"))
-        #expect(parakeet.summary.contains("punctuation"))
+        #expect(parakeet.badge == "25 languages")
+        #expect(parakeet.summary.contains("25 European languages"))
+        #expect(parakeet.summary.contains("automatic language detection"))
+        #expect(parakeet.summary.contains("Chinese is not supported"))
 
         let qwen = AudioViewModel.transcriptionDetails(
             alias: "qwen3-asr",

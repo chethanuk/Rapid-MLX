@@ -799,6 +799,7 @@ Tested on Apple M2 Max (32GB).
 | Use Case | Recommended Model | Why |
 |----------|------------------|-----|
 | Fast English STT | `parakeet` | 40x RTF, low memory |
+| European-language STT | `parakeet-v3` | Automatic detection across 25 languages |
 | Multilingual STT | `whisper-large-v3` | 99+ languages |
 | Low-latency STT | `whisper-small` | 30x RTF, quick load |
 | General TTS | `kokoro` | 17x RTF, good quality |
@@ -806,7 +807,7 @@ Tested on Apple M2 Max (32GB).
 
 ## Performance Tips
 
-1. **Use Parakeet for English** - 40x faster than real-time
+1. **Use Parakeet v2 for English or v3 for 25 European languages** - 40x faster than real-time
 2. **Use 4-bit models** for lower memory usage
 3. **Use SAM-Audio small** for faster voice separation
 4. **Cache models** - engines are lazy-loaded and cached
