@@ -303,26 +303,89 @@ enum BrowseTool {
         }
     }
 
-    /// Try each already-validated address until one fetch succeeds. This keeps
-    /// the pinned-socket security model while restoring address fallback lost by
-    /// pinning; outer cancellation remains immediate and never moves to the
-    /// next address.
-    static func firstSuccessful<T: Sendable>(
-        addresses: [ParsedIP],
-        attempt: @escaping @Sendable (ParsedIP) async throws -> T
-    ) async throws -> T {
-        var lastError: Error?
-        for address in addresses {
-            do {
-                return try await attempt(address)
-            } catch {
-                if Task.isCancelled || error is CancellationError {
-                    throw error
-                }
-                lastError = error
+    private enum AddressAttemptOutcome<Value: Sendable>: Sendable {
+        case success(Value)
+        case failure(any Error)
+    }
+
+    /// Preserve resolver order within each family while alternating families
+    /// after the first preferred address. A broken family must not occupy every
+    /// early attempt slot before the other family gets a chance.
+    private static func interleavedAddressFamilies(_ addresses: [ParsedIP]) -> [ParsedIP] {
+        guard let preferredFamily = addresses.first?.family else { return [] }
+        let preferred = addresses.filter { $0.family == preferredFamily }
+        let alternate = addresses.filter { $0.family != preferredFamily }
+        var result: [ParsedIP] = []
+        result.reserveCapacity(addresses.count)
+        var preferredIndex = 0
+        var alternateIndex = 0
+
+        while preferredIndex < preferred.count || alternateIndex < alternate.count {
+            if preferredIndex < preferred.count {
+                result.append(preferred[preferredIndex])
+                preferredIndex += 1
+            }
+            if alternateIndex < alternate.count {
+                result.append(alternate[alternateIndex])
+                alternateIndex += 1
             }
         }
-        throw lastError ?? simpleError("no validated addresses")
+        return result
+    }
+
+    /// Race already-validated addresses with a small stagger until one fetch
+    /// succeeds. This keeps the pinned-socket security model while avoiding a
+    /// black-holed first address consuming almost the entire per-hop deadline.
+    /// The 250 ms default follows the established dual-stack connection-attempt
+    /// delay: the first address keeps its preference, later addresses receive a
+    /// meaningful chance in parallel, and the first success cancels all losers.
+    /// Outer cancellation remains immediate and cannot advance to a new address.
+    static func firstSuccessful<T: Sendable>(
+        addresses: [ParsedIP],
+        attemptDelayNanoseconds: UInt64 = 250_000_000,
+        attempt: @escaping @Sendable (ParsedIP) async throws -> T
+    ) async throws -> T {
+        guard !addresses.isEmpty else {
+            throw simpleError("no validated addresses")
+        }
+
+        return try await withThrowingTaskGroup(of: AddressAttemptOutcome<T>.self) { group in
+            for (index, address) in interleavedAddressFamilies(addresses).enumerated() {
+                group.addTask {
+                    do {
+                        if index > 0 {
+                            let (delay, overflow) = attemptDelayNanoseconds
+                                .multipliedReportingOverflow(by: UInt64(index))
+                            guard !overflow else {
+                                throw simpleError("address fallback delay overflow")
+                            }
+                            try await Task.sleep(nanoseconds: delay)
+                        }
+                        try Task.checkCancellation()
+                        return .success(try await attempt(address))
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+
+            var lastError: (any Error)?
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .success(let value):
+                    try Task.checkCancellation()
+                    group.cancelAll()
+                    return value
+                case .failure(let error):
+                    if Task.isCancelled || error is CancellationError {
+                        group.cancelAll()
+                        throw error
+                    }
+                    lastError = error
+                }
+            }
+            throw lastError ?? simpleError("no validated addresses")
+        }
     }
 
     // MARK: - Render
