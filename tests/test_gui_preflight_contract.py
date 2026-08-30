@@ -217,10 +217,7 @@ def test_cached_curated_tradeup_waits_for_health_and_bounded_ui_readiness():
     source = HARNESS.read_text()
     flow = source.split("flow_cached_curated_tradeup() {", 1)[1].split("\n}", 1)[0]
 
-    assert (
-        'wait_fake_sidecar_health "qwen3.5-4b-4bit" "cached 16 GB starter"'
-        in flow
-    )
+    assert 'wait_fake_sidecar_health "qwen3.5-4b-4bit" "cached 16 GB starter"' in flow
     assert (
         'wait_identifier Quickstart.Ready.StartChatting \\\n        "$OUT/ready-confirmation.json" 240'
         in flow
