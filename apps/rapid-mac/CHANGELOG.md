@@ -3564,8 +3564,8 @@ Older versions: see the
 [GitHub Releases page](https://github.com/machinefi/rapid-desktop/releases)
 for auto-generated notes against earlier tags.
 
-[Unreleased]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.2...HEAD
-[0.13.2]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.1...rapid-mac-v0.13.2
+[Unreleased]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.2-rc1...HEAD
+[0.13.2-rc1]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.1...rapid-mac-v0.13.2-rc1
 [0.13.1]: https://github.com/raullenchai/Rapid-MLX/compare/rapid-mac-v0.13.0...rapid-mac-v0.13.1
 [0.5.16]: https://github.com/machinefi/rapid-desktop/compare/v0.5.15...v0.5.16
 [0.5.15]: https://github.com/machinefi/rapid-desktop/compare/v0.5.14...v0.5.15

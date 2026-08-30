@@ -14,6 +14,7 @@ except ModuleNotFoundError:  # imported by tests as ``scripts.*`` from repo root
     from scripts.release_version import VERSION_RE
 
 CHANGELOG_HEADING_RE = re.compile(r"^## \[([^]]+)](?:\s|$)")
+CHANGELOG_REFERENCE_RE = re.compile(r"^\[([^]]+)]:\s+(\S+)\s*$")
 
 
 def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
@@ -50,6 +51,25 @@ def check_release_notes(version: str, changelog: Path, notes_dir: Path) -> None:
     if not "\n".join(changelog_lines[section_start:section_end]).strip():
         raise ValueError(
             f"{changelog} has an empty '## [{version}]' section; add the Desktop release notes"
+        )
+
+    references = {
+        match.group(1): match.group(2)
+        for line in changelog_lines
+        if (match := CHANGELOG_REFERENCE_RE.match(line))
+    }
+    desktop_tag = f"rapid-mac-v{version}"
+    version_reference = references.get(version, "")
+    if not version_reference.endswith(f"...{desktop_tag}"):
+        raise ValueError(
+            f"{changelog} has no exact '[{version}]' comparison ending at "
+            f"{desktop_tag}; update the changelog reference links"
+        )
+    unreleased_reference = references.get("Unreleased", "")
+    if not unreleased_reference.endswith(f"/compare/{desktop_tag}...HEAD"):
+        raise ValueError(
+            f"{changelog} '[Unreleased]' does not compare {desktop_tag} to HEAD; "
+            "update the changelog reference links"
         )
 
     notes = notes_dir / f"v{version}.md"

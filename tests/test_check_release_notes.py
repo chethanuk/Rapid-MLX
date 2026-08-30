@@ -9,7 +9,9 @@ from scripts.check_release_notes import check_release_notes, main
 def _inputs(tmp_path: Path, version: str = "0.13.2") -> tuple[Path, Path]:
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(
-        f"# Changelog\n\n## [{version}] — 2026-08-27\n\nDesktop changes.\n",
+        f"# Changelog\n\n## [{version}] — 2026-08-27\n\nDesktop changes.\n\n"
+        f"[Unreleased]: https://example.test/compare/rapid-mac-v{version}...HEAD\n"
+        f"[{version}]: https://example.test/compare/rapid-mac-v0.0.0...rapid-mac-v{version}\n",
         encoding="utf-8",
     )
     notes_dir = tmp_path / "release-notes"
@@ -57,6 +59,28 @@ def test_empty_version_bound_notes_file_is_rejected(tmp_path: Path) -> None:
     (notes_dir / "v0.13.2.md").write_text(" \n", encoding="utf-8")
     with pytest.raises(ValueError, match="add curated release notes"):
         check_release_notes("0.13.2", changelog, notes_dir)
+
+
+def test_missing_version_comparison_is_rejected(tmp_path: Path) -> None:
+    changelog, notes_dir = _inputs(tmp_path)
+    changelog.write_text(
+        changelog.read_text(encoding="utf-8").replace("[0.13.2]:", "[0.13.1]:"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="comparison ending at rapid-mac-v0.13.2"):
+        check_release_notes("0.13.2", changelog, notes_dir)
+
+
+def test_unreleased_comparison_must_start_at_current_tag(tmp_path: Path) -> None:
+    changelog, notes_dir = _inputs(tmp_path, "0.14.0-rc1")
+    changelog.write_text(
+        changelog.read_text(encoding="utf-8").replace(
+            "rapid-mac-v0.14.0-rc1...HEAD", "rapid-mac-v0.14.0...HEAD"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="does not compare rapid-mac-v0.14.0-rc1"):
+        check_release_notes("0.14.0-rc1", changelog, notes_dir)
 
 
 @pytest.mark.parametrize("version", ["0.13", "0.13.2-rc0", "../0.13.2"])
