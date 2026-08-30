@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +328,55 @@ def test_start_set_guard_fails_closed_on_partial_jsonl(tmp_path: Path):
     )
     assert result.returncode == 1
     assert "FAIL:" in result.stderr
+
+
+def test_sidecar_health_guard_bounds_a_connected_nonresponsive_peer(tmp_path: Path):
+    """A listener that accepts but never replies cannot hang the health gate."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    release = threading.Event()
+
+    def hold_connection() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            release.wait(timeout=5)
+
+    thread = threading.Thread(target=hold_connection, daemon=True)
+    thread.start()
+    events_dir = tmp_path / "evidence"
+    events_dir.mkdir()
+    (events_dir / "fake-events.jsonl").write_text(
+        json.dumps({"event": "server_started", "alias": "fake-alias", "port": port})
+        + "\n"
+    )
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'harness="$1"; evidence="$2"; set --; source "$harness"; '
+                'OUT="$evidence"; wait_fake_sidecar_health '
+                '"fake-alias" "test sidecar" 1',
+                "gui-contract-test",
+                str(HARNESS),
+                str(events_dir),
+            ],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    finally:
+        release.set()
+        listener.close()
+        thread.join(timeout=1)
+
+    assert result.returncode == 1
+    assert "started but never served health" in result.stderr
 
 
 def test_audio_control_journey_is_blocking_gui_ci_and_has_failure_evidence():

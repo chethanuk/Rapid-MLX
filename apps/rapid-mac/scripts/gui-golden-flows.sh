@@ -149,6 +149,27 @@ assert_fake_server_starts() {
     die "$phase could not validate the sidecar event log"
 }
 
+# A recorded spawn is intentionally weaker than readiness: the fake writes
+# ``server_started`` immediately before binding its HTTP server.  Keep the
+# wire-side boundary explicit so a GUI assertion can distinguish a sidecar
+# that never became reachable from a slower app state transition.
+wait_fake_sidecar_health() {
+    local expected_alias="$1" what="$2" attempts="${3:-40}" sidecar_port i
+    sidecar_port="$(jq -rs --arg alias "$expected_alias" \
+        'map(select(.event == "server_started" and .alias == $alias))
+         | last | .port // empty' "$OUT/fake-events.jsonl")"
+    [[ "$sidecar_port" =~ ^[0-9]+$ ]] \
+        || die "$what did not record a valid sidecar port"
+    for ((i=0; i<attempts; i++)); do
+        if curl -fsS --connect-timeout 1 --max-time 1 \
+            "http://127.0.0.1:$sidecar_port/healthz" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    die "$what started but never served health on :$sidecar_port"
+}
+
 require_observed_phase() {
     local observed="$1" phase="$2"
     [[ "$observed" == 1 ]] || die "required $phase phase was not observed"
@@ -4143,26 +4164,6 @@ wait_fake_event() {
         sleep 0.25
     done
     die "$what"
-}
-
-# A recorded spawn is intentionally weaker than readiness: the fake writes
-# ``server_started`` immediately before binding its HTTP server.  Keep the
-# wire-side boundary explicit so a GUI assertion can distinguish a sidecar
-# that never became reachable from a slower app state transition.
-wait_fake_sidecar_health() {
-    local expected_alias="$1" what="$2" sidecar_port i
-    sidecar_port="$(jq -rs --arg alias "$expected_alias" \
-        'map(select(.event == "server_started" and .alias == $alias))
-         | last | .port // empty' "$OUT/fake-events.jsonl")"
-    [[ "$sidecar_port" =~ ^[0-9]+$ ]] \
-        || die "$what did not record a valid sidecar port"
-    for ((i=0; i<40; i++)); do
-        if curl -fsS "http://127.0.0.1:$sidecar_port/healthz" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    die "$what started but never served health on :$sidecar_port"
 }
 
 # Put text in the Images composer and PROVE it arrived.
