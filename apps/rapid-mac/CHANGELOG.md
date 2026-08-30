@@ -158,6 +158,10 @@ can actually understand.
   remains over budget, the server warns and leaves the existing downstream
   prefill-cap guard as the final rejection boundary.
   ([#2694](https://github.com/raullenchai/Rapid-MLX/pull/2694))
+- **Image edits preserve the source canvas.** Editing an uploaded image derives
+  the output dimensions from that image instead of silently selecting the
+  text-to-image 1024×1024 default. Square and non-square FLUX.2 Klein edits
+  retain their original dimensions. ([#2759](https://github.com/raullenchai/Rapid-MLX/pull/2759))
 - **Forced assistant prefixes no longer wait for the first decoded token.** The
   prefix is emitted after scheduler admission, while empty, failed, and
   cancelled streams clean up their pending admission work.
