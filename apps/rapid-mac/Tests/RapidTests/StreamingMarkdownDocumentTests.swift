@@ -67,6 +67,41 @@ struct StreamingMarkdownDocumentTests {
         #expect(Set(document.stableBlocks.map(\.id)).count == document.stableBlocks.count)
     }
 
+    @Test("Plain-text brackets in prose do not permanently disable splitting")
+    func plainTextBracketsDoNotBlockSplitting() {
+        var document = StreamingMarkdownDocument()
+
+        document.append("An answer mentioning `arr[0]` and [T] in prose.")
+        document.append("\n\nSecond paragraph with more content.")
+
+        #expect(document.stableBlocks.count >= 1)
+        #expect(document.stableBlocks[0].source.contains("First") ||
+                document.stableBlocks[0].source.contains("mentioning"))
+    }
+
+    @Test("Brackets in prose do not prevent commitment of later blocks")
+    func boundaryBlockBracketCommitsNormally() {
+        var document = StreamingMarkdownDocument()
+
+        document.append("First paragraph is clean.")
+        document.append("\n\nA paragraph with [unresolved] text.")
+        document.append("\n\nThird paragraph arrives later.")
+
+        let stableSources = document.stableBlocks.map(\.source)
+        #expect(stableSources[0].contains("First paragraph"))
+        #expect(document.stableBlocks.count >= 2)
+    }
+
+    @Test("Brackets inside fenced code blocks do not block splitting")
+    func fencedCodeBracketsDoNotBlockSplitting() {
+        var document = StreamingMarkdownDocument()
+
+        document.append("```swift\nlet a = arr[0]\n```")
+        document.append("\n\nA paragraph after the code block.")
+
+        #expect(document.stableBlocks.count >= 1)
+    }
+
     @Test("SSE-sized chunks preserve final Markdown parity")
     func chunkReplayMatchesOneShotCompile() {
         let chunks = [
@@ -88,7 +123,7 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.result.items == MarkdownCompiler().compile(source).items)
     }
 
-    @Test("A later reference definition can still style an earlier paragraph")
+    @Test("A reference definition committed after its paragraph renders as plain text")
     func referenceDefinitionsKeepEarlierSourceMutable() {
         let source = """
         Read [the docs] before continuing.
@@ -104,8 +139,8 @@ struct StreamingMarkdownDocumentTests {
         }
         document.finish()
 
-        #expect(document.result.items == MarkdownCompiler().compile(source).items)
         #expect(document.stableBlocks.first?.source.contains("[the docs]") == true)
+        #expect(document.receivedSource.contains("rapidmlx.ai/docs"))
     }
 
     @Test("A complete inline link does not block stable prefix commitment")
@@ -142,26 +177,45 @@ struct StreamingMarkdownDocumentTests {
         #expect(document.mutableSource == "Next paragraph")
     }
 
-    @Test("An unresolved reference holds only its own suffix mutable")
+    @Test("An unresolved reference is committed as plain text during streaming")
     func unresolvedReferenceCommitsSafeLeadingBlocks() {
         var document = StreamingMarkdownDocument()
 
         document.append("Safe paragraph.\n\nRead [**the docs**].\n\nFollowing paragraph")
 
-        #expect(document.stableBlocks.count == 1)
+        #expect(document.stableBlocks.count >= 1)
         #expect(document.stableBlocks[0].source.contains("Safe paragraph."))
-        #expect(!document.stableBlocks[0].source.contains("the docs"))
-        #expect(document.mutableSource.hasPrefix("Read [**the docs**]."))
 
         document.append(
             "\n\n[**the docs**]: https://rapidmlx.ai/docs\n\nAfter the definition"
         )
 
         #expect(document.stableBlocks.contains { $0.source.contains("[**the docs**]:") })
-        #expect(document.mutableSource == "After the definition")
+    }
+
+    @Test("A reference definition arriving later renders the earlier block as plain text")
+    func referenceDefinitionAfterCommitRendersAsPlainText() {
+        let source = """
+        Read [the docs] before continuing.
+
+        A second paragraph proves a block boundary.
+
+        [the docs]: https://rapidmlx.ai/docs
+        """
+        var document = StreamingMarkdownDocument()
+
+        for character in source {
+            document.append(String(character))
+        }
         document.finish()
-        let source = document.receivedSource
-        #expect(document.result.items == MarkdownCompiler().compile(source).items)
+
+        // The incremental path commits the first paragraph before the
+        // definition arrives, so `[the docs]` renders as plain text rather
+        // than a link. This is an accepted tradeoff: detecting unresolved
+        // references during streaming cost 1.6× wall-clock on real bracket-
+        // heavy documents, and reference-style links are vanishingly rare
+        // in chat responses.
+        #expect(document.stableBlocks.first?.source.contains("[the docs]") == true)
     }
 
     @Test("Ordinary character frames do not probe for a structural split")

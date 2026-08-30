@@ -8,6 +8,9 @@ import SwiftUI
 struct TranscriptScrollPositionProbe: NSViewRepresentable {
     @Binding var isPinnedToBottom: Bool
     let bottomResumeSlack: CGFloat
+    /// Whether an answer is currently being written. Drives the one-shot
+    /// release described on ``Coordinator/releaseIfAnswerOutgrewViewport()``.
+    var isStreaming: Bool = false
     /// Bumped by anything outside that wants the transcript moved to the
     /// bottom right now, ``JumpToBottomButton`` being the only caller today.
     ///
@@ -37,6 +40,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
     }
 
     func updateNSView(_ probe: NSView, context: Context) {
+        context.coordinator.setStreaming(isStreaming)
         context.coordinator.update(
             isPinnedToBottom: $isPinnedToBottom,
             bottomResumeSlack: bottomResumeSlack
@@ -62,6 +66,10 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
         private var pendingBottomTargetIsAnimated = true
         private var targetScrollOrigin: NSPoint?
         private var displayLink: CADisplayLink?
+        /// Whether this stream has already handed control back to the reader.
+        private var didReleaseForCurrentStream = false
+        private var isStreaming = false
+        private var documentHeightAtStreamStart: CGFloat?
         /// Last document height handled by ``documentFrameDidChange``. AppKit
         /// can post several frame notifications for one layout pass; equal
         /// heights do not require another follow-to-bottom operation.
@@ -86,6 +94,50 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
             self.bottomResumeSlack = bottomResumeSlack
         }
 
+        func setStreaming(_ streaming: Bool) {
+            guard streaming != isStreaming else { return }
+            isStreaming = streaming
+            if streaming {
+                didReleaseForCurrentStream = false
+            } else {
+                documentHeightAtStreamStart = nil
+            }
+        }
+
+        /// Stop following the moment a streamed answer grows taller than the
+        /// viewport, once per stream.
+        ///
+        /// Following unconditionally is right while the answer still fits: the
+        /// text simply fills space the reader can already see. Past that point
+        /// every batch drags the viewport down, so the reader is held at the
+        /// newest words and cannot read the answer from its start without
+        /// fighting the scroll.
+        private func releaseIfAnswerOutgrewViewport() -> Bool {
+            guard isStreaming, !didReleaseForCurrentStream else { return false }
+            guard let scrollView, let documentView,
+                  let startingHeight = documentHeightAtStreamStart else { return false }
+            let viewportHeight = scrollView.contentView.bounds.height
+            guard Self.answerOutgrewViewport(
+                documentHeight: documentView.bounds.height,
+                documentHeightAtStreamStart: startingHeight,
+                viewportHeight: viewportHeight
+            ) else { return false }
+            didReleaseForCurrentStream = true
+            if isPinnedToBottom.wrappedValue {
+                isPinnedToBottom.wrappedValue = false
+            }
+            return true
+        }
+
+        nonisolated static func answerOutgrewViewport(
+            documentHeight: CGFloat,
+            documentHeightAtStreamStart: CGFloat,
+            viewportHeight: CGFloat
+        ) -> Bool {
+            viewportHeight > 0
+                && documentHeight - documentHeightAtStreamStart > viewportHeight
+        }
+
         func attach(to probe: NSView) {
             attachDisplayLink(to: probe)
             guard let enclosingScrollView = probe.enclosingScrollView else { return }
@@ -97,6 +149,9 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 attachmentChanged = true
             }
             attachmentChanged = observeDocumentViewIfNeeded() || attachmentChanged
+            if isStreaming, documentHeightAtStreamStart == nil {
+                documentHeightAtStreamStart = documentView?.bounds.height
+            }
             // updateNSView runs for every streamed mutation. Document-frame
             // notifications own steady-state following; only a new attachment
             // needs an explicit initial anchor (#1877).
@@ -184,6 +239,7 @@ struct TranscriptScrollPositionProbe: NSViewRepresentable {
                 from: previousHeight, to: height
             ) else { return }
             guard isPinnedToBottom.wrappedValue else { return }
+            if releaseIfAnswerOutgrewViewport() { return }
             requestScrollToBottom()
         }
 

@@ -33,11 +33,14 @@ struct JumpToBottomScrollTests {
     }
 
     private func makeCoordinator(
-        pinned: Binding<Bool>
+        pinned: Binding<Bool>,
+        isStreaming: Bool = false
     ) -> TranscriptScrollPositionProbe.Coordinator {
-        TranscriptScrollPositionProbe.Coordinator(
+        let coordinator = TranscriptScrollPositionProbe.Coordinator(
             isPinnedToBottom: pinned, bottomResumeSlack: 24
         )
+        coordinator.setStreaming(isStreaming)
+        return coordinator
     }
 
     /// Drains the target-update hop `requestScrollToBottom` schedules.
@@ -206,6 +209,47 @@ struct JumpToBottomScrollTests {
 
         #expect(pinned)
         #expect(scrollView.contentView.bounds.minY > 1_800)
+    }
+
+    @Test("Growth beyond one viewport releases the pin once per stream")
+    func growthBeyondViewportReleasesOnce() async {
+        var pinned = true
+        let binding = Binding(get: { pinned }, set: { pinned = $0 })
+        let (scrollView, document, probe) = makeScrollView()
+        let coordinator = makeCoordinator(pinned: binding, isStreaming: true)
+
+        coordinator.attach(to: probe)
+        await settle()
+        #expect(pinned)
+
+        document.setFrameSize(NSSize(width: 400, height: 4_000))
+        await settle()
+
+        #expect(!pinned)
+    }
+
+    @Test("Release is one-shot: an explicit Jump to Bottom re-pins and stays")
+    func rePinAfterReleaseStaysPinned() async {
+        var pinned = true
+        let binding = Binding(get: { pinned }, set: { pinned = $0 })
+        let (scrollView, document, probe) = makeScrollView()
+        let coordinator = makeCoordinator(pinned: binding, isStreaming: true)
+
+        coordinator.attach(to: probe)
+        await settle()
+
+        document.setFrameSize(NSSize(width: 400, height: 4_000))
+        await settle()
+        #expect(!pinned)
+
+        pinned = true
+        coordinator.honourScrollRequest(1)
+        await settle()
+        #expect(pinned)
+
+        document.setFrameSize(NSSize(width: 400, height: 6_000))
+        await settle()
+        #expect(pinned)
     }
 }
 

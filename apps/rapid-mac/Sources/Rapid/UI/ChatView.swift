@@ -384,6 +384,7 @@ struct ChatView: View {
                         TranscriptScrollPositionProbe(
                             isPinnedToBottom: $isPinnedToBottom,
                             bottomResumeSlack: bottomResumeSlack,
+                            isStreaming: viewModel.isStreaming,
                             scrollToBottomRequest: scrollToBottomRequest
                         )
                     )

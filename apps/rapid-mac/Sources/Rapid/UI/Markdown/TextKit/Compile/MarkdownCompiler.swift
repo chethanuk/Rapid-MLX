@@ -55,31 +55,6 @@ struct MarkdownCompiler: Sendable {
             return nil
         }
 
-        // Reparse only the candidate prefix so reference links count as
-        // resolved only when their definition is actually inside the chunk we
-        // are about to freeze. If one unresolved reference remains, commit the
-        // safe blocks before its top-level owner instead of pinning the whole
-        // growing answer behind it.
-        let stableDocument = Document(
-            parsing: String(stablePrefix),
-            options: [.parseBlockDirectives]
-        )
-        if let blockedLocation = Self.firstPotentialReferenceBlock(
-            in: stableDocument,
-            source: String(stablePrefix)
-        ),
-           let blockedStart = Self.index(at: blockedLocation, in: source) {
-            let safePrefix = source[..<blockedStart]
-            guard blockedStart > source.startIndex,
-                  Self.hasBlankLineBoundary(in: safePrefix) else {
-                return nil
-            }
-            return TopLevelStreamingSplit(
-                stablePrefix: String(safePrefix),
-                mutableTail: String(source[blockedStart...])
-            )
-        }
-
         return TopLevelStreamingSplit(
             stablePrefix: String(stablePrefix),
             mutableTail: String(source[tailStart...])
@@ -131,57 +106,6 @@ struct MarkdownCompiler: Sendable {
             }
         }
         return false
-    }
-
-    /// Return the first top-level block that still contains unresolved
-    /// reference-like syntax. swift-markdown turns a resolved reference into a
-    /// `Link`; code and HTML are opaque, so brackets in those nodes cannot hold
-    /// later blocks mutable.
-    private static func firstPotentialReferenceBlock(
-        in document: Document,
-        source: String
-    ) -> SourceLocation? {
-        for child in document.children
-        where containsPotentialReferenceLink(in: child, source: source) {
-            if let location = child.range?.lowerBound { return location }
-        }
-        return nil
-    }
-
-    private static func containsPotentialReferenceLink(
-        in markup: Markup,
-        source: String
-    ) -> Bool {
-        guard let scanRange = sourceRange(of: markup, in: source) else { return false }
-        var opaqueRanges: [Range<String.Index>] = []
-        collectReferenceOpaqueRanges(in: markup, source: source, into: &opaqueRanges)
-
-        var searchStart = scanRange.lowerBound
-        while searchStart < scanRange.upperBound,
-              let match = source.range(
-                of: #"(?<!\\)\[[^\]\n]+\](?!\()"#,
-                options: .regularExpression,
-                range: searchStart..<scanRange.upperBound
-              ) {
-            if !opaqueRanges.contains(where: { $0.overlaps(match) }) { return true }
-            searchStart = match.upperBound
-        }
-        return false
-    }
-
-    private static func collectReferenceOpaqueRanges(
-        in markup: Markup,
-        source: String,
-        into ranges: inout [Range<String.Index>]
-    ) {
-        switch markup {
-        case is CodeBlock, is InlineCode, is Link, is Image, is HTMLBlock, is InlineHTML:
-            if let range = sourceRange(of: markup, in: source) { ranges.append(range) }
-        default:
-            for child in markup.children {
-                collectReferenceOpaqueRanges(in: child, source: source, into: &ranges)
-            }
-        }
     }
 
     private static func sourceRange(
