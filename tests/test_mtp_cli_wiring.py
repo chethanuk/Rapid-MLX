@@ -1955,6 +1955,7 @@ def test_scheduler_text_stop_retires_mtp_state_before_next_request(monkeypatch):
 
     batch_gen, gb = _make_batch_gen_with_gb()
     present = {7}
+    cache_return_requests: list[bool] = []
 
     def find_uids(uids):
         return {
@@ -1964,6 +1965,7 @@ def test_scheduler_text_stop_retires_mtp_state_before_next_request(monkeypatch):
         }
 
     def remove(uids, return_prompt_caches=False):
+        cache_return_requests.append(return_prompt_caches)
         removed = [uid for uid in uids if uid in present]
         present.difference_update(removed)
         gb.uids = [uid for uid in gb.uids if uid in present]
@@ -1974,6 +1976,8 @@ def test_scheduler_text_stop_retires_mtp_state_before_next_request(monkeypatch):
     batch_gen._find_uids = find_uids
     batch_gen.remove = remove
     scheduler.batch_generator = batch_gen
+    scheduler.spec_decode_runtime_attempted = True
+    scheduler.spec_decode_runtime_method = "mtp"
 
     first = Request(
         "req-7",
@@ -2014,6 +2018,8 @@ def test_scheduler_text_stop_retires_mtp_state_before_next_request(monkeypatch):
     assert finished == {first.request_id}
     assert present == set()
     assert gb._mtp_vendored_state == {}
+    assert not hasattr(response, "prompt_cache")
+    assert cache_return_requests == [False]
 
     scheduler._cleanup_finished(finished)
     second = Request(

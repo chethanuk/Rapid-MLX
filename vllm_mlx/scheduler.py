@@ -7191,17 +7191,27 @@ class Scheduler:
         Text stop sequences and repetition-loop aborts are detected later by
         Rapid-MLX, after ``GenerationBatch.next()`` returned, so that row is
         still live. Remove it through the BatchGenerator lifecycle seam and
-        copy any returned cache onto the response before normal cache storage.
+        copy any committed cache onto the response before normal cache storage.
+
+        An MTP generator can have verified lookahead in its private cache past
+        the one token surfaced by this response. Its rollback occurs only when
+        the generator resumes, which a scheduler-side stop deliberately skips.
+        Never publish that speculative cache as a reusable conversation prefix;
+        closing the request and discarding the cache is the only lossless
+        terminal action until the verifier exposes a committed-cache boundary.
         """
         batch_generator = self.batch_generator
         if batch_generator is None:
             raise RuntimeError(
                 "scheduler generated a terminal response without a BatchGenerator"
             )
+        retain_cache = getattr(self, "spec_decode_runtime_method", None) != "mtp"
         caches = batch_generator.remove(
             [response.uid],
-            return_prompt_caches=True,
+            return_prompt_caches=retain_cache,
         )
+        if not retain_cache:
+            return
         cached = caches.get(response.uid) if isinstance(caches, dict) else None
         if cached is None:
             return
