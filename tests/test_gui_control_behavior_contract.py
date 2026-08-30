@@ -387,13 +387,23 @@ def test_sidecar_health_guard_bounds_a_connected_nonresponsive_peer(tmp_path: Pa
     assert "started but never served its own health" in result.stderr
 
 
-def test_sidecar_health_guard_rejects_a_competing_listener(tmp_path: Path):
-    """A 200 from a process other than the recorded fake is not readiness."""
+@pytest.mark.parametrize(
+    ("response_pid_delta", "expected_returncode"),
+    [(0, 0), (1, 1)],
+)
+def test_sidecar_health_guard_requires_the_recorded_identity(
+    tmp_path: Path, response_pid_delta: int, expected_returncode: int
+):
+    """Matching health passes; a competing process on the port is rejected."""
 
-    class CompetingHealthHandler(http.server.BaseHTTPRequestHandler):
+    class IdentityHealthHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - stdlib handler API
             payload = json.dumps(
-                {"ok": True, "pid": os.getpid() + 1, "alias": "fake-alias"}
+                {
+                    "ok": True,
+                    "pid": os.getpid() + response_pid_delta,
+                    "alias": "fake-alias",
+                }
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -404,7 +414,7 @@ def test_sidecar_health_guard_rejects_a_competing_listener(tmp_path: Path):
         def log_message(self, _format, *_args):
             return
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CompetingHealthHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), IdentityHealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     events_dir = tmp_path / "evidence"
@@ -444,8 +454,11 @@ def test_sidecar_health_guard_rejects_a_competing_listener(tmp_path: Path):
         server.server_close()
         thread.join(timeout=1)
 
-    assert result.returncode == 1
-    assert "started but never served its own health" in result.stderr
+    assert result.returncode == expected_returncode
+    if expected_returncode:
+        assert "started but never served its own health" in result.stderr
+    else:
+        assert result.stderr == ""
 
 
 def test_audio_control_journey_is_blocking_gui_ci_and_has_failure_evidence():
