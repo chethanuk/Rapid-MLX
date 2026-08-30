@@ -331,6 +331,7 @@ async def test_dynamic_switch_restores_hybrid_text_lane(
     import json
 
     from vllm_mlx import server
+    from vllm_mlx.api import utils as utils_mod
 
     large = tmp_path / "qwen35-9b"
     small = tmp_path / "qwen3-06b"
@@ -381,15 +382,11 @@ async def test_dynamic_switch_restores_hybrid_text_lane(
 
     monkeypatch.setattr(server, "BatchedEngine", FakeEngine)
     monkeypatch.setattr("vllm_mlx.model_aliases.resolve_profile", lambda _name: None)
-    monkeypatch.setattr(
-        server,
-        "resolve_serving_lane_decision",
-        lambda model_name, **_kwargs: SimpleNamespace(
-            is_mllm=False,
-            reason="text_lane_forced",
-            auto_text_fallback=str(model_name).endswith("qwen35-9b"),
-        ),
-    )
+    # Exercise the real resolver across both switches.  Only host capabilities
+    # are fixed: the large checkpoint's own metadata must select the hybrid
+    # text fallback, while the small text checkpoint must not inherit it.
+    monkeypatch.setattr(utils_mod, "physical_ram_gb", lambda: 256.0)
+    monkeypatch.setattr(utils_mod, "mllm_hybrid_runtime_supported", lambda: False)
 
     await server._load_dynamic_resident_model("large", str(large))
     await server._load_dynamic_resident_model("small", str(small))
@@ -401,6 +398,11 @@ async def test_dynamic_switch_restores_hybrid_text_lane(
         str(large),
     ]
     assert [item["force_text"] for item in constructed] == [True, False, True]
+    assert [item["serving_lane_reason"] for item in constructed] == [
+        "vision_hybrid_runtime_unsupported",
+        "text_checkpoint",
+        "vision_hybrid_runtime_unsupported",
+    ]
 
 
 class FakeEngine:
