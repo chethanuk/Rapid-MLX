@@ -56,9 +56,10 @@ def test_tier1_candidate_installs_reduced_vision_runtime_for_multimodal_roster()
     )
 
     assert "gemma-4-26b-4bit" in roster["top_10_aliases"]
-    assert (
-        '"$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"' in gate
+    candidate_install = gate.index(
+        '"$V/bin/pip" install -q --constraint "$CONSTRAINTS" "$CANDIDATE_WHEEL"'
     )
+    pip_check = gate.index('"$V/bin/pip" check')
     reduced_install = gate.index(
         '"$V/bin/pip" install -q --no-deps --constraint "$CONSTRAINTS"'
     )
@@ -66,7 +67,13 @@ def test_tier1_candidate_installs_reduced_vision_runtime_for_multimodal_roster()
     roster_run = gate.index(
         'RAPID_MLX_VENV="$V" bash tests/integrations/agent_smoke.sh'
     )
-    assert reduced_install < distribution_check < roster_run
+    assert (
+        candidate_install
+        < pip_check
+        < reduced_install
+        < distribution_check
+        < roster_run
+    )
     assert "'mlx-vlm' 'Pillow>=10.0'" in gate
 
 
