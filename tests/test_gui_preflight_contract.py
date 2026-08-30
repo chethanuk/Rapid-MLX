@@ -208,9 +208,7 @@ def test_cached_curated_tradeup_confirms_the_quickstart_memory_sheet():
     flow = source.split("flow_cached_curated_tradeup() {", 1)[1].split("\n}", 1)[0]
 
     assert 'identifier == "Quickstart.Memory.LoadAnyway"' in flow
-    assert (
-        '"$AX_DRIVER" click-center "$APP_PID" Quickstart.Memory.LoadAnyway' in flow
-    )
+    assert '"$AX_DRIVER" click-center "$APP_PID" Quickstart.Memory.LoadAnyway' in flow
     assert 'identifier == "MemoryWarning.Confirm"' not in flow
 
 
