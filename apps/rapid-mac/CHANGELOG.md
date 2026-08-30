@@ -17,7 +17,7 @@ can actually understand.
 
 ## [Unreleased]
 
-## [0.13.2] — 2026-08-30
+## [0.13.2-rc1] — 2026-08-30
 
 ### Added
 
