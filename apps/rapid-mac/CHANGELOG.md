@@ -17,7 +17,7 @@ can actually understand.
 
 ## [Unreleased]
 
-## [0.13.2] — 2026-08-29
+## [0.13.2] — 2026-08-30
 
 ### Added
 
@@ -35,6 +35,11 @@ can actually understand.
   surface and client attribution; raw user-agent text is never emitted.
   ([#2428](https://github.com/raullenchai/Rapid-MLX/pull/2428),
   [#2436](https://github.com/raullenchai/Rapid-MLX/pull/2436))
+- **Conversation titles and next-step suggestions.** After the first completed
+  exchange, Desktop can derive one short local title without overwriting a user
+  rename. Settled text answers can also offer three optional follow-up prompts;
+  malformed, duplicate, or incomplete suggestions remain hidden.
+  ([#2698](https://github.com/raullenchai/Rapid-MLX/pull/2698))
 
 ### Changed
 
@@ -81,6 +86,10 @@ can actually understand.
   runtime component from inside a request; it returns an actionable readiness
   error instead. ([#2648](https://github.com/raullenchai/Rapid-MLX/pull/2648),
   [#2664](https://github.com/raullenchai/Rapid-MLX/pull/2664))
+- **Parakeet v3 reports its complete language support.** Registry metadata and
+  the Desktop picker now agree on all 25 supported ISO languages and automatic
+  language detection instead of describing the checkpoint as English-only.
+  ([#2729](https://github.com/raullenchai/Rapid-MLX/pull/2729))
 - **Qwen3.8 tool calls use the checkpoint's native wire format.** Required and
   named tool calls return OpenAI-compatible JSON arguments, and malformed
   required arguments fail with a client error instead of looking executable.
@@ -136,6 +145,13 @@ can actually understand.
   listing, pull admission, or chat model switching.
   ([#2610](https://github.com/raullenchai/Rapid-MLX/pull/2610),
   [#2613](https://github.com/raullenchai/Rapid-MLX/pull/2613))
+- **Pulled variants resolve consistently on serve.** Pulling an explicit
+  `--bits` or `--format` variant records the selected subfolder so `serve`
+  loads the same checkpoint instead of the repository root. Catalog aliases
+  retain precedence over the pull marker, and mirror-backed pulls now commit
+  the same selection as fallback downloads.
+  ([#2558](https://github.com/raullenchai/Rapid-MLX/pull/2558),
+  [#2750](https://github.com/raullenchai/Rapid-MLX/pull/2750))
 - **Oversized vision inputs fit the request budget automatically.** Images are
   reduced against the model's patch-aware token ceiling before preprocessing,
   with one measured retry for processor rounding. If the minimum aligned image
@@ -150,6 +166,10 @@ can actually understand.
   preflights the full verify-forward cache growth and falls back to ordinary
   decoding when advancing would make rollback unsafe, rather than aborting the
   request. ([#2682](https://github.com/raullenchai/Rapid-MLX/pull/2682))
+- **Terminal MTP responses cannot publish speculative cache state.** When a
+  response finishes before every verified draft token is emitted, Rapid drops
+  that response's reusable cache rather than exposing state ahead of the
+  visible output. ([#2751](https://github.com/raullenchai/Rapid-MLX/pull/2751))
 
 ### Security
 
@@ -161,17 +181,23 @@ can actually understand.
 - **Desktop web browsing pins the validated destination.** Every DNS answer is
   checked by the existing SSRF policy, then the socket connects directly to
   the selected address while retaining the original hostname for TLS and
-  certificate validation. This closes the DNS-rebinding window without
-  weakening redirect, body-size, or timeout limits.
-  ([#2645](https://github.com/raullenchai/Rapid-MLX/pull/2645))
+  certificate validation. Validated IPv4 and IPv6 destinations are raced with
+  a short stagger, so one black-holed route cannot consume the whole browse
+  deadline. This closes the DNS-rebinding window without weakening redirect,
+  body-size, or timeout limits.
+  ([#2645](https://github.com/raullenchai/Rapid-MLX/pull/2645),
+  [#2747](https://github.com/raullenchai/Rapid-MLX/pull/2747))
 
 ### Release engineering
 
 - Signed Desktop candidates identify their exact source commit, and protected
   publication promotes the already reviewed DMG, Sparkle archive, appcast, and
-  release notes instead of rebuilding different bytes after the tag.
+  release notes instead of rebuilding different bytes after the tag. The same
+  candidate wheel is installed in Tier 1 and promoted into the Desktop sidecar,
+  while text and multimodal lanes share an explicit request-contract matrix.
   ([#2450](https://github.com/raullenchai/Rapid-MLX/pull/2450),
-  [#2530](https://github.com/raullenchai/Rapid-MLX/pull/2530))
+  [#2530](https://github.com/raullenchai/Rapid-MLX/pull/2530),
+  [#2726](https://github.com/raullenchai/Rapid-MLX/pull/2726))
 
 ## [0.13.1] — 2026-08-26
 
