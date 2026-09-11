@@ -139,10 +139,19 @@ class Model(nn.Module):
         return ModelCache(self.args, bsz, max_seq_len, dtype)
 
     def __call__(
-        self, input_ids: mx.array, cache: ModelCache, last_logit_only: bool = False
-    ) -> mx.array:
+        self,
+        input_ids: mx.array,
+        cache: ModelCache,
+        last_logit_only: bool = False,
+        return_dspark_hidden: bool = False,
+        enable_rollback: bool = False,
+    ) -> mx.array | tuple[mx.array, mx.array]:
         """input_ids [b, n] continue the sequence at cache.offset. Advances the cache."""
         start_pos = cache.offset
+        if enable_rollback:
+            cache.begin_forward()
+        elif cache.rollback_start is not None:
+            cache.disable_rollback()
         b, n = input_ids.shape
 
         hashes = None
@@ -161,7 +170,11 @@ class Model(nn.Module):
 
         pre_mix = make_identity_pre_mix(b, n, self.hc_mult)
         shared = SharedState()
-        for layer_index, layer in enumerate(self.layers, 1):
+        dspark_hiddens = {}
+        for execution_index, layer in enumerate(self.layers, 1):
+            layer_id = execution_index - 1
+            if return_dspark_hidden and layer_id in self.args.dspark_target_layer_ids:
+                dspark_hiddens[layer_id] = mx.mean(h, axis=2)
             if layer.engram is not None:
                 assert hashes is not None
                 h = layer.engram(h, hashes[:, :, layer.engram.layer_hash_index])
@@ -178,7 +191,7 @@ class Model(nn.Module):
                 h, pre_mix = layer(h, pre_mix, start_pos, cache, shared_use)
             else:
                 h, pre_mix = layer(h, pre_mix, start_pos, cache, shared)
-            if self.eval_interval and layer_index % self.eval_interval == 0:
+            if self.eval_interval and execution_index % self.eval_interval == 0:
                 mx.eval(h, pre_mix)
 
         h = hc_pre(h, pre_mix)  # collapse with the last ffn_pre
@@ -187,4 +200,17 @@ class Model(nn.Module):
             h = h[:, -1:]
         logits = self.head(h.astype(mx.float32))  # fp32 logits, as the reference
         cache.offset = start_pos + n
+        if return_dspark_hidden:
+            missing = [
+                layer_id
+                for layer_id in self.args.dspark_target_layer_ids
+                if layer_id not in dspark_hiddens
+            ]
+            if missing:
+                raise RuntimeError("DSpark target hidden-state capture is incomplete")
+            ordered = [
+                dspark_hiddens[layer_id]
+                for layer_id in self.args.dspark_target_layer_ids
+            ]
+            return logits, mx.concatenate(ordered, axis=-1)
         return logits

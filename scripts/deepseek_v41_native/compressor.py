@@ -63,6 +63,13 @@ class Compressor(nn.Module):
         # features. The module call is identical for dense public builds.
         kv = self.wkv(xf)
         score = self.wgate(xf)
+        # Retain this call's unpooled source rows so speculative verification
+        # can restore the one-token partial group after rolling back a chunk.
+        # The arrays are tiny (three source layers x at most six rows x 512).
+        if comp_state.rollback_enabled:
+            comp_state.pending_start = start_pos
+            comp_state.pending_kv = kv
+            comp_state.pending_score = score
 
         m = start_pos % ratio  # carried tokens of the open group
         if m:
@@ -90,3 +97,59 @@ class CompressorState:
     def __init__(self, bsz: int, ratio: int, head_dim: int):
         self.kv_state = mx.zeros((bsz, ratio, head_dim), dtype=mx.float32)
         self.score_state = mx.full((bsz, ratio, head_dim), NEG_INF, dtype=mx.float32)
+        self.pending_start: int | None = None
+        self.pending_kv: mx.array | None = None
+        self.pending_score: mx.array | None = None
+        self.snapshot_offset: int | None = None
+        self.snapshot_kv: mx.array | None = None
+        self.snapshot_score: mx.array | None = None
+        self.rollback_enabled = False
+
+    def begin_forward(self, offset: int) -> None:
+        """Snapshot the carried partial group for latest-forward rollback."""
+        self.rollback_enabled = True
+        self.snapshot_offset = offset
+        self.snapshot_kv = self.kv_state + mx.zeros_like(self.kv_state)
+        self.snapshot_score = self.score_state + mx.zeros_like(self.score_state)
+
+    def rollback(self, offset: int) -> None:
+        """Restore the open compression group at ``offset`` after chunk verify."""
+        if not self.rollback_enabled:
+            raise RuntimeError("compression rollback was not enabled for this forward")
+        if offset == self.snapshot_offset:
+            if self.snapshot_kv is None or self.snapshot_score is None:
+                raise RuntimeError("compression rollback has no forward snapshot")
+            self.kv_state[:] = self.snapshot_kv
+            self.score_state[:] = self.snapshot_score
+            mx.eval(self.kv_state, self.score_state)
+            return
+        remainder = offset % self.kv_state.shape[1]
+        if remainder == 0:
+            self.kv_state[:] = 0
+            self.score_state[:] = NEG_INF
+            mx.eval(self.kv_state, self.score_state)
+            return
+        if (
+            self.pending_start is None
+            or self.pending_kv is None
+            or self.pending_score is None
+        ):
+            raise RuntimeError("compression rollback has no pending chunk")
+        first = offset - remainder
+        start = first - self.pending_start
+        if start < 0 or start + remainder > self.pending_kv.shape[1]:
+            raise RuntimeError("compression rollback precedes the pending chunk")
+        self.kv_state[:, :remainder] = self.pending_kv[:, start : start + remainder]
+        self.score_state[:, :remainder] = self.pending_score[
+            :, start : start + remainder
+        ]
+        mx.eval(self.kv_state, self.score_state)
+
+    def disable_rollback(self) -> None:
+        self.rollback_enabled = False
+        self.pending_start = None
+        self.pending_kv = None
+        self.pending_score = None
+        self.snapshot_offset = None
+        self.snapshot_kv = None
+        self.snapshot_score = None
